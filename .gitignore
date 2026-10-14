@@ -4,3 +4,10 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 examples/output/
+
+# .NET build output
+bin/
+obj/
+
+# Agent session scratch (plan-mode drafts)
+.zcode/plans/

@@ -1,0 +1,325 @@
+using System.Text.Json.Nodes;
+using AcadMcp.Core;
+
+namespace AcadMcp.Core.Tests;
+
+/// <summary>
+/// Serialisation, with the emphasis on what happens when the payload is wrong.
+/// The journal is read back out of a drawing file a person may have edited by
+/// hand, so the reader must never raise and must never invent history.
+/// </summary>
+public class JournalJsonTests
+{
+    private static StepRecord SampleStep() => new()
+    {
+        State = StepState.Done,
+        Op = "draw_room",
+        Label = "draw_room \u65e0\u83cc\u5ba4",
+        Note = "checked",
+        Result = "area 11.76",
+        Transaction = "AcadMcp: #1 draw_room",
+        Mutated = true,
+        Atomic = true,
+        Executable = true,
+        Accepted = true,
+        Drifted = true,
+        ObjectsBefore = ["2F0"],
+        ObjectsAfter = ["2F1", "2F2"],
+        Params = new JsonObject { ["name"] = "\u65e0\u83cc\u5ba4", ["thickness"] = 200 },
+        Primitives =
+        [
+            new Primitive
+            {
+                Kind = PrimitiveKind.Polyline,
+                Points = [0, 0, 4000, 0, 4000, 3000, 0, 3000],
+                Closed = true,
+                Layer = "A-WALL",
+                Linetype = "DASHED",
+            },
+            new Primitive
+            {
+                Kind = PrimitiveKind.Text,
+                Points = [2000, 1500],
+                Text = "\u65e0\u83cc\u5ba4",
+                Height = 350,
+                Align = "center",
+                Layer = "A-ROOM-NAME",
+            },
+            new Primitive { Kind = PrimitiveKind.Hatch, Pattern = "ANSI31", Scale = 40, Solid = false },
+            new Primitive { Kind = PrimitiveKind.Circle, Points = [0, 0], Radius = 400 },
+            new Primitive { Kind = PrimitiveKind.Dimension, Points = [0, 0, 6000, 0], Offset = -1600 },
+        ],
+        Timestamp = new DateTime(2026, 10, 15, 9, 30, 0, DateTimeKind.Local),
+        DurationMs = 42,
+    };
+
+    // ---------------------------------------------------------------- round trip
+
+    [Fact]
+    public void RoundTripPreservesEveryField()
+    {
+        var journal = new Journal { Description = "floor plan" };
+        journal.AddExecuted(SampleStep());
+
+        var reloaded = JournalJson.FromJson(JournalJson.ToJson(journal));
+
+        Assert.Equal("floor plan", reloaded.Description);
+        var step = reloaded.At(1)!;
+        Assert.Equal(StepState.Done, step.State);
+        Assert.Equal("draw_room", step.Op);
+        Assert.Equal("draw_room \u65e0\u83cc\u5ba4", step.Label);
+        Assert.Equal("checked", step.Note);
+        Assert.Equal("AcadMcp: #1 draw_room", step.Transaction);
+        Assert.True(step.Accepted);
+        Assert.True(step.Drifted);
+        Assert.Equal(["2F0"], step.ObjectsBefore);
+        Assert.Equal(["2F1", "2F2"], step.ObjectsAfter);
+        Assert.Equal(42, step.DurationMs);
+        Assert.Equal(new DateTime(2026, 10, 15, 9, 30, 0, DateTimeKind.Local), step.Timestamp);
+    }
+
+    [Fact]
+    public void ChineseTextSurvivesTheRoundTrip_AndIsStoredAsAscii()
+    {
+        var journal = new Journal();
+        journal.AddExecuted(SampleStep());
+
+        var json = JournalJson.ToJson(journal);
+
+        // The writer escapes non-ASCII deliberately, and the invariant worth
+        // pinning is that the payload is pure ASCII: an Xrecord is a DXF string,
+        // so ASCII-only content sidesteps codepage conversion inside the DWG.
+
+        var step = JournalJson.FromJson(json).At(1)!;
+        Assert.Equal("\u65e0\u83cc\u5ba4", step.Params!["name"]!.GetValue<string>());
+        Assert.Equal("draw_room \u65e0\u83cc\u5ba4", step.Label);
+        Assert.Equal("\u65e0\u83cc\u5ba4", step.Primitives[1].Text);
+    }
+
+    [Fact]
+    public void RoundTripPreservesPrimitives()
+    {
+        var journal = new Journal();
+        journal.AddExecuted(SampleStep());
+
+        var step = JournalJson.FromJson(JournalJson.ToJson(journal)).At(1)!;
+
+        Assert.Equal(5, step.Primitives.Count);
+        Assert.Equal(PrimitiveKind.Polyline, step.Primitives[0].Kind);
+        Assert.True(step.Primitives[0].Closed);
+        Assert.Equal("DASHED", step.Primitives[0].Linetype);
+        Assert.Equal(4, step.Primitives[0].PointCount);
+        Assert.Equal(PrimitiveKind.Text, step.Primitives[1].Kind);
+        Assert.Equal(350, step.Primitives[1].Height);
+        Assert.Equal("center", step.Primitives[1].Align);
+        Assert.Equal(40, step.Primitives[2].Scale);
+        Assert.Equal(400, step.Primitives[3].Radius);
+        Assert.Equal(-1600, step.Primitives[4].Offset);
+    }
+
+    [Fact]
+    public void AnEmptyJournalRoundTrips()
+    {
+        var reloaded = JournalJson.FromJson(JournalJson.ToJson(new Journal()));
+
+        Assert.True(reloaded.IsEmpty);
+    }
+
+    [Fact]
+    public void DescriptionSurvivesWithNoRecords()
+    {
+        var journal = new Journal { Description = "planned only" };
+
+        Assert.Equal("planned only", JournalJson.FromJson(JournalJson.ToJson(journal)).Description);
+    }
+
+    // ---------------------------------------------------------------- tolerance
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("not json at all")]
+    [InlineData("{")]
+    [InlineData("[]")]
+    [InlineData("\"a string\"")]
+    [InlineData("42")]
+    [InlineData("null")]
+    public void GarbageYieldsAnEmptyJournalAndNeverThrows(string? payload)
+    {
+        var journal = JournalJson.FromJson(payload);
+
+        Assert.True(journal.IsEmpty);
+    }
+
+    [Fact]
+    public void AJournalObjectWithNoRecordsArrayIsEmpty()
+    {
+        Assert.True(JournalJson.FromJson("{\"version\":1,\"description\":\"x\"}").IsEmpty);
+    }
+
+    [Fact]
+    public void AMalformedRecordIsSkippedAndTheRestSurvive()
+    {
+        const string payload = """
+            {"version":1,"records":[
+              {"index":1,"state":"done","op":"first","objects_after":["H1"]},
+              "this is not an object",
+              {"index":3,"state":"done","op":"third","objects_after":["H3"]}
+            ]}
+            """;
+
+        var journal = JournalJson.FromJson(payload);
+
+        Assert.Equal(2, journal.Count);
+        Assert.Equal("first", journal.At(1)!.Op);
+        Assert.Equal("third", journal.At(2)!.Op);
+    }
+
+    [Fact]
+    public void MissingFieldsFallBackToSafeDefaults()
+    {
+        var journal = JournalJson.FromJson("{\"records\":[{\"op\":\"bare\"}]}");
+
+        var step = journal.At(1)!;
+        Assert.Equal("bare", step.Op);
+        Assert.True(step.Mutated);
+        Assert.True(step.Atomic);
+        Assert.True(step.Executable);
+        Assert.False(step.Accepted);
+        Assert.False(step.Drifted);
+        Assert.Equal("", step.Transaction);
+        Assert.Null(step.Params);
+        Assert.Empty(step.Primitives);
+    }
+
+    [Fact]
+    public void FieldsOfTheWrongTypeFallBackRatherThanThrow()
+    {
+        const string payload = """
+            {"records":[{"op":123,"mutated":"not a bool","objects_after":"nope","duration_ms":"x"}]}
+            """;
+
+        var step = JournalJson.FromJson(payload).At(1)!;
+
+        Assert.Equal("", step.Op);
+        Assert.True(step.Mutated);
+        Assert.Empty(step.ObjectsAfter);
+        Assert.Equal(0, step.DurationMs);
+    }
+
+    [Fact]
+    public void NonStringEntriesInHandleListsAreDropped()
+    {
+        var journal = JournalJson.FromJson("{\"records\":[{\"objects_after\":[\"2F1\",7,null,\"2F2\"]}]}");
+
+        Assert.Equal(["2F1", "2F2"], journal.At(1)!.ObjectsAfter);
+    }
+
+    // ---------------------------------------------------------------- enum parsing
+
+    [Theory]
+    [InlineData("line", PrimitiveKind.Line)]
+    [InlineData("Line", PrimitiveKind.Line)]
+    [InlineData("POLYLINE", PrimitiveKind.Polyline)]
+    [InlineData("mtext", PrimitiveKind.MText)]
+    [InlineData("MText", PrimitiveKind.MText)]
+    [InlineData("M_TEXT", PrimitiveKind.MText)]
+    [InlineData("dimension", PrimitiveKind.Dimension)]
+    [InlineData("nonsense", PrimitiveKind.Line)]
+    [InlineData("", PrimitiveKind.Line)]
+    public void KindParsingIsCaseInsensitiveAndFallsBack(string raw, PrimitiveKind expected)
+    {
+        Assert.Equal(expected, JournalJson.ReadKind(raw));
+    }
+
+    [Theory]
+    [InlineData("planned", StepState.Planned)]
+    [InlineData("PLANNED", StepState.Planned)]
+    [InlineData("failed", StepState.Failed)]
+    [InlineData("Failed", StepState.Failed)]
+    [InlineData("done", StepState.Done)]
+    public void StateParsingIsCaseInsensitive(string raw, StepState expected)
+    {
+        Assert.Equal(expected, JournalJson.ReadState(raw));
+    }
+
+    [Fact]
+    public void AnUnreadableStateIsTreatedAsAppliedNotAsPlanned()
+    {
+        // Guessing "planned" here would let a rollback erase entities that the
+        // drawing still needs, so the safe direction is to assume they exist.
+        Assert.Equal(StepState.Done, JournalJson.ReadState("???"));
+    }
+
+    // ---------------------------------------------------------------- primitive behaviour
+
+    [Fact]
+    public void PointAtReturnsZeroBeyondTheEnd()
+    {
+        var primitive = new Primitive { Points = [10, 20, 30, 40] };
+
+        Assert.Equal((10, 20), primitive.PointAt(0));
+        Assert.Equal((30, 40), primitive.PointAt(1));
+        Assert.Equal((0, 0), primitive.PointAt(2));
+        Assert.Equal((0, 0), primitive.PointAt(-1));
+    }
+
+    [Fact]
+    public void PointCountCountsPairsNotNumbers()
+    {
+        Assert.Equal(2, new Primitive { Points = [0, 0, 1, 1] }.PointCount);
+        Assert.Equal(0, new Primitive().PointCount);
+    }
+
+    [Fact]
+    public void SummaryNamesTheKind()
+    {
+        Assert.Contains("polyline", new Primitive { Kind = PrimitiveKind.Polyline }.Summary);
+        Assert.Contains("closed", new Primitive { Kind = PrimitiveKind.Polyline, Closed = true }.Summary);
+        Assert.Contains("r=400", new Primitive { Kind = PrimitiveKind.Circle, Radius = 400 }.Summary);
+        Assert.Contains("ANSI31", new Primitive { Kind = PrimitiveKind.Hatch }.Summary);
+    }
+
+    [Fact]
+    public void SummaryTruncatesLongText()
+    {
+        var primitive = new Primitive { Kind = PrimitiveKind.Text, Text = new string('x', 60) };
+
+        Assert.True(primitive.Summary.Length < 40);
+    }
+
+    // ---------------------------------------------------------------- record nodes
+
+    [Fact]
+    public void RecordToNodeAndBackIsLossless()
+    {
+        var node = JournalJson.RecordToNode(SampleStep());
+
+        var record = JournalJson.RecordFromNode(node)!;
+
+        Assert.Equal("draw_room", record.Op);
+        Assert.Equal(["2F1", "2F2"], record.ObjectsAfter);
+        Assert.Equal(5, record.Primitives.Count);
+    }
+
+    [Fact]
+    public void RecordFromANonObjectIsNull()
+    {
+        Assert.Null(JournalJson.RecordFromNode(null));
+        Assert.Null(JournalJson.RecordFromNode(JsonValue.Create("nope")));
+    }
+
+    [Fact]
+    public void PrimitivesWithGarbageEntriesKeepTheGoodOnes()
+    {
+        const string payload = """
+            {"records":[{"primitives":[{"kind":"line","points":[0,0,1,1]},"bad",{"kind":"text","text":"ok"}]}]}
+            """;
+
+        var step = JournalJson.FromJson(payload).At(1)!;
+
+        Assert.Equal(2, step.Primitives.Count);
+        Assert.Equal("ok", step.Primitives[1].Text);
+    }
+}

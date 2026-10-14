@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The AutoCAD-facing half. AutoCAD loads this assembly into its own process, so
+    the references below must be copy-local false: AutoCAD already has them, and
+    shipping our own copies would shadow the host's.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <!-- AutoCAD is loaded with NETLOAD / the autoloader, not run as an app. -->
+    <OutputType>Library</OutputType>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="acdbmgd">
+      <HintPath>$(AcadDir)\acdbmgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="acmgd">
+      <HintPath>$(AcadDir)\acmgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="accoremgd">
+      <HintPath>$(AcadDir)\accoremgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\AcadMcp.Core\AcadMcp.Core.csproj" />
+  </ItemGroup>
+
+  <!-- Fail with the actual reason rather than a wall of missing-reference errors. -->
+  <Target Name="VerifyAcadDir" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="!Exists('$(AcadDir)\acdbmgd.dll')"
+           Text="AutoCAD managed assemblies not found under AcadDir='$(AcadDir)'. Pass -p:AcadDir=&lt;AutoCAD install&gt; or set ACAD_DIR." />
+  </Target>
+
+</Project>

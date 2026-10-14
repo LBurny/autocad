@@ -1,0 +1,21 @@
+<Project>
+
+  <!--
+    Shared build settings for the AutoCAD plugin.
+
+    The AutoCAD install is not under C:\Program Files on this machine, so its
+    location has to be supplied rather than assumed. Override with
+    -p:AcadDir=<path> or the ACAD_DIR environment variable.
+  -->
+  <PropertyGroup>
+    <AcadDir Condition="'$(AcadDir)' == ''">$(ACAD_DIR)</AcadDir>
+    <AcadDir Condition="'$(AcadDir)' == ''">F:\AutoCAD\AutoCAD 2026</AcadDir>
+
+    <PlatformTarget>x64</PlatformTarget>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>false</InvariantGlobalization>
+  </PropertyGroup>
+
+</Project>
