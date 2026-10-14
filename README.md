@@ -14,18 +14,25 @@ AI client  ──MCP──▶  acadmcp  ──┬── COM (pywin32) ──▶ 
                                 └── ezdxf         ──▶  .dxf file (+ PNG preview)
 ```
 
-## Why two backends
+## Why three backends
 
-| | `dxf` | `com` |
-|---|---|---|
-| Needs AutoCAD running | no | yes |
-| Speed | milliseconds | AutoCAD round-trips |
-| Live editing afterwards | after you open the file | immediately, entities appear as the AI works |
-| Screenshot | clean re-render, no UI | photographs the AutoCAD window |
-| Good for | generating a plan from scratch, batch work, CI | interactive design, editing an existing drawing |
+| | `dxf` | `com` | `plugin` |
+|---|---|---|---|
+| Needs AutoCAD running | no | yes | yes, with the plugin installed |
+| Speed | milliseconds | AutoCAD round-trips | one round trip per step |
+| Live editing afterwards | after you open the file | immediately, entities appear as the AI works | immediately, as one step at a time |
+| Undo granularity | — | per entity | per step, and rollback works regardless of the undo stack |
+| Screenshot | clean re-render, no UI | photographs the AutoCAD window | photographs the AutoCAD window |
+| Good for | generating a plan from scratch, batch work, CI | interactive design, editing an existing drawing | drawing a plan step by step, where any step can be taken back |
 
-All geometry is computed once in `acadmcp/geom.py`, so a plan drawn through COM
-and the same plan written to DXF contain identical coordinates.
+All geometry is computed once in `acadmcp/geom.py`, so a plan drawn through any
+backend contains identical coordinates.
+
+The `plugin` backend is the one to use when the drawing is meant to be *reviewed* as
+it is made. It keeps a journal of steps inside the DWG, so the user can roll back any
+step from a docked palette in AutoCAD — with or without this server running — and the
+AI can lay out a whole plan first and draw it a step at a time. See
+[docs/plugin.md](docs/plugin.md).
 
 ## Install
 
@@ -146,6 +153,8 @@ want a file, not for looking.
   `A-ROOM-NAME`, `A-DIM`, `A-AXIS`, `A-STAIR`, `A-LIFT`, `A-SHAFT`, …
 - Room boundaries always mean the **wall centreline ring**; areas are reported for
   the inner face, so a 4000×3000 ring with 200 mm walls reports 3.8×2.8 m.
+- Steps are the unit of review, not entities: `step_begin` … `step_commit` around the
+  drawing tools makes one step, which is what a rollback and the palette act on.
 
 ## Notes and limits
 
@@ -206,5 +215,6 @@ src/acadmcp/
     dxf.py            ezdxf driver, renders to PNG
     com.py            ActiveX driver for a live AutoCAD
 examples/floor_plan_demo.py
+plugin/                the in-AutoCAD step plugin (see docs/plugin.md)
 tests/
 ```

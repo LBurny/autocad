@@ -1,14 +1,19 @@
 """The MCP server: the tool surface an AI client talks to.
 
-Every tool is a thin wrapper over :mod:`acadmcp.ops` and a backend, so the same
-tool works whether the target is a live AutoCAD session (``backend="com"``) or a
-headless DXF file (``backend="dxf"``).
+Every drawing tool is a thin wrapper over :mod:`acadmcp.ops` and a backend, so the
+same tool works whether the target is a live AutoCAD session (``backend="com"``), a
+headless DXF file (``backend="dxf"``), or the in-AutoCAD step plugin
+(``backend="plugin"``), which keeps what it draws in the drawing's own journal so a
+step can be reviewed and rolled back.
+
+The ``step_*`` and ``plugin_*`` tools at the end of this file drive that journal.
 
 Run it with ``acadmcp`` or ``python -m acadmcp.server``.
 """
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -20,8 +25,11 @@ except ImportError:  # pragma: no cover - mcp 1.x
     from mcp.server.fastmcp import Image
 
 from . import geom, layers, ops
+from .acad_plugin_client import PluginClient, PluginError, PluginUnavailable
 from .backends import make_backend
 from .backends.base import Backend, BackendError
+from .backends.plugin import PluginBackend
+from .steps import StepSession, describe_steps
 
 mcp = _Server("AutoCAD-MCP")
 
@@ -125,8 +133,18 @@ def drawing_new(backend: str = "dxf", path: str | None = None) -> dict[str, Any]
         be = make_backend("com", new_document=True)
     elif kind == "dxf":
         be = make_backend("dxf", path=path)
+    elif kind == "plugin":
+        # The plugin draws into the AutoCAD drawing that is open: it cannot be told
+        # to open a file the way the dxf backend can, so say that rather than ignore
+        # `path`.
+        if path:
+            raise BackendError(
+                "the plugin backend draws into AutoCAD's active drawing; open the file "
+                "in AutoCAD, or use backend='dxf'"
+            )
+        be = _plugin_backend_connect(new_document=True)
     else:
-        raise BackendError(f"unknown backend {backend!r}; expected 'dxf' or 'com'")
+        raise BackendError(f"unknown backend {backend!r}; expected 'dxf', 'com' or 'plugin'")
     _state.reset(be, kind)
     ops.setup_layers(be)
     return {"ok": True, **be.info()}
@@ -644,6 +662,234 @@ def add_hatch(
     be = _state.require()
     be.hatch(_pts(points), pattern, float(scale), layer=layer, angle=float(angle), solid=solid)
     return {"ok": True, "pattern": "SOLID" if solid else pattern}
+
+
+# --------------------------------------------------------------------------- #
+# The in-AutoCAD step plugin
+# --------------------------------------------------------------------------- #
+#
+# Drawing through the plugin is not like drawing through the other backends: a step
+# has to be opened and closed around the drawing calls, so that everything in
+# between becomes one reviewable step rather than a pile of loose entities. The
+# usual drawing tools do the work; these open, close and drive the journal.
+
+_plugin_client: PluginClient | None = None
+
+
+def _client() -> PluginClient:
+    """The one connection to the plugin, created on first use."""
+    global _plugin_client
+    if _plugin_client is None:
+        _plugin_client = PluginClient()
+    return _plugin_client
+
+
+def _plugin_backend_connect(new_document: bool = False) -> PluginBackend:
+    """Attach to the plugin, optionally opening a fresh drawing in AutoCAD."""
+    try:
+        client = _client().connect()
+        if new_document:
+            client.call("new_document")
+    except PluginUnavailable as exc:
+        raise BackendError(
+            f"{exc}. Install the plugin with plugin_install, start AutoCAD, and then "
+            "check plugin_status."
+        ) from exc
+
+    backend = PluginBackend(client=client)
+    backend.forget_layers()
+    backend.set_units_mm()
+    return backend
+
+
+def _require_plugin() -> PluginBackend:
+    backend = _state.backend
+    if not isinstance(backend, PluginBackend):
+        raise BackendError("the step tools draw through the plugin; call plugin_connect first")
+    return backend
+
+
+def _outcome(response: dict[str, Any], action: str) -> dict[str, Any]:
+    """Flatten the plugin's reply into something a reader can use."""
+    result = response.get("result", {})
+    return {
+        "ok": bool(result.get("ok")),
+        "action": result.get("action", action),
+        "message": result.get("message", ""),
+        "touched": result.get("touched", []),
+        "step": result.get("step"),
+        "refusal": result.get("refusal"),
+        "journal": response.get("status", {}),
+    }
+
+
+@mcp.tool()
+def plugin_status(with_steps: bool = True) -> dict[str, Any]:
+    """Report the in-AutoCAD step plugin: whether it is there, and what it holds.
+
+    This answers even while AutoCAD is busy — the plugin's ping does not touch the
+    drawing — so it is also how "AutoCAD is stuck" is told apart from "the plugin is
+    not loaded".
+    """
+    try:
+        pong = _client().ping()
+    except PluginError as exc:
+        return {"ok": False, "available": False, "reason": str(exc)}
+
+    session = StepSession(_client())
+    try:
+        status = session.status()
+    except PluginError as exc:
+        return {"ok": False, "available": True, "reason": str(exc), **pong}
+
+    out: dict[str, Any] = {"ok": True, "available": True, **pong, **status}
+    if with_steps:
+        out["steps"] = session.steps()
+        out["rendered"] = describe_steps(out["steps"])
+    return out
+
+
+@mcp.tool()
+def plugin_connect(new_document: bool = False) -> dict[str, Any]:
+    """Draw through the step plugin in AutoCAD from now on.
+
+    After this, drawing tools record into a step rather than placing loose entities,
+    and the user can roll any step back from the palette. Open a step with
+    step_begin, draw, then step_commit.
+    """
+    backend = _plugin_backend_connect(new_document=new_document)
+    _state.reset(backend, "plugin")
+    ops.setup_layers(backend)
+    return {"ok": True, "backend": "plugin", **backend.info()}
+
+
+@mcp.tool()
+def plugin_install(force: bool = False) -> dict[str, Any]:
+    """Build and install the AutoCAD plugin into the per-user plug-in folder.
+
+    Windows only, and only from a checkout of this repository: it runs
+    plugin/scripts/install.sh, which needs the .NET 8 SDK and wants AutoCAD closed
+    (pass force=True to let it close a running AutoCAD). It also adds the folder to
+    AutoCAD's TRUSTEDPATHS, without which an unsigned plugin raises a security
+    prompt on every load.
+    """
+    script = Path(__file__).resolve().parents[2] / "plugin" / "scripts" / "install.sh"
+    if not script.is_file():
+        return {
+            "ok": False,
+            "reason": (
+                f"no installer at {script}: plugin_install needs a checkout of this "
+                "repository, not an installed copy of the package"
+            ),
+        }
+
+    command = ["bash", str(script)] + (["--force"] if force else [])
+    try:
+        done = subprocess.run(command, capture_output=True, text=True, timeout=900, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"ok": False, "reason": f"could not run {script.name}: {exc}"}
+    return {
+        "ok": done.returncode == 0,
+        "returncode": done.returncode,
+        "output": (done.stdout + done.stderr).strip(),
+    }
+
+
+@mcp.tool()
+def step_begin(
+    op: str, label: str | None = None, params: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Open a step: everything drawn until step_commit becomes that one step.
+
+    `op` names the operation the step came from and `params` records the arguments
+    that produced it, so the step can be read back and reproduced later. Open a step,
+    call draw_room, then step_commit — and the room is one step the user can roll
+    back in a single action.
+    """
+    backend = _require_plugin()
+    backend.begin_step(op, label=label, params=params)
+    return {
+        "ok": True,
+        "op": op,
+        "label": label or "",
+        "hint": "draw with the ordinary tools, then call step_commit",
+    }
+
+
+@mcp.tool()
+def step_commit(planned: bool = False) -> dict[str, Any]:
+    """Close the step opened by step_begin.
+
+    planned=False (the default) draws it now and journals it as applied.
+    planned=True only records it, to be drawn later — by the user pressing Run next
+    in the palette, or by step_control("run_next") — which is how a whole plan is
+    laid out first and drawn one step at a time.
+    """
+    backend = _require_plugin()
+    if not backend.pending:
+        return {
+            "ok": False,
+            "reason": (
+                f"step {backend.open_step or '(none)'} recorded no primitives: nothing "
+                "was drawn between step_begin and step_commit"
+            ),
+        }
+    response = backend.plan_step() if planned else backend.commit_step()
+    return _outcome(response, "plan" if planned else "apply")
+
+
+@mcp.tool()
+def step_list() -> dict[str, Any]:
+    """List the steps in the drawing's journal, oldest first."""
+    try:
+        rows = StepSession(_client().connect()).steps()
+    except PluginError as exc:
+        raise BackendError(str(exc)) from exc
+    return {"ok": True, "count": len(rows), "steps": rows, "rendered": describe_steps(rows)}
+
+
+@mcp.tool()
+def step_control(
+    action: str,
+    index: int | None = None,
+    force: bool = False,
+    note: str | None = None,
+    patch: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Drive the step journal.
+
+    Actions, and what each one needs:
+      run_next / run_all   — run the next step, or every remaining one
+      run_to               — index: run up to and including that step
+      rollback_to          — index: erase everything after it, back to planned
+      reject               — index: drop it and everything after it
+      accept / unaccept    — index: mark reviewed, so a rollback will not pass it
+      note                 — index, note: annotate a step
+      update               — index, patch: change a step's params, label or note
+      snapshot             — record a reviewed baseline at the end
+      clear_plan / reset / reload
+
+    rollback_to is refused when an accepted step stands in the way; force overrides
+    that refusal, and the result says so.
+    """
+    session = StepSession(_client().connect())
+    try:
+        if action == "rollback_to":
+            if index is None:
+                raise BackendError("rollback_to needs an index")
+            response = session.rollback_to(int(index), force=bool(force))
+        else:
+            arguments: dict[str, Any] = {}
+            if index is not None:
+                arguments["index"] = int(index)
+            if note is not None:
+                arguments["note"] = note
+            if patch is not None:
+                arguments["patch"] = patch
+            response = session.control(action, **arguments)
+    except (PluginError, ValueError) as exc:
+        raise BackendError(str(exc)) from exc
+    return _outcome(response, action)
 
 
 def main() -> None:

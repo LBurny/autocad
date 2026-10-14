@@ -90,6 +90,12 @@ def run(report: Report) -> None:
             "asking for it twice is not an error", again.get("created") is False, str(again)
         )
 
+        # With a linetype as well: that path loads it from acad.lin first, and it used
+        # to raise a NullReferenceException because the linetype table was read
+        # outside a transaction.
+        centred = backend.ensure_layer("A-AXIS", color=1, linetype="CENTER")
+        report.check("a layer can carry a linetype", centred.get("created") is True, str(centred))
+
         backend.set_units_mm()
         report.check(
             "units can be set to millimetres",
@@ -243,6 +249,83 @@ def run(report: Report) -> None:
         report.check("the RPC session completed", False, f"{type(exc).__name__}: {exc}")
     finally:
         client.close()
+
+    check_mcp_tools(report)
+
+
+def check_mcp_tools(report: Report) -> None:
+    """The same journey again, through the MCP tools an AI client actually calls.
+
+    Kept separate from the checks above on purpose. Those prove the wire format and
+    the client; this proves the tool layer — that step_begin and step_commit bracket
+    the ordinary drawing tools and land as one step, which is the whole shape of
+    drawing with this plugin.
+    """
+    from acadmcp import server
+
+    opened = server.plugin_connect(new_document=True)
+    report.check("plugin_connect attaches to a drawing", opened["ok"], str(opened.get("journal")))
+
+    server.step_begin("draw_wall", label="wall", params={"length": 6000})
+    server.draw_line([0, 0], [6000, 0], layer="A-WALL")
+    first = server.step_commit()
+    report.check("a step drawn through the tools commits", first["ok"], first["message"])
+    report.check(
+        "it is one step owning one entity",
+        first["journal"]["count"] == 1 and len(first["step"]["handles"]) == 1,
+        str(first["step"].get("handles")),
+    )
+
+    # Planned rather than drawn: the drawing must not change yet.
+    server.step_begin("draw_room", label="room")
+    server.draw_polyline([[0, 0], [4000, 0], [4000, 3000], [0, 3000]], closed=True, layer="A-WALL")
+    planned = server.step_commit(planned=True)
+    report.check("a step can be planned without drawing it", planned["ok"], planned["message"])
+    report.check(
+        "planning drew nothing",
+        planned["journal"]["count"] == 2 and planned["journal"]["applied"] == 1,
+        str(planned["journal"]),
+    )
+
+    ran = server.step_control("run_all")
+    report.check("step_control runs the plan", ran["ok"], ran["message"])
+    report.check(
+        "the planned step is now applied", ran["journal"]["applied"] == 2, str(ran["journal"])
+    )
+
+    listed = server.step_list()
+    report.check("step_list reports both steps", listed["count"] == 2, listed["rendered"])
+    report.check(
+        "its rows carry state and handles",
+        all("state" in row and "handles" in row for row in listed["steps"]),
+    )
+
+    back = server.step_control("rollback_to", index=1)
+    report.check("step_control rolls back to a step", back["ok"], back["message"])
+    report.check(
+        "the rollback left one step applied", back["journal"]["applied"] == 1, str(back["journal"])
+    )
+
+    accepted = server.step_control("accept", index=1)
+    report.check("a step can be accepted", accepted["ok"], accepted["message"])
+    refused = server.step_control("rollback_to", index=0)
+    report.check(
+        "the accepted step blocks a rollback",
+        refused["ok"] is False,
+        refused.get("refusal") or refused["message"],
+    )
+    forced = server.step_control("rollback_to", index=0, force=True)
+    report.check("force goes through it anyway", forced["ok"], forced["message"])
+
+    cleared = server.step_control("reset")
+    report.check("step_control resets the journal", cleared["ok"], cleared["message"])
+
+    status = server.plugin_status()
+    report.check(
+        "plugin_status reports the plugin",
+        status["ok"] and status["available"],
+        f"document={status.get('document')} count={status.get('count')}",
+    )
 
 
 def main() -> int:

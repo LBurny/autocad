@@ -276,6 +276,11 @@ class PluginBackend:
         """The primitives recorded since the step began."""
         return self._pending
 
+    @property
+    def open_step(self) -> str:
+        """The op name being recorded, or "" when no step is open."""
+        return self._op
+
     def begin_step(
         self, op: str, label: str | None = None, params: dict[str, Any] | None = None
     ) -> None:
@@ -307,6 +312,29 @@ class PluginBackend:
         }
         self._reset()
         return self.client.call("apply", step=payload)
+
+    def plan_step(self) -> dict[str, Any]:
+        """Send the recorded batch as a step that is planned, not drawn.
+
+        This is what lets a whole run of steps be laid out first and drawn one at a
+        time afterwards: the geometry is resolved here, and the plugin holds it
+        until the user or the AI asks for it.
+        """
+        if not self._op:
+            raise BackendError("no step is open; call begin_step first")
+        if not self._pending:
+            raise BackendError(
+                f"step {self._op!r} recorded no primitives; there would be nothing to plan"
+            )
+
+        record = {
+            "op": self._op,
+            "label": self._label or "",
+            "params": self._params,
+            "primitives": self._pending,
+        }
+        self._reset()
+        return self.client.call("plan", steps=[record])
 
     def abort_step(self) -> None:
         """Throw away the recorded batch without drawing anything."""

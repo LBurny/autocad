@@ -32,13 +32,19 @@ internal static class DrawingApi
 
     public static JsonObject EnsureLayer(Document document, string name, int? color, string? linetype)
     {
-        if (!string.IsNullOrWhiteSpace(linetype) && linetype != "CONTINUOUS")
-        {
-            LoadLinetype(document.Database, linetype);
-        }
+        var wantsLinetype = !string.IsNullOrWhiteSpace(linetype) && linetype != "CONTINUOUS";
 
         using var docLock = document.LockDocument();
         using var tr = document.Database.TransactionManager.StartTransaction();
+
+        // Inside the transaction, not before it: reading the linetype table needs one
+        // open, and outside one the lookup hands back null — which used to surface as
+        // a NullReferenceException for any layer that carried a linetype.
+        if (wantsLinetype)
+        {
+            LoadLinetype(document.Database, linetype!, tr);
+        }
+
         var table = (LayerTable)tr.GetObject(document.Database.LayerTableId, OpenMode.ForRead);
 
         var existed = table.Has(name);
@@ -58,7 +64,7 @@ internal static class DrawingApi
             record.Color = Autodesk.AutoCAD.Colors.Color.FromColorIndex(
                 ColorMethod.ByAci, (short)aci);
         }
-        if (!string.IsNullOrWhiteSpace(linetype) && linetype != "CONTINUOUS")
+        if (wantsLinetype)
         {
             var linetypes = (LinetypeTable)tr.GetObject(document.Database.LinetypeTableId, OpenMode.ForRead);
             if (linetypes.Has(linetype))
@@ -149,9 +155,9 @@ internal static class DrawingApi
         return found;
     }
 
-    private static void LoadLinetype(Database db, string name)
+    private static void LoadLinetype(Database db, string name, Transaction tr)
     {
-        var linetypes = (LinetypeTable)db.LinetypeTableId.GetObject(OpenMode.ForRead);
+        var linetypes = (LinetypeTable)tr.GetObject(db.LinetypeTableId, OpenMode.ForRead);
         if (linetypes.Has(name))
         {
             return;
