@@ -325,6 +325,26 @@ public sealed class Journal
         return replacement;
     }
 
+    /// <summary>
+    /// Swap a record for a new version of itself, keeping its index canonical.
+    /// </summary>
+    /// <remarks>
+    /// Used when a step changes state — planned to done, or to failed — where the
+    /// caller has built the whole replacement. The index always wins over
+    /// whatever the incoming record claims, so a record can never end up filed
+    /// under a step it is not.
+    /// </remarks>
+    public StepRecord? Replace(int index, StepRecord record)
+    {
+        if (index < 1 || index > _records.Count)
+        {
+            return null;
+        }
+        var stored = record with { Index = index };
+        _records[index - 1] = stored;
+        return stored;
+    }
+
     /// <summary>Mark a step reviewed, or clear the mark.</summary>
     public StepRecord? SetAccepted(int index, bool accepted)
     {

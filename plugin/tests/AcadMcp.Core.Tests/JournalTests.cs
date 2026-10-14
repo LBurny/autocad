@@ -491,6 +491,64 @@ public class JournalTests
         Assert.Equal(2, journal.TrackedHandles().Count);
     }
 
+    // ---------------------------------------------------------------- replace
+
+    [Fact]
+    public void ReplaceSwapsTheWholeRecord()
+    {
+        var journal = Applied(2);
+
+        journal.Replace(2, journal.At(2)! with
+        {
+            State = StepState.Failed,
+            Error = "boom",
+            ObjectsAfter = [],
+            Transaction = "",
+        });
+
+        var record = journal.At(2)!;
+        Assert.Equal(StepState.Failed, record.State);
+        Assert.Equal("boom", record.Error);
+        Assert.Empty(record.ObjectsAfter);
+    }
+
+    [Fact]
+    public void ReplaceKeepsTheIndexCanonical()
+    {
+        var journal = Applied(2);
+
+        // A record claiming the wrong index must be filed under the one asked for,
+        // otherwise a step could end up addressing a different step than it is.
+        journal.Replace(2, journal.At(2)! with { Index = 99 });
+
+        Assert.Equal(2, journal.At(2)!.Index);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    [InlineData(-1)]
+    public void ReplaceOutsideTheJournalDoesNothing(int index)
+    {
+        var journal = Applied(2);
+        var before = journal.At(1)!;
+
+        Assert.Null(journal.Replace(index, new StepRecord { Op = "x" }));
+        Assert.Equal(before.Op, journal.At(1)!.Op);
+    }
+
+    [Fact]
+    public void ReplacingARecordWithNoIndexUsesThePosition()
+    {
+        var journal = Applied(1);
+
+        journal.Replace(1, new StepRecord { State = StepState.Planned, Op = "draw_wall" });
+
+        Assert.Equal(1, journal.At(1)!.Index);
+        Assert.Equal(StepState.Planned, journal.At(1)!.State);
+        Assert.True(journal.NextRunnable() is not null);
+    }
+
     // ---------------------------------------------------------------- reporting
 
     [Fact]

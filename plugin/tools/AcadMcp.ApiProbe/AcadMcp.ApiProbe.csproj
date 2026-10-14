@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Developer tool, deliberately outside the solution: it inspects AutoCAD's
+    managed API by metadata only, so it builds and runs without AutoCAD and
+    without referencing acdbmgd. That matters because a plugin assembly cannot
+    be unloaded from AutoCAD, so every API guess costs a full AutoCAD restart
+    to disprove. Checking signatures here is much cheaper than finding out live.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>AcadMcp.ApiProbe</AssemblyName>
+    <RootNamespace>AcadMcp.ApiProbe</RootNamespace>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Reflection.MetadataLoadContext" Version="8.0.0" />
+  </ItemGroup>
+
+</Project>
