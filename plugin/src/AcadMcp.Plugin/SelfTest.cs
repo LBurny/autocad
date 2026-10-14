@@ -120,6 +120,25 @@ public static class SelfTest
             report.Check("the scenario drew every entity", seeded == 6,
                 $"present={seeded} of {handles.Count}");
 
+            // The panel is otherwise only ever verified by a person looking at it, so
+            // here it is built and shown. Showing a palette without being asked is
+            // normally hostile — this only ever happens in test mode, and the
+            // palette's own constructor throwing would take AutoCAD's UI down.
+            try
+            {
+                using (var control = new StepsControl())
+                {
+                    report.Check("the steps palette control can be built",
+                        control.Controls.Count > 0, $"{control.Controls.Count} child control(s)");
+                }
+                StepPanel.Show();
+                report.Check("the steps palette opens", StepPanel.IsVisible);
+            }
+            catch (System.Exception error)
+            {
+                report.Check("the steps palette can be shown", false, error.Message);
+            }
+
             var rollback = engine.RollbackTo(1);
             report.Check("rollback before the undo check succeeds", rollback.Ok, rollback.Message);
 
@@ -246,7 +265,26 @@ public static class SelfTest
                     ? $"applied={applied} entities={presentAfterUndo}"
                     : string.Join("; ", mismatches));
 
-            Discard(probe.Document, probe.RestoreTo, report);
+            // Frame what was drawn, so a photograph of the palette has a plan behind
+            // it rather than empty space. Queued for the same reason the undo was: a
+            // command cannot be run from here.
+            probe.Document.SendStringToExecute("_.ZOOM E ", true, false, false);
+
+            // The drawing is deliberately left open. This is the unattended test
+            // mode in a scratch AutoCAD that the harness closes, and the harness
+            // photographs the palette afterwards — which needs a drawing whose
+            // journal still has steps in it.
+            // The drawing is deliberately left open *and active*. This is the
+            // unattended test mode, in a scratch AutoCAD the harness closes, and the
+            // harness photographs the palette afterwards — which needs the active
+            // drawing to be the one the journal has steps in. AutoCAD creates its own
+            // empty Drawing1 at startup, so restoring the previous active document
+            // here would leave the palette showing that one instead.
+            var active = AcadApp.DocumentManager.MdiActiveDocument;
+            PluginLog.Write(
+                $"self-test finished: drew in '{probe.Document.Name}', active is "
+                + $"'{active?.Name ?? "(none)"}' with {StepEngine.For(active ?? probe.Document).Journal.Count} step(s)");
+
             PluginLog.Write("self-test report\n" + report.Finish());
         }
         catch (System.Exception error)
@@ -420,17 +458,29 @@ public static class SelfTest
 
     private static void Discard(Document? scratch, Document? restoreTo, Report report)
     {
+        RestoreActiveDocument(restoreTo);
         try
         {
-            if (restoreTo is not null && !restoreTo.IsDisposed)
-            {
-                AcadApp.DocumentManager.MdiActiveDocument = restoreTo;
-            }
             scratch?.CloseAndDiscard();
         }
         catch (System.Exception error)
         {
             report.Check("the scratch drawing can be discarded", false, error.Message);
+        }
+    }
+
+    private static void RestoreActiveDocument(Document? document)
+    {
+        try
+        {
+            if (document is not null && !document.IsDisposed)
+            {
+                AcadApp.DocumentManager.MdiActiveDocument = document;
+            }
+        }
+        catch (System.Exception error)
+        {
+            PluginLog.Write("could not restore the active document", error);
         }
     }
 

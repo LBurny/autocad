@@ -19,6 +19,9 @@ public static class StepPanel
 
     private static PaletteSet? _palette;
 
+    /// <summary>Whether the palette is on screen.</summary>
+    public static bool IsVisible => _palette?.Visible ?? false;
+
     public static void Show()
     {
         _palette ??= Build();
@@ -46,7 +49,14 @@ public static class StepPanel
             Style = PaletteSetStyles.ShowPropertiesMenu
                 | PaletteSetStyles.ShowAutoHideButton
                 | PaletteSetStyles.ShowCloseButton,
-            MinimumSize = new Size(360, 460),
+            // AutoCAD remembers the size and position for this id, so the minimum
+            // is what stops a restored-too-small palette from squeezing the detail
+            // pane down to nothing.
+            MinimumSize = new Size(440, 560),
+            Size = new Size(470, 760),
+            // Without this, clicking the palette takes focus from the drawing, which
+            // makes it awkward to review a plan you are looking at.
+            KeepFocus = true,
         };
         palette.Add("Steps", new StepsControl());
         return palette;

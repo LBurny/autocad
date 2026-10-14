@@ -55,7 +55,8 @@ server stopped.
 plugin/
   src/AcadMcp.Core/           journal model, rollback arithmetic. No AutoCAD reference.
   src/AcadMcp.Plugin/         StepEngine, JournalStore (Xrecords), PrimitiveBuilder,
-                              TextStyles, SelfTest, PluginEntry, StepPanel, PluginLog
+                              TextStyles, SelfTest, PluginEntry, PluginLog,
+                              StepPanel + StepsControl (the docked palette)
   src/AcadMcp.Plugin/Rpc/     RpcServer (the socket), IdleQueue (main-thread dispatch),
                               DrawingApi (layers, units, model space, new document)
   bundle/AcadMcp.bundle/      PackageContents.xml is source; Contents/ is build output
@@ -63,6 +64,7 @@ plugin/
   scripts/selftest.sh         pack, install, launch a scratch AutoCAD, verify
   scripts/trust-autocad.ps1   put the plugin folder into TRUSTEDPATHS
   scripts/acad-state.ps1      is AutoCAD up, and is a modal dialog blocking it
+  scripts/panel-shot.py       photograph a live window, for looking at the palette
   tools/AcadMcp.ApiProbe/     AutoCAD API signatures via MetadataLoadContext
 tests/AcadMcp.Core.Tests/     xunit
 ```
@@ -73,7 +75,8 @@ dotnet test                     # journal arithmetic only, no AutoCAD needed
 ./scripts/selftest.sh           # both suites; refuses to run while AutoCAD is open
 ./scripts/selftest.sh --engine  # the in-AutoCAD self-test only
 ./scripts/selftest.sh --rpc     # the live RPC exchange only
-./scripts/selftest.sh --force   # the edit-build-test loop, ~15-40s
+./scripts/selftest.sh --force   # the edit-build-test loop, ~25s for both suites
+./scripts/selftest.sh --engine --shot palette.png   # and photograph the palette
 ```
 
 `selftest.sh` installs the bundle into the user-level `ApplicationPlugins` folder,
@@ -229,6 +232,29 @@ allowed a second attempt and nothing else. `tests/test_plugin_client.py` pins th
 down with a fake socket, including the case where the fake deliberately drops the
 connection.
 
+**A SplitContainer starts out 150x100.** Setting `Panel2MinSize` to anything useful in
+the constructor throws before the control has ever been laid out, and the message it
+throws talks about `SplitterDistance`, which sends you looking in the wrong place.
+`StepsControl.SizeSplit` therefore applies the minimums and the splitter position only
+once the container has real dimensions, and sizes against the smaller of its height
+and width because WinForms checks one and names the other in the message. The
+in-AutoCAD self-test builds and opens the palette as one of its checks, which is how
+this was caught — otherwise the user's first click would have produced a .NET error
+dialog over their drawing.
+
+**A floating PaletteSet is not a child of the AutoCAD frame.** Screenshotting the
+frame misses it completely, and once the user docks it the window has no title of its
+own either. `panel-shot.py` therefore tries the palette by title and falls back to the
+frame; `scripts/acad-state.ps1` lists the windows when it is unclear which is which.
+AutoCAD also *remembers* a palette's size and dock position by its id, so a palette
+restored small stays small — set `MinimumSize` accordingly.
+
+**AutoCAD opens its own drawing at startup.** An unattended run therefore has an empty
+`Drawing1` active while the self-test draws into its own scratch document. The palette
+reads whichever drawing is *active*, so the test mode leaves its scratch drawing open
+and active rather than restoring the previous one, and the self-test logs which is
+which: `self-test finished: drew in 'Drawing2.dwg', active is 'Drawing2.dwg'`.
+
 ## Environment
 
 - AutoCAD 2026 (release 25.1) is at `F:\AutoCAD\AutoCAD 2026` — **not** under
@@ -251,3 +277,4 @@ connection.
   (`draw_wall_with_openings`, `draw_room`), and the "Chinese text" section, which
   records what was measured rather than guessed.
 - `backends/com.py` — the `_call` retry wrapper and why it exists.
+

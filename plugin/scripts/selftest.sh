@@ -38,6 +38,11 @@
 #   scripts/selftest.sh --force      # close a running AutoCAD first
 #   scripts/selftest.sh --keep       # leave the scratch AutoCAD running
 #   scripts/selftest.sh --wait 300   # seconds to wait for each report (default 240)
+#   scripts/selftest.sh --shot x.png # save a picture of the AutoCAD window
+#
+# --shot exists because the palette is a WinForms control inside AutoCAD: there is
+# nothing to assert about it from outside beyond it having built and being visible,
+# so the only real check is looking at it. The self-test shows it in test mode.
 #
 set -euo pipefail
 
@@ -50,6 +55,7 @@ force=0
 keep=0
 wait_s=240
 mode=all
+shot=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -59,6 +65,7 @@ while [ $# -gt 0 ]; do
     --force) force=1; shift ;;
     --keep) keep=1; shift ;;
     --wait) wait_s="${2:?--wait needs a number of seconds}"; shift 2 ;;
+    --shot) shot="${2:?--shot needs a path}"; shift 2 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -199,6 +206,25 @@ if [ "$run_engine" = "1" ]; then
     cat "$log"
     status=1
   fi
+fi
+
+# The picture is taken now, while the engine's three steps are still on screen. The
+# RPC check creates its own drawing, which would leave the palette showing that one.
+# The palette is photographed by title: a floating PaletteSet is its own top-level
+# window, so a capture of the AutoCAD frame does not contain it.
+if [ -n "$shot" ] && [ "$run_engine" = "1" ]; then
+  # AutoCAD creates a palette's window when it next pumps messages, not when Visible
+  # is set, and the self-test has just queued a ZOOM behind it. Retried rather than
+  # slept through once, because a single fixed sleep raced on this and silently fell
+  # back to photographing the frame instead.
+  for _ in $(seq 1 10); do
+    if shot_path=$("$python_exe" "$here/scripts/panel-shot.py" "$shot" "AcadMcp" 2>/dev/null); then
+      echo "palette captured: $shot_path"
+      break
+    fi
+    sleep 1
+  done
+  [ -n "${shot_path:-}" ] || echo "could not capture the palette after 10s" >&2
 fi
 
 if [ "$run_rpc" = "1" ]; then

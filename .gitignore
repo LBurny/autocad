@@ -15,3 +15,6 @@ plugin/bundle/AcadMcp.bundle/Contents/
 
 # Agent session scratch (plan-mode drafts)
 .zcode/plans/
+
+# Screenshots of the palette, taken by scripts/selftest.sh --shot
+plugin/palette*.png

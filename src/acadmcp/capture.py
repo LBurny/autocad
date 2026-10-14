@@ -46,6 +46,27 @@ def find_autocad_window() -> int:
     return found[0]
 
 
+def find_window_by_title(fragment: str) -> int:
+    """The first visible top-level window whose title contains `fragment`."""
+    try:
+        import win32gui
+    except ImportError as exc:  # pragma: no cover - platform dependent
+        raise BackendError("finding a window needs pywin32: uv sync") from exc
+
+    match = fragment.casefold()
+    found: list[int] = []
+
+    def visit(hwnd: int, _: object) -> bool:
+        if win32gui.IsWindowVisible(hwnd) and match in win32gui.GetWindowText(hwnd).casefold():
+            found.append(hwnd)
+        return True
+
+    win32gui.EnumWindows(visit, None)
+    if not found:
+        raise BackendError(f"no visible window has {fragment!r} in its title")
+    return found[0]
+
+
 def capture_window(hwnd: int, path: str) -> str:
     """Save a PNG of the window `hwnd` to `path` and return the path.
 

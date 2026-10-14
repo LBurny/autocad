@@ -165,14 +165,27 @@ public static class IdleQueue
             + "a modal dialog, a prompt or a long command is holding it";
     }
 
+    /// <summary>
+    /// Whether AutoCAD will accept edits right now, and the reason recorded for
+    /// later if it will not.
+    /// </summary>
+    /// <remarks>
+    /// Main thread only: it reads <c>Document.CommandInProgress</c>. The panel and
+    /// the queue share this one rule so they cannot disagree about when it is safe
+    /// to touch the drawing.
+    /// </remarks>
+    public static bool CanRunNow()
+    {
+        var command = AcadApp.DocumentManager.MdiActiveDocument?.CommandInProgress ?? "";
+        Volatile.Write(ref _command, command);
+        return command.Length == 0;
+    }
+
     private static void OnIdle(object? sender, EventArgs e)
     {
-        // Everything below runs on AutoCAD's main thread; this is the only place
-        // these properties may be read at all.
-        var document = AcadApp.DocumentManager.MdiActiveDocument;
-        var command = document?.CommandInProgress ?? "";
-        Volatile.Write(ref _command, command);
-        if (command.Length > 0)
+        // Idle also fires while a command waits for input, so running our edits
+        // then would put them inside somebody else's command.
+        if (!CanRunNow())
         {
             return;
         }

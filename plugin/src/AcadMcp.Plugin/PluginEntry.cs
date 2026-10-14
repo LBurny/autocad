@@ -1,3 +1,4 @@
+using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.Runtime;
 using AcadApp = Autodesk.AutoCAD.ApplicationServices.Core.Application;
 
@@ -39,6 +40,7 @@ public sealed class PluginEntry : IExtensionApplication
             // learn here which thread it must never be waited on from.
             IdleQueue.Attach();
             StartRpc();
+            AcadApp.DocumentManager.DocumentToBeDestroyed += OnDocumentToBeDestroyed;
 
             if (Environment.GetEnvironmentVariable(SelfTestVariable) == "1")
             {
@@ -48,6 +50,26 @@ public sealed class PluginEntry : IExtensionApplication
         catch (System.Exception error)
         {
             PluginLog.Write("initialize failed", error);
+        }
+    }
+
+    /// <summary>Forget a closing drawing's step engine.</summary>
+    /// <remarks>
+    /// The engine cache holds a strong reference to its document, so without this
+    /// every closed drawing leaks one for the life of the AutoCAD session. Hooked
+    /// on <c>DocumentToBeDestroyed</c> rather than <c>DocumentDestroyed</c>, because
+    /// the latter arrives with only the file name — the document is already gone by
+    /// then, and the document is the cache key.
+    /// </remarks>
+    private static void OnDocumentToBeDestroyed(object? sender, DocumentCollectionEventArgs e)
+    {
+        try
+        {
+            StepEngine.Forget(e.Document);
+        }
+        catch (System.Exception error)
+        {
+            PluginLog.Write("could not forget a closing document", error);
         }
     }
 
