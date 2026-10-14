@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using System.Text.Json.Nodes;
 using AcadMcp.Core;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
@@ -270,10 +271,6 @@ public static class SelfTest
             // command cannot be run from here.
             probe.Document.SendStringToExecute("_.ZOOM E ", true, false, false);
 
-            // The drawing is deliberately left open. This is the unattended test
-            // mode in a scratch AutoCAD that the harness closes, and the harness
-            // photographs the palette afterwards — which needs a drawing whose
-            // journal still has steps in it.
             // The drawing is deliberately left open *and active*. This is the
             // unattended test mode, in a scratch AutoCAD the harness closes, and the
             // harness photographs the palette afterwards — which needs the active
@@ -321,6 +318,7 @@ public static class SelfTest
         report.Check("every step recorded its handles", handles.Count == 6, $"handles={handles.Count}");
         report.Check("recorded handles exist in the drawing", CountPresent(db, handles) == 6,
             $"present={CountPresent(db, handles)}");
+        CheckRoundTrip(engine, report, "three applied steps");
 
         // --- Chinese must not come out as question marks -------------------
         // Storing the right characters is not enough: an SHX font with no big font
@@ -357,6 +355,7 @@ public static class SelfTest
         report.Check("steps 2 and 3 are planned again",
             engine.Journal.At(2)!.State == StepState.Planned
             && engine.Journal.At(3)!.State == StepState.Planned);
+        CheckRoundTrip(engine, report, "a rollback");
 
         var survivors = engine.Journal.At(1)!.ObjectsAfter.ToList();
         report.Check("step 1's entities survived", CountPresent(db, survivors) == 1,
@@ -374,6 +373,7 @@ public static class SelfTest
         var afterRerun = engine.Journal.Records.SelectMany(r => r.ObjectsAfter).ToList();
         report.Check("re-run recreated every entity", CountPresent(db, afterRerun) == 6,
             $"present={CountPresent(db, afterRerun)}");
+        CheckRoundTrip(engine, report, "running a plan");
 
         // --- rollback everything ------------------------------------------
         var wipe = engine.RollbackTo(0);
@@ -389,9 +389,22 @@ public static class SelfTest
         report.Check("rollback across an accepted step is refused", !refused.Ok, refused.Message);
         var forced = engine.RollbackTo(0, force: true);
         report.Check("force overrides the refusal", forced.Ok, forced.Message);
+        CheckRoundTrip(engine, report, "a forced rollback");
+
+        // The plan-editing calls save through their own path, not through a step's
+        // transaction, so they get their own round trips.
+        engine.Update(1, new JsonObject { ["note"] = "annotated by the test" });
+        CheckRoundTrip(engine, report, "an update");
+        engine.SetPlan("a test plan", [new StepRecord { Op = "planned_wall" }]);
+        CheckRoundTrip(engine, report, "a plan");
+        engine.ClearPlan();
+        CheckRoundTrip(engine, report, "clear_plan");
 
         engine.Reset();
         report.Check("reset empties the journal", engine.Journal.IsEmpty);
+        CheckRoundTrip(engine, report, "a reset");
+
+        MeasureAtScale(engine, report);
     }
 
     /// <summary>
@@ -482,6 +495,88 @@ public static class SelfTest
         {
             PluginLog.Write("could not restore the active document", error);
         }
+    }
+
+    /// <summary>
+    /// Read the journal back out of the drawing and compare it with the in-memory one,
+    /// field by field.
+    /// </summary>
+    /// <remarks>
+    /// This is the guard on saving only what changed: a missed write leaves the drawing
+    /// holding an older journal than the one in memory, which no other check here would
+    /// notice — the in-memory copy drives every action, so everything would keep looking
+    /// right until the drawing was saved and reopened. Comparing the two serialised
+    /// payloads covers every persisted field at once, and does it after every kind of
+    /// mutation rather than after a representative one.
+    /// </remarks>
+    private static void CheckRoundTrip(StepEngine engine, Report report, string what)
+    {
+        var memory = JournalJson.ToJson(engine.Journal);
+        var onDisk = JournalJson.ToJson(engine.Reload());
+        var same = memory == onDisk;
+        report.Check($"the journal in the drawing matches memory after {what}", same,
+            same ? $"{engine.Journal.Count} step(s)" : $"memory={memory.Length} chars, disk={onDisk.Length} chars");
+    }
+
+    /// <summary>
+    /// Time the operations whose cost grows with the number of steps, at two sizes.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Reported rather than asserted: the numbers are the point, and a busy machine should
+    /// not fail a build over them. Two sizes, because one number cannot show how the cost
+    /// grows — and how it grows is the whole question. Saving rewrites every record, so the
+    /// per-step cost rises with the length of the journal; whether that matters depends on
+    /// how fast it rises.
+    /// </para>
+    /// <para>
+    /// Both costs are felt in practice: the palette re-reads the journal once a second, and
+    /// every mutation saves.
+    /// </para>
+    /// </remarks>
+    private static void MeasureAtScale(StepEngine engine, Report report)
+    {
+        var clock = new Stopwatch();
+        foreach (var target in (int[])[200, 400])
+        {
+            var from = engine.Journal.Count;
+            clock.Restart();
+            for (var i = from + 1; i <= target; i++)
+            {
+                engine.Apply("bench_step", $"bench {i}", null,
+                [
+                    new Primitive
+                    {
+                        Kind = PrimitiveKind.Line,
+                        Points = [i * 10, 0, i * 10, 500],
+                        Layer = "A-WALL",
+                    },
+                ]);
+            }
+            var built = clock.ElapsedMilliseconds;
+
+            clock.Restart();
+            engine.Reload();
+            var reload = clock.ElapsedMilliseconds;
+
+            clock.Restart();
+            engine.SetNote(target, "timed");
+            var mutate = clock.ElapsedMilliseconds;
+
+            var added = target - from;
+            report.Note($"scale at {target} steps: {added} steps in {built} ms "
+                + $"({(double)built / added:0.#} ms each), full re-read {reload} ms, "
+                + $"one mutation {mutate} ms");
+        }
+
+        report.Check($"the journal holds {engine.Journal.Count} steps under load",
+            engine.Journal.Count == 400, $"count={engine.Journal.Count}");
+        CheckRoundTrip(engine, report, "400 steps");
+
+        // Leave the drawing and the journal as they were found, or the checks after this one
+        // would be counting the benchmark's steps.
+        engine.RollbackTo(0, force: true);
+        engine.Reset();
     }
 
     /// <summary>
@@ -597,6 +692,9 @@ public static class SelfTest
             // happens to assume.
             _text.Append($"[{(passed ? "pass" : "FAIL")}] {name}{(detail.Length > 0 ? " -- " + detail : "")}\n");
         }
+
+        /// <summary>A measured number, for the log rather than for pass or fail.</summary>
+        public void Note(string text) => _text.Append($"[note] {text}\n");
 
         public void Crashed(System.Exception error)
         {

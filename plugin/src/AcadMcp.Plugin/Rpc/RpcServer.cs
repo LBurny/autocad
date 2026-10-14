@@ -361,6 +361,7 @@ public sealed class RpcServer : IDisposable
             ["failed"] = journal.Records.Count(r => r.State == StepState.Failed),
             ["accepted"] = journal.Records.Count(r => r.Accepted),
             ["drifted"] = journal.Records.Count(r => r.Drifted),
+            ["unreadable"] = journal.Unreadable,
             ["unrecoverable"] = unrecoverable,
             ["queued"] = IdleQueue.Depth,
         };

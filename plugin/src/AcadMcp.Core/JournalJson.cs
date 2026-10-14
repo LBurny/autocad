@@ -98,6 +98,54 @@ public static class JournalJson
     public static StepRecord? RecordFromNode(JsonNode? node) =>
         node is JsonObject obj ? ReadRecord(obj) : null;
 
+    /// <summary>
+    /// Append step payloads in journal order, returning how many could not be read.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Indices are assigned by <em>position</em>, not taken from the payload. That matters
+    /// in one case: a drawing whose middle record was lost — a truncated chunk chain, or a
+    /// hand-edited dictionary — otherwise loads into a list whose positions are contiguous
+    /// while the stored numbers have a hole in them. <see cref="Journal.At"/> is positional,
+    /// so from that point on the step number shown on screen and the step a caller can act
+    /// on would be different steps. Numbering by position keeps the two in step, and it is
+    /// what a save already does anyway.
+    /// </para>
+    /// <para>
+    /// The unreadable count is returned rather than swallowed, because those steps are gone
+    /// for good: their geometry is still in the drawing and nothing owns it any more.
+    /// </para>
+    /// </remarks>
+    public static int AppendOrdered(Journal journal, IEnumerable<string?> payloads)
+    {
+        var unreadable = 0;
+        foreach (var payload in payloads)
+        {
+            var record = string.IsNullOrWhiteSpace(payload) ? null : RecordFromJson(payload!);
+            if (record is null)
+            {
+                unreadable++;
+                continue;
+            }
+            // AddExecuted numbers by position, which is the whole point of going this way.
+            journal.AddExecuted(record);
+        }
+        return unreadable;
+    }
+
+    private static StepRecord? RecordFromJson(string json)
+    {
+        try
+        {
+            return JsonNode.Parse(json) is JsonObject obj ? ReadRecord(obj) : null;
+        }
+        catch (Exception)
+        {
+            // Unreadable is the same as absent as far as a caller is concerned.
+            return null;
+        }
+    }
+
     private static StepRecord? ReadRecord(JsonObject o)
     {
         try

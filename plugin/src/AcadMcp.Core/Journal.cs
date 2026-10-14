@@ -25,6 +25,18 @@ public sealed class Journal
 
     public IReadOnlyList<StepRecord> Records => _records;
 
+    /// <summary>
+    /// Records that were present in the drawing but could not be read back, as of the
+    /// last load.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately not persisted: it describes one read rather than the journal itself.
+    /// It exists so that a damaged journal is reported instead of looking like a shorter
+    /// plan — a step whose record is gone can neither be replayed nor rolled back, and its
+    /// geometry is left in the drawing with nothing owning it.
+    /// </remarks>
+    public int Unreadable { get; set; }
+
     public int Count => _records.Count;
 
     /// <summary>The applied steps, in order.</summary>

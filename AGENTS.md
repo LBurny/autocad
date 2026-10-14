@@ -232,6 +232,16 @@ allowed a second attempt and nothing else. `tests/test_plugin_client.py` pins th
 down with a fake socket, including the case where the fake deliberately drops the
 connection.
 
+**The journal's write path is simple on purpose, and the numbers are known.** A save
+rewrites every record; a writer that only wrote what changed would have to be told what
+changed, and a miss is a silent permanent loss. Measured with the self-test's scale note
+(`scripts/selftest.sh --engine` prints it): at 400 steps one more step costs 10.9 ms, a
+full re-read 11 ms, and a journal-only change 9 ms — the growth is in the geometry path,
+not in the journal write, so incremental writes would not fix it. Both optimisations were
+planned, measured and dropped; re-measure before resurrecting either. Step numbers are
+positions, and a record that cannot be read is counted in `journal.Unreadable` and
+reported, not silently skipped.
+
 **A SplitContainer starts out 150x100.** Setting `Panel2MinSize` to anything useful in
 the constructor throws before the control has ever been laid out, and the message it
 throws talks about `SplitterDistance`, which sends you looking in the wrong place.

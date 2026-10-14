@@ -154,6 +154,48 @@ The port is unauthenticated: any process on this machine can drive the drawing. 
 is the same trust level the AutoCAD instance already has, and binding to loopback is
 what keeps it off the network.
 
+## Persistence, and why it is deliberately simple
+
+The journal lives in the drawing: a dictionary (`ACADMCP`) in the named object
+dictionary, one Xrecord per step (`S0001`, chunked into `S0001.1`, `.2` … at 4000
+characters), plus a `meta` record with the version, the plan's description and the
+count. It travels with the .dwg, and because an Xrecord is a database object,
+`Ctrl+Z` reverts the journal and the geometry together.
+
+Two properties of the file format are worth knowing before touching it:
+
+- **A save rewrites every record.** That is a deliberate trade: a writer that only
+  writes what changed has to be told what changed, and it can be told wrong — a
+  missed record is a silent, permanent loss. Rewriting everything cannot drift. The
+  cost was measured rather than assumed, see below.
+- **Step numbers are positions.** A record that cannot be read is counted
+  (`journal.Unreadable`, shown in the palette and in `plugin_status`) and the
+  survivors are renumbered. Numbering by position is what keeps `Journal.At`, which
+  is positional, in step with the number shown on the row — a damaged load used to be
+  able to leave those two disagreeing, so that asking for step 4 could hand back
+  step 5.
+
+### The measured numbers
+
+From the in-AutoCAD self-test (`[note] scale at …`), on this machine:
+
+| Journal length | Cost of one more step | Full re-read | One journal-only change |
+|---|---|---|---|
+| 200 steps | 4.1 ms | 9 ms | 8 ms |
+| 400 steps | 10.9 ms | 11 ms | 9 ms |
+
+The growth with length is in the *geometry* path — entity creation and the undo
+record that carries it — not in the journal write: a journal-only change stays flat
+at 8–9 ms as the journal doubles. So writing the journal incrementally would not fix
+the part that grows, and a full re-read costs ~1% of one core per second even at 400
+steps, which is what the palette's poll does.
+
+**Conclusion, recorded so it is not re-litigated:** the obvious optimisations —
+incremental journal writes, and a revision counter so a re-read can skip parsing —
+were planned, measured and dropped. Neither is worth the risk of a writer that can
+be told the wrong thing. Revisit if drawings with thousands of steps turn up, and
+re-measure first: `dotnet test` plus `scripts/selftest.sh --engine` prints the numbers.
+
 ## What is not done yet
 
 - **Manual-edit drift is not detected.** If the user edits or erases a step's geometry

@@ -603,6 +603,12 @@ public sealed class StepsControl : UserControl
         {
             text += $", {drifted} changed by hand";
         }
+        if (journal.Unreadable > 0)
+        {
+            // Said out loud rather than passed over: those steps can neither be replayed
+            // nor rolled back, and their geometry has nothing owning it any more.
+            text += $", {journal.Unreadable} record(s) unreadable";
+        }
         return text;
     }
 

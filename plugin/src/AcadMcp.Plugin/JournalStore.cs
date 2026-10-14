@@ -118,18 +118,21 @@ public sealed class JournalStore
             count = present;
         }
 
+        var payloads = new List<string?>(count);
         for (var index = 1; index <= count; index++)
         {
-            var json = ReadStep(dictionary, tr, index);
-            if (string.IsNullOrWhiteSpace(json))
-            {
-                continue;
-            }
-            var record = JournalJson.RecordFromNode(TryParse(json));
-            if (record is not null)
-            {
-                journal.AddExecuted(record with { Index = index });
-            }
+            payloads.Add(ReadStep(dictionary, tr, index));
+        }
+
+        // Numbering and the unreadable count are Core's job, so they can be tested
+        // without AutoCAD; the loop above is only the I/O.
+        journal.Unreadable = JournalJson.AppendOrdered(journal, payloads);
+        if (journal.Unreadable > 0)
+        {
+            PluginLog.Write(
+                $"journal: {journal.Unreadable} of {count} record(s) could not be read; "
+                + "those steps can neither be replayed nor rolled back, and their geometry "
+                + "is now owned by nothing");
         }
         return journal;
     }
@@ -291,18 +294,6 @@ public sealed class JournalStore
             }
         }
         return text.Length == 0 ? null : text.ToString();
-    }
-
-    private static JsonNode? TryParse(string json)
-    {
-        try
-        {
-            return JsonNode.Parse(json);
-        }
-        catch (Exception)
-        {
-            return null;
-        }
     }
 
     private static void Trash(Transaction tr, ObjectId id)
