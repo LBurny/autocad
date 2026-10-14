@@ -47,7 +47,7 @@ MAX_REPLY_BYTES = 64 * 1024 * 1024
 #: Idempotent writes (``ensure_layer``, ``set_units_mm``) are deliberately not in
 #: here either. They are cheap to make safe, but a rule with exceptions is a rule
 #: somebody will get wrong; the reconnect is rare and re-reading is cheap.
-RETRY_SAFE = frozenset({"ping", "status", "info", "get_steps", "reload"})
+RETRY_SAFE = frozenset({"ping", "status", "info", "get_steps", "reload", "blocks"})
 
 
 class PluginError(RuntimeError):

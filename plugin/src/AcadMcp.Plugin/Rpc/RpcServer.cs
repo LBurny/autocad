@@ -294,6 +294,20 @@ public sealed class RpcServer : IDisposable
                 return DrawingApi.EnsureLayer(
                     document, Str(p, "layer", "0"), NullableInt(p, "color"), Str(p, "linetype"));
 
+            case "blocks":
+            {
+                var source = NullableStr(p, "source");
+                return new JsonObject
+                {
+                    ["source"] = source,
+                    ["blocks"] = DrawingApi.Blocks(document, source, Int(p, "limit", 500)),
+                };
+            }
+
+            case "ensure_block":
+                return DrawingApi.EnsureBlock(
+                    document, Str(p, "block", Str(p, "name")), NullableStr(p, "source"));
+
             case "set_units_mm":
                 return DrawingApi.SetUnitsMm(document);
 

@@ -85,16 +85,24 @@ internal static class Program
             {
                 continue;
             }
-            var accessors = (property.CanRead ? "get " : "")
-                + (property.CanWrite ? "set" : "");
-            yield return $"  prop {SafeName(property.PropertyType)} {property.Name} [{accessors.Trim()}]";
+            // Reading a member's type is what fails, not listing it: the metadata
+            // loader cannot decode every signature AutoCAD ships. One such member
+            // must not cost the whole dump — this is the only way to look at the API
+            // without booting AutoCAD, so a partial answer has to survive.
+            yield return Safe(() =>
+            {
+                var accessors = (property.CanRead ? "get " : "")
+                    + (property.CanWrite ? "set" : "");
+                return $"  prop {SafeName(property.PropertyType)} {property.Name} [{accessors.Trim()}]";
+            }, property.Name);
         }
 
         foreach (var field in type.GetFields(flags).OrderBy(f => f.Name))
         {
             if (Matches(field.Name, filter))
             {
-                yield return $"  field {SafeName(field.FieldType)} {field.Name}";
+                yield return Safe(
+                    () => $"  field {SafeName(field.FieldType)} {field.Name}", field.Name);
             }
         }
 
@@ -102,15 +110,19 @@ internal static class Program
         {
             if (Matches(evt.Name, filter))
             {
-                yield return $"  event {SafeName(evt.EventHandlerType)} {evt.Name}";
+                yield return Safe(
+                    () => $"  event {SafeName(evt.EventHandlerType)} {evt.Name}", evt.Name);
             }
         }
 
         foreach (var ctor in type.GetConstructors(flags).OrderBy(c => c.GetParameters().Length))
         {
-            var ctorParams = string.Join(", ", ctor.GetParameters()
-                .Select(p => $"{SafeName(p.ParameterType)} {p.Name}"));
-            yield return $"  new {type.Name}({ctorParams})";
+            yield return Safe(() =>
+            {
+                var ctorParams = string.Join(", ", ctor.GetParameters()
+                    .Select(p => $"{SafeName(p.ParameterType)} {p.Name}"));
+                return $"  new {type.Name}({ctorParams})";
+            }, "ctor");
         }
 
         foreach (var method in type.GetMethods(flags)
@@ -121,10 +133,25 @@ internal static class Program
             {
                 continue;
             }
-            var parameters = string.Join(", ", method.GetParameters()
-                .Select(p => $"{SafeName(p.ParameterType)} {p.Name}"
-                    + (p.HasDefaultValue ? " = ..." : "")));
-            yield return $"  {SafeName(method.ReturnType)} {method.Name}({parameters})";
+            yield return Safe(() =>
+            {
+                var parameters = string.Join(", ", method.GetParameters()
+                    .Select(p => $"{SafeName(p.ParameterType)} {p.Name}"
+                        + (p.HasDefaultValue ? " = ..." : "")));
+                return $"  {SafeName(method.ReturnType)} {method.Name}({parameters})";
+            }, method.Name);
+        }
+    }
+
+    private static string Safe(Func<string> describe, string name)
+    {
+        try
+        {
+            return describe();
+        }
+        catch (Exception error)
+        {
+            return $"  ? {name}  <unreadable signature: {error.GetType().Name}>";
         }
     }
 

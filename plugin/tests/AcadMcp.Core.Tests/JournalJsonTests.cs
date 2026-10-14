@@ -48,6 +48,18 @@ public class JournalJsonTests
             new Primitive { Kind = PrimitiveKind.Hatch, Pattern = "ANSI31", Scale = 40, Solid = false },
             new Primitive { Kind = PrimitiveKind.Circle, Points = [0, 0], Radius = 400 },
             new Primitive { Kind = PrimitiveKind.Dimension, Points = [0, 0, 6000, 0], Offset = -1600 },
+            new Primitive
+            {
+                Kind = PrimitiveKind.Insert,
+                Points = [4000, 3000],
+                Block = "\u77e9\u5f62\u67f1",
+                Source = @"D:\lib\columns.dwg",
+                Rotation = 90,
+                ScaleX = 1.5,
+                ScaleY = 2,
+                Layer = "S-COLUMN",
+                Properties = new JsonObject { ["\u5c3a\u5bf8"] = "400x400", ["\u56fe\u5c42"] = 3 },
+            },
         ],
         Timestamp = new DateTime(2026, 10, 15, 9, 30, 0, DateTimeKind.Local),
         DurationMs = 42,
@@ -104,7 +116,7 @@ public class JournalJsonTests
 
         var step = JournalJson.FromJson(JournalJson.ToJson(journal)).At(1)!;
 
-        Assert.Equal(5, step.Primitives.Count);
+        Assert.Equal(6, step.Primitives.Count);
         Assert.Equal(PrimitiveKind.Polyline, step.Primitives[0].Kind);
         Assert.True(step.Primitives[0].Closed);
         Assert.Equal("DASHED", step.Primitives[0].Linetype);
@@ -115,6 +127,42 @@ public class JournalJsonTests
         Assert.Equal(40, step.Primitives[2].Scale);
         Assert.Equal(400, step.Primitives[3].Radius);
         Assert.Equal(-1600, step.Primitives[4].Offset);
+    }
+
+    [Fact]
+    public void RoundTripPreservesAnInsert()
+    {
+        var journal = new Journal();
+        journal.AddExecuted(SampleStep());
+
+        var insert = JournalJson.FromJson(JournalJson.ToJson(journal)).At(1)!.Primitives[5];
+
+        Assert.Equal(PrimitiveKind.Insert, insert.Kind);
+        // The whole point of the insert travelling as a primitive: a replayed step
+        // must be able to import the definition and set the size again, so every one
+        // of these has to survive the wire and the Xrecord.
+        Assert.Equal("\u77e9\u5f62\u67f1", insert.Block);
+        Assert.Equal(@"D:\lib\columns.dwg", insert.Source);
+        Assert.Equal((4000, 3000), insert.PointAt(0));
+        Assert.Equal(90, insert.Rotation);
+        Assert.Equal(1.5, insert.ScaleX);
+        Assert.Equal(2, insert.ScaleY);
+        Assert.Equal("S-COLUMN", insert.Layer);
+        Assert.Equal("400x400", insert.Properties!["\u5c3a\u5bf8"]!.GetValue<string>());
+        Assert.Equal(3, insert.Properties!["\u56fe\u5c42"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public void AnInsertDefaultsToAScaleOfOneAndNoProperties()
+    {
+        var primitive = new Primitive { Kind = PrimitiveKind.Insert, Block = "COLUMN" };
+
+        Assert.Equal(1.0, primitive.ScaleX);
+        Assert.Equal(1.0, primitive.ScaleY);
+        Assert.Null(primitive.Properties);
+        Assert.Null(primitive.Source);
+        // Not the hatch pattern scale: the two are deliberately separate fields.
+        Assert.Equal(1.0, primitive.Scale);
     }
 
     [Fact]
@@ -300,7 +348,7 @@ public class JournalJsonTests
 
         Assert.Equal("draw_room", record.Op);
         Assert.Equal(["2F1", "2F2"], record.ObjectsAfter);
-        Assert.Equal(5, record.Primitives.Count);
+        Assert.Equal(6, record.Primitives.Count);
     }
 
     [Fact]

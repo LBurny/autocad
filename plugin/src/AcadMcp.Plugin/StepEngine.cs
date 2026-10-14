@@ -575,20 +575,106 @@ public sealed class StepEngine
         var textStyle = primitives.Any(p => p.Kind is PrimitiveKind.Text or PrimitiveKind.MText)
             ? TextStyles.Ensure(_db, tr)
             : ObjectId.Null;
+        var context = new BuildContext { Database = _db, TextStyle = textStyle };
 
         foreach (var primitive in primitives)
         {
             EnsureLayer(tr, primitive.Layer);
             EnsureLinetype(tr, primitive.Linetype);
 
-            var entity = PrimitiveBuilder.Build(primitive, _db, textStyle);
+            var definition = primitive.Kind == PrimitiveKind.Insert
+                ? EnsureBlock(_db, tr, primitive.Block, primitive.Source, out _)
+                : ObjectId.Null;
+
+            var entity = PrimitiveBuilder.Build(primitive, context with { BlockDefinition = definition });
             model.AppendEntity(entity);
             tr.AddNewlyCreatedDBObject(entity, true);
-            PrimitiveBuilder.Finish(entity);
+            PrimitiveBuilder.Finish(entity, primitive);
             handles.Add(entity.Handle.ToString());
         }
         return handles;
     }
+
+    /// <summary>
+    /// Make sure <paramref name="name"/> is defined in this drawing, importing it from
+    /// <paramref name="source"/> if it is not.
+    /// </summary>
+    /// <remarks>
+    /// A block definition is <b>document state, owned by no step</b> — the same
+    /// standing as a layer, and for the same reason. If a step owned the definition it
+    /// imported, rolling that step back would take the definition down with it, and
+    /// every surviving step's reference to it would be left pointing at nothing. So
+    /// this is idempotent and never journalled: import once, and a later insert of the
+    /// same block anywhere in the plan finds it already there.
+    /// </remarks>
+    internal static ObjectId EnsureBlock(
+        Database db, Transaction tr, string name, string? source, out bool imported)
+    {
+        imported = false;
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return ObjectId.Null;
+        }
+
+        var table = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+        if (table.Has(name))
+        {
+            return table[name];
+        }
+        if (string.IsNullOrWhiteSpace(source))
+        {
+            throw new InvalidOperationException(
+                $"this drawing has no block '{name}', and no library file was named to "
+                + "import it from");
+        }
+        if (!File.Exists(source))
+        {
+            throw new FileNotFoundException($"library file not found: {source}", source);
+        }
+
+        // Read the library on the side. Opening it through this drawing would make it
+        // a reference to another file rather than an import of a definition.
+        using var library = new Database(false, true);
+        library.ReadDwgFile(source, FileOpenMode.OpenForReadAndAllShare, false, null);
+        using var libraryTr = library.TransactionManager.StartTransaction();
+        var libraryTable = (BlockTable)libraryTr.GetObject(library.BlockTableId, OpenMode.ForRead);
+        if (!libraryTable.Has(name))
+        {
+            throw new InvalidOperationException(
+                $"block '{name}' is not in '{Path.GetFileName(source)}'");
+        }
+
+        // A wblock clone of the one definition, and the measurements say why not the two
+        // obvious alternatives:
+        //   * Database.Insert needs its second argument to be the source *path*, contrary
+        //     to its name — passing the block's own name there makes it refuse with
+        //     eSelfReference — and with preserve: false it refuses with eInvalidOwnerObject.
+        //     Even when it succeeds it copies the library's whole block table into the
+        //     drawing, bringing along every other block in the file, plus a nameless record.
+        //   * Copying the entities by hand would leave the definition to be rebuilt and
+        //     would lose everything that makes a dynamic block dynamic.
+        // The clone brings exactly the definition asked for, and its dependencies with it.
+        var ids = new ObjectIdCollection { libraryTable[name] };
+        try
+        {
+            db.WblockCloneObjects(ids, db.BlockTableId, new IdMapping(),
+                DuplicateRecordCloning.Replace, false);
+        }
+        catch (System.Exception error)
+        {
+            throw new InvalidOperationException(
+                $"block '{name}' could not be imported from '{Path.GetFileName(source)}': "
+                + error.Message, error);
+        }
+        libraryTr.Commit();
+
+        // Read back through the drawing's own block table rather than trusting the id the
+        // clone was handed: the definition is what the name names, and a reference built
+        // from anything else would be pointing somewhere the caller never asked for.
+        imported = true;
+        return table[name];
+    }
+
 
     /// <summary>Erase entities by handle, skipping anything already gone.</summary>
     private List<string> Erase(Transaction tr, IReadOnlyList<string> handles)

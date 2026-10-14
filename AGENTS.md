@@ -265,6 +265,34 @@ reads whichever drawing is *active*, so the test mode leaves its scratch drawing
 and active rather than restoring the previous one, and the self-test logs which is
 which: `self-test finished: drew in 'Drawing2.dwg', active is 'Drawing2.dwg'`.
 
+**Importing a block definition: use a wblock clone, not `Database.Insert`.** Three things
+were measured before this was settled, each one costing a wrong version: `Insert`'s second
+argument must be the source *path* — passing the block's own name there, which the
+parameter's name invites, refuses the whole import with `eSelfReference`, and
+`preserveSourceDatabase: false` refuses with `eInvalidOwnerObject`. Even when it succeeds it
+copies the library's *entire* block table into the drawing (nine extra blocks from AutoCAD's
+sample library) plus a nameless definition. `db.WblockCloneObjects` with
+`DuplicateRecordCloning.Replace` brings exactly the definition asked for. Resolve the
+definition by name from the target's own block table afterwards rather than trusting the
+`ObjectId` the clone call was handed.
+
+**A dynamic block reference can resolve to an anonymous `*U` record.** Set a dynamic block's
+parameters to a state it has no named size for — a "custom" state — and AutoCAD bakes that
+state into an anonymous definition: `BlockReference.Name` and its definition both read
+`*U3`, and the original block name is nowhere on the reference. An element's identity has to
+come from the step's record (`Primitive.Block`), not from the reference; the `entities` call
+reports both `block` and `definition` and neither is guaranteed to match what was asked for.
+A dynamic block's parameters *are* readable without opening anything interactively — a
+throwaway `BlockReference` that is never appended exposes the whole collection including
+`GetAllowedValues()` — which is how `blocks` describes a library.
+
+**A block definition is document state, not a step's to own.** Rollback erases only the
+handles a step recorded, so it never touches a definition; if step 1 imported the block and
+step 2 placed another copy, rolling step 1 back must leave the definition standing or step
+2's reference would dangle. `EnsureBlock` is therefore idempotent and never journalled.
+`Ctrl+Z` of the importing step *does* remove the definition, together with that step's
+reference and journal record — correctly, since all three were one transaction.
+
 ## Environment
 
 - AutoCAD 2026 (release 25.1) is at `F:\AutoCAD\AutoCAD 2026` — **not** under

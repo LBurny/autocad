@@ -13,6 +13,7 @@ its own drawing and leaves it behind; the harness closes AutoCAD afterwards.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,10 @@ class Report:
         suffix = f" -- {detail}" if detail else ""
         self.lines.append(f"[{'pass' if passed else 'FAIL'}] {name}{suffix}")
 
+    def note(self, text: str) -> None:
+        """A measured name or number, for the log rather than for pass or fail."""
+        self.lines.append(f"[note] {text}")
+
     def finish(self) -> str:
         summary = (
             "\nACADMCP-RPC: all checks passed\n"
@@ -47,12 +52,35 @@ class Report:
         return "\n".join(self.lines) + "\n" + summary
 
 
+#: Where AutoCAD 2026 keeps its block libraries on this machine. Only ever used for the
+#: survey at the end, and overridable because another release or another language puts
+#: them somewhere else.
+SAMPLE_DIR = Path(
+    os.environ.get("ACADMCP_SAMPLE_DIR", r"F:\AutoCAD\AutoCAD 2026\Sample\zh-CN\Dynamic Blocks")
+)
+
+#: The files worth reading: a factory is architectural and structural before it is anything
+#: else.
+SURVEY = [
+    "Architectural - Metric.dwg",
+    "Structural - Metric.dwg",
+    "Mechanical - Metric.dwg",
+]
+
+
 def line(x1: float, y1: float, x2: float, y2: float, layer: str = "A-WALL") -> dict[str, Any]:
     return {"kind": "line", "points": [x1, y1, x2, y2], "layer": layer}
 
 
 def entity_count(backend: PluginBackend) -> int:
     return len(backend.entities(limit=1000))
+
+
+def _abbreviate(values: list[Any], keep: int = 8) -> str:
+    """A few of the values a parameter accepts, so the log stays readable."""
+    if len(values) <= keep:
+        return str(values)
+    return f"{values[:keep]} … {len(values)} in all"
 
 
 def run(report: Report) -> None:
@@ -239,6 +267,115 @@ def run(report: Report) -> None:
         rows = session.steps()
         report.check("steps can be listed", isinstance(rows, list), f"rows={len(rows)}")
 
+        # --- blocks: an insert is a step, its definition is document state ---
+        # The engine checks this in AutoCAD's own process against a library of its own; here
+        # it is a real element from a library AutoCAD shipped, placed at a chosen size, which
+        # is the thing the element catalogue is for.
+        library = SAMPLE_DIR / SURVEY[1]
+        if library.exists():
+            catalogued = client.call("blocks", source=str(library))["blocks"]
+            dynamic = [b for b in catalogued if b.get("is_dynamic")]
+            report.check(
+                "a library file can be listed without opening it as a drawing",
+                len(catalogued) > 0,
+                f"{len(catalogued)} definition(s), {len(dynamic)} dynamic",
+            )
+
+            name = dynamic[0]["name"] if dynamic else catalogued[0]["name"]
+            first = client.call("ensure_block", block=name, source=str(library))
+            report.check("a block can be imported from the library", first["created"] is True, str(first))
+            again = client.call("ensure_block", block=name, source=str(library))
+            report.check("importing it a second time does nothing", again["created"] is False, str(again))
+
+            imported = client.call("blocks")["blocks"]
+            report.check("the imported definition is now in this drawing", name in [b["name"] for b in imported])
+
+            # A dynamic block has to arrive still dynamic, with its parameters intact:
+            # importing it is useless if what lands is a frozen picture of it.
+            definition = next((b for b in imported if b["name"] == name), {})
+            report.check(
+                "it arrived still dynamic, with the same parameters",
+                definition.get("is_dynamic") is True
+                and [p["name"] for p in definition.get("properties", [])]
+                == [p["name"] for p in next((b for b in dynamic if b["name"] == name), {"properties": []}).get(
+                    "properties", []
+                )],
+                f"dynamic={definition.get('is_dynamic')}, "
+                f"{len(definition.get('properties', []))} parameter(s)",
+            )
+
+            # Place it at a chosen size. Which parameter to use is read off the definition
+            # rather than written down here: the library is AutoCAD's, not ours, and a test
+            # that hardcodes Chinese parameter names would be a test of this machine.
+            settable = [p for p in definition.get("properties", []) if not p["read_only"]]
+            sized = next((p for p in settable if p["values"]), settable[0] if settable else None)
+            wanted = (
+                sized["values"][len(sized["values"]) // 2]
+                if sized and sized["values"]
+                else 250.0
+            )
+            report.note(
+                f"placing '{name}' with {sized['name']}={wanted}" if sized else f"'{name}' has no settable parameter"
+            )
+
+            placed = client.call(
+                "apply",
+                step={
+                    "op": "place_element",
+                    "label": f"{name} from the library",
+                    "primitives": [
+                        {
+                            "kind": "insert",
+                            "points": [0, 0],
+                            "block": name,
+                            "source": str(library),
+                            "layer": "S-COLUMN",
+                            "properties": {sized["name"]: wanted} if sized else {},
+                        }
+                    ],
+                },
+            )
+            result = placed["result"]
+            report.check("a step that inserts a library block commits", result["ok"], result["message"])
+
+            handle = (result.get("step") or {}).get("handles", [""])[0]
+            drawn = [row for row in client.call("entities")["entities"] if row["handle"] == handle]
+            report.note(
+                f"the placed reference resolves to '{drawn[0]['block']}'"
+                f" (definition '{drawn[0]['definition']}', dynamic={drawn[0]['dynamic']})"
+                if drawn
+                else "the placed reference is not in the drawing"
+            )
+            report.check(
+                "it is in the drawing as a dynamic block reference",
+                bool(drawn)
+                and drawn[0]["type"] == "AcDbBlockReference"
+                and drawn[0]["dynamic"] is True,
+                str(drawn or handle),
+            )
+            if sized and drawn:
+                actual = drawn[0].get("properties", {}).get(sized["name"])
+                report.check(
+                    "the size it was placed at is the size it has",
+                    actual is not None and abs(float(actual) - float(wanted)) < 1e-6,
+                    f"{sized['name']}={actual}, wanted {wanted}",
+                )
+
+            back = client.call("rollback_to", index=0, force=True)
+            report.check("rolling the insert back succeeds", back["result"]["ok"], back["result"]["message"])
+            report.check(
+                "the definition is still there after the rollback, and the reference is not",
+                name in [b["name"] for b in client.call("blocks")["blocks"]]
+                and not [
+                    row
+                    for row in client.call("entities")["entities"]
+                    if row["handle"] == handle
+                ],
+            )
+            client.call("reset")
+        else:
+            report.note(f"no library to read at {library}; the block checks were skipped")
+
         # --- an unknown method is refused, not guessed ---------------------
         try:
             client.call("no_such_method")
@@ -251,6 +388,59 @@ def run(report: Report) -> None:
         client.close()
 
     check_mcp_tools(report)
+    survey_libraries(report)
+
+
+def survey_libraries(report: Report) -> None:
+    """Read the block libraries AutoCAD shipped with, and report what is in them.
+
+    Reported as notes rather than checks, because this is data: the element catalogue is
+    written against these names, so they have to be looked at rather than guessed. The one
+    thing here that is a check is the one that decides whether a placed element can be
+    sized at all — that a dynamic block's parameters come back, with the values they accept.
+    """
+    if not SAMPLE_DIR.is_dir():
+        report.note(f"no sample libraries at {SAMPLE_DIR}")
+        return
+
+    client = PluginClient()
+    try:
+        client.connect()
+    except PluginUnavailable as exc:
+        report.note(f"could not survey the libraries: {exc}")
+        return
+
+    try:
+        seen_parameters = False
+        for filename in SURVEY:
+            path = SAMPLE_DIR / filename
+            if not path.exists():
+                continue
+            blocks = client.call("blocks", source=str(path))["blocks"]
+            dynamic = [b for b in blocks if b.get("is_dynamic")]
+            report.note(f"{filename}: {len(blocks)} definition(s), {len(dynamic)} dynamic")
+            for block in blocks[:80]:
+                mark = "dynamic" if block.get("is_dynamic") else f"{block.get('entities', '?')} entities"
+                report.note(f"  {block['name']}  ({mark})")
+            for block in dynamic[:10]:
+                properties = block.get("properties") or []
+                seen_parameters = seen_parameters or bool(properties)
+                described = "; ".join(
+                    f"{p['name']} [{p['units']}]"
+                    + ("" if not p["read_only"] else " read-only")
+                    + (f" in {_abbreviate(p['values'])}" if p["values"] else "")
+                    for p in properties[:6]
+                )
+                report.note(f"  params of {block['name']}: {described or '(none)'}")
+
+        report.check(
+            "a dynamic block's parameters and their allowed values can be read",
+            seen_parameters,
+        )
+    except PluginError as exc:
+        report.check("the library survey completed", False, f"{type(exc).__name__}: {exc}")
+    finally:
+        client.close()
 
 
 def check_mcp_tools(report: Report) -> None:

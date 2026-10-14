@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 
 namespace AcadMcp.Core;
@@ -14,6 +15,17 @@ public enum PrimitiveKind
     MText,
     Hatch,
     Dimension,
+
+    /// <summary>
+    /// A reference to a block definition: one entity standing for a repeated element.
+    /// </summary>
+    /// <remarks>
+    /// The definition itself is not a primitive. It belongs to the drawing the way a layer
+    /// does — created once, idempotently, and owned by no particular step — because a step
+    /// that owned it would take every later step's references down with it when it was
+    /// rolled back.
+    /// </remarks>
+    Insert,
 }
 
 /// <summary>
@@ -98,6 +110,41 @@ public sealed record Primitive
     [JsonPropertyName("text_height")]
     public double TextHeight { get; init; }
 
+    /// <summary>Name of the block to insert. Only meaningful for <see cref="PrimitiveKind.Insert"/>.</summary>
+    [JsonPropertyName("block")]
+    public string Block { get; init; } = "";
+
+    /// <summary>
+    /// Where to import the definition from when the drawing does not already have it: a
+    /// library drawing, as an absolute path.
+    /// </summary>
+    /// <remarks>
+    /// Carried on the primitive rather than configured once, so that replaying a step in a
+    /// drawing that has never seen the library still works — the same reason the resolved
+    /// geometry travels with the step.
+    /// </remarks>
+    [JsonPropertyName("source")]
+    public string? Source { get; init; }
+
+    /// <summary>Insertion scale. Separate from <see cref="Scale"/>, which is a hatch's pattern scale.</summary>
+    [JsonPropertyName("scale_x")]
+    public double ScaleX { get; init; } = 1.0;
+
+    /// <inheritdoc cref="ScaleX"/>
+    [JsonPropertyName("scale_y")]
+    public double ScaleY { get; init; } = 1.0;
+
+    /// <summary>
+    /// Dynamic block properties to set on the reference: name to value.
+    /// </summary>
+    /// <remarks>
+    /// This is how one block serves a range of sizes — a window block with a width lookup is
+    /// set to 1800 rather than being a separate block. Values are checked against the block's
+    /// allowed values, because a silently ignored setting is a wrong drawing that looks fine.
+    /// </remarks>
+    [JsonPropertyName("properties")]
+    public JsonObject? Properties { get; init; }
+
     /// <summary>Number of (x, y) pairs in <see cref="Points"/>.</summary>
     [JsonIgnore]
     public int PointCount => Points.Count / 2;
@@ -124,6 +171,9 @@ public sealed record Primitive
         PrimitiveKind.Text or PrimitiveKind.MText => $"text {Trim(Text)}",
         PrimitiveKind.Hatch => $"hatch {Pattern}",
         PrimitiveKind.Dimension => "dimension",
+        PrimitiveKind.Insert => Properties is { Count: > 0 }
+            ? $"insert {Block} ({Properties.Count} property/ies)"
+            : $"insert {Block}",
         _ => Kind.ToString(),
     };
 

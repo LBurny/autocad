@@ -226,6 +226,11 @@ public static class JournalJson
                 Color = color,
                 Offset = Num(o, "offset"),
                 TextHeight = Num(o, "text_height"),
+                Block = Str(o, "block"),
+                Source = NullableStr(o, "source"),
+                ScaleX = Num(o, "scale_x", 1.0),
+                ScaleY = Num(o, "scale_y", 1.0),
+                Properties = o["properties"] is JsonObject props ? (JsonObject)props.DeepClone() : null,
             };
         }
         catch (Exception)
@@ -277,6 +282,13 @@ public static class JournalJson
             return v.GetValue<string>();
         }
         return fallback;
+    }
+
+    /// <summary>Like <see cref="Str"/>, but an absent or empty string means "unset" rather than "".</summary>
+    private static string? NullableStr(JsonObject o, string key)
+    {
+        var value = Str(o, key);
+        return value.Length == 0 ? null : value;
     }
 
     private static bool Bool(JsonObject o, string key, bool fallback = false)

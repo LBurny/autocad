@@ -2,6 +2,7 @@ using System.Text.Json.Nodes;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.Colors;
 using Autodesk.AutoCAD.DatabaseServices;
+using Autodesk.AutoCAD.Geometry;
 using AcadApp = Autodesk.AutoCAD.ApplicationServices.Core.Application;
 
 namespace AcadMcp.Plugin;
@@ -85,6 +86,178 @@ internal static class DrawingApi
         return new JsonObject { ["insunits"] = 4, ["units"] = "millimetres" };
     }
 
+    /// <summary>Block definitions in this drawing, or in a library file when asked for one.</summary>
+    /// <remarks>
+    /// Read-only both ways: the open drawing is only read, and a library file is opened on
+    /// the side and never written. Anonymous, layout and externally referenced definitions
+    /// are left out — nobody inserts those, so a catalogue built from this list must not
+    /// offer them either.
+    /// </remarks>
+    public static JsonArray Blocks(Document document, string? source, int limit)
+    {
+        if (!string.IsNullOrWhiteSpace(source))
+        {
+            if (!File.Exists(source))
+            {
+                throw new FileNotFoundException($"no such library file: {source}", source);
+            }
+
+            // On the side, because the user may well have the library open in AutoCAD.
+            using var library = new Database(false, true);
+            library.ReadDwgFile(source, FileOpenMode.OpenForReadAndAllShare, false, null);
+            using var libraryTr = library.TransactionManager.StartTransaction();
+            var listed = ListBlocks(library, libraryTr, limit);
+            libraryTr.Abort();
+            return listed;
+        }
+
+        using var docLock = document.LockDocument();
+        using var tr = document.Database.TransactionManager.StartTransaction();
+        var blocks = ListBlocks(document.Database, tr, limit);
+        tr.Commit();
+        return blocks;
+    }
+
+    /// <summary>Make a block definition available in this drawing, importing it if needed.</summary>
+    /// <remarks>
+    /// Document state, not a step: idempotent, and outside the journal, for the reason
+    /// given on <see cref="StepEngine.EnsureBlock"/>.
+    /// </remarks>
+    public static JsonObject EnsureBlock(Document document, string name, string? source)
+    {
+        using var docLock = document.LockDocument();
+        using var tr = document.Database.TransactionManager.StartTransaction();
+        StepEngine.EnsureBlock(document.Database, tr, name, source, out var imported);
+        tr.Commit();
+        return new JsonObject { ["block"] = name, ["created"] = imported };
+    }
+
+    private static JsonArray ListBlocks(Database db, Transaction tr, int limit)
+    {
+        var found = new JsonArray();
+        var table = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+
+        foreach (var id in table)
+        {
+            if (found.Count >= limit)
+            {
+                break;
+            }
+            if (tr.GetObject(id, OpenMode.ForRead) is not BlockTableRecord definition)
+            {
+                continue;
+            }
+            if (definition.IsAnonymous || definition.IsLayout
+                || definition.IsFromExternalReference || definition.IsFromOverlayReference)
+            {
+                continue;
+            }
+
+            found.Add(DescribeDefinition(definition));
+        }
+        return found;
+    }
+
+    private static JsonObject DescribeDefinition(BlockTableRecord definition)
+    {
+        var item = new JsonObject
+        {
+            ["name"] = definition.Name,
+            ["is_dynamic"] = definition.IsDynamicBlock,
+            ["explodable"] = definition.Explodable,
+            // Counted through LINQ: a block record is enumerable but exposes no usable
+            // Count member.
+            ["entities"] = definition.Cast<ObjectId>().Count(),
+        };
+
+        if (definition.IsDynamicBlock)
+        {
+            item["properties"] = DynamicParameters(definition);
+        }
+        return item;
+    }
+
+    /// <summary>What a dynamic block can be told to be: its parameters and their values.</summary>
+    /// <remarks>
+    /// Read off a throwaway reference, because the collection belongs to a reference and
+    /// not to the definition. It is never appended to anything: asking a definition about
+    /// itself must not leave an entity behind in the drawing.
+    /// </remarks>
+    private static JsonArray DynamicParameters(BlockTableRecord definition)
+    {
+        var parameters = new JsonArray();
+        using var reference = new BlockReference(Point3d.Origin, definition.ObjectId);
+        if (!reference.IsDynamicBlock)
+        {
+            return parameters;
+        }
+
+        var collection = reference.DynamicBlockReferencePropertyCollection;
+        for (var i = 0; i < collection.Count; i++)
+        {
+            var property = collection[i];
+            var values = new JsonArray();
+            foreach (var allowed in property.GetAllowedValues() ?? [])
+            {
+                values.Add(Distinguish(allowed));
+            }
+
+            parameters.Add(new JsonObject
+            {
+                ["name"] = property.PropertyName,
+                ["read_only"] = property.ReadOnly,
+                // A unit type of 2 is a distance, so 400 there means 400 mm rather than a
+                // ratio: worth carrying, because a size parameter and a count parameter
+                // look identical once they are just numbers in JSON.
+                ["units"] = property.UnitsType.ToString(),
+                ["visible"] = property.VisibleInCurrentVisibilityState,
+                ["values"] = values,
+            });
+        }
+        return parameters;
+    }
+
+    /// <summary>Render an allowed value, keeping numbers distinguishable from text.</summary>
+    private static JsonNode? Distinguish(object? allowed) => allowed switch
+    {
+        null => null,
+        double number => JsonValue.Create(number),
+        short number => JsonValue.Create(number),
+        int number => JsonValue.Create(number),
+        long number => JsonValue.Create(number),
+        bool flag => JsonValue.Create(flag),
+        _ => JsonValue.Create(allowed.ToString()),
+    };
+
+    /// <summary>
+    /// What a placed block reference was set to: its live dynamic parameters.
+    /// </summary>
+    /// <remarks>
+    /// Only the ones that are visible and settable, because those are the ones anything can
+    /// do anything about. Read-only ones (AutoCAD puts an "Origin" on every dynamic block) are
+    /// left out rather than reported as if they were settings.
+    /// </remarks>
+    private static JsonObject ReferenceProperties(BlockReference reference)
+    {
+        var properties = new JsonObject();
+        if (!reference.IsDynamicBlock)
+        {
+            return properties;
+        }
+
+        var collection = reference.DynamicBlockReferencePropertyCollection;
+        for (var i = 0; i < collection.Count; i++)
+        {
+            var property = collection[i];
+            if (property.ReadOnly || !property.VisibleInCurrentVisibilityState)
+            {
+                continue;
+            }
+            properties[property.PropertyName] = Distinguish(property.Value);
+        }
+        return properties;
+    }
+
     public static JsonObject Info(Document document)
     {
         var db = document.Database;
@@ -148,6 +321,21 @@ internal static class DrawingApi
             else if (entity is MText mtext)
             {
                 item["text"] = mtext.Contents;
+            }
+            else if (entity is BlockReference reference)
+            {
+                // Both names, because they are not always the same and which one answers
+                // "what is this?" depends on the question. Name is what the reference calls
+                // itself; the definition is the record it resolves to, and AutoCAD keeps that
+                // as an anonymous *U record for a dynamic block set to a custom state.
+                item["block"] = reference.Name;
+                item["definition"] = reference.BlockTableRecord.IsNull
+                    ? ""
+                    : (reference.BlockTableRecord.GetObject(OpenMode.ForRead) as BlockTableRecord)?.Name ?? "";
+                item["dynamic"] = reference.IsDynamicBlock;
+                // What it was set to. A beam looks like a beam at any of its sizes, so the
+                // geometry alone cannot tell a placed element from a wrong-sized one.
+                item["properties"] = ReferenceProperties(reference);
             }
             found.Add(item);
         }

@@ -147,12 +147,65 @@ Loopback only, `ACADMCP_PORT` or 9880. One JSON object per line in, one per line
 
 Methods: `ping`, `status`, `info`, `get_steps`, `reload`, `apply`, `plan`, `run_next`,
 `run_all`, `run_to`, `rollback_to`, `reject`, `accept`, `note`, `snapshot`,
-`clear_plan`, `reset`, `update`, `ensure_layer`, `set_units_mm`, `entities`,
-`new_document`.
+`clear_plan`, `reset`, `update`, `ensure_layer`, `set_units_mm`, `entities`, `blocks`,
+`ensure_block`, `new_document`.
 
 The port is unauthenticated: any process on this machine can drive the drawing. That
 is the same trust level the AutoCAD instance already has, and binding to loopback is
 what keeps it off the network.
+
+## Repeating elements: blocks
+
+A factory plan is mostly repetition, so a step can insert a block instead of a
+polyline. `PrimitiveKind.Insert` carries `block` (the definition's name), `source` (the
+library .dwg to import it from), `points`, `rotation`, `scale_x`/`scale_y` and
+`properties` (the dynamic block's parameters).
+
+The rule that makes rolling back safe is: **a step owns the block reference it creates,
+and nothing else.** A definition is document state, with the same standing as a layer.
+If a step owned the definition it imported, rolling that step back would take the
+definition down with it and leave every surviving step's reference pointing at nothing.
+So `EnsureBlock` is idempotent, is never journalled, and is called inside the step's own
+transaction. What that buys, tested:
+
+- rolling back the step that placed a block removes the reference and leaves the
+  definition;
+- a second insert of the same block does not import a second definition, and both
+  references use the one;
+- `Ctrl+Z` of the step that placed it takes the reference, the definition and the
+  journal record back together, because they are all one transaction.
+
+`blocks` lists definitions — of the open drawing, or of any library .dwg (opened on the
+side, read-only, never made into an xref). Anonymous, layout and externally referenced
+definitions are filtered out; dynamic ones carry their parameters, their allowed values,
+their units and which are read-only. `ensure_block` imports one without placing it.
+
+### How definitions get imported, and why it is done this way
+
+Three measured findings, each of which cost a wrong version:
+
+- **`Database.Insert` needs its file-name argument to be the source path.** Passing the
+  block's own name there — which its parameter name invites — makes it refuse the whole
+  import with `eSelfReference`, for a block whose only content is a polyline. That is not
+  about the block's contents. With `preserveSourceDatabase: false` it refuses with
+  `eInvalidOwnerObject` instead.
+- **Even when `Insert` succeeds, it copies the library's whole block table**, bringing
+  every other block in the file (nine of them, in AutoCAD's sample library) into the
+  drawing, plus a nameless record alongside. A wblock clone brings exactly the definition
+  asked for. That is what `EnsureBlock` uses.
+- **A dynamic block reference can resolve to an anonymous `*U` record.** Set a dynamic
+  block's parameters to a state it has no named size for and AutoCAD bakes that state into
+  an anonymous definition; `BlockReference.Name` and the definition both read `*U3`. So
+  the element's identity lives in the step's record (`Primitive.Block`), not in the
+  reference — `entities` reports both names and you should not assume they match the block
+  you asked for.
+
+A dynamic block's parameters are readable without asking AutoCAD to open anything
+interactively: a throwaway `BlockReference` that is never appended to any drawing exposes
+the whole collection, allowed values included. The self-test asserts the geometry that
+came with an import by measuring extents (a 400 × 400 block at scale 1.5 and 2 measures
+600 × 800), because a definition that imported without its contents would otherwise look
+like a success.
 
 ## Persistence, and why it is deliberately simple
 

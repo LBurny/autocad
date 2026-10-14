@@ -1,8 +1,32 @@
+using System.Globalization;
+using System.Text.Json.Nodes;
 using AcadMcp.Core;
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.Geometry;
 
 namespace AcadMcp.Plugin;
+
+/// <summary>
+/// What a primitive needs from the drawing that the primitive itself cannot know.
+/// </summary>
+/// <remarks>
+/// Bundled into one type rather than passed as loose arguments so that the next
+/// thing a primitive needs — a resolved dimstyle, say — adds a field here instead
+/// of changing <see cref="PrimitiveBuilder.Build"/>'s signature and every call site.
+/// </remarks>
+public sealed record BuildContext
+{
+    public required Database Database { get; init; }
+
+    /// <summary>The CJK-capable text style, from <see cref="TextStyles.Ensure"/>.</summary>
+    public ObjectId TextStyle { get; init; }
+
+    /// <summary>
+    /// The definition an <c>Insert</c> refers to. Resolved by the caller, which is
+    /// the only party that can import it — see <see cref="StepEngine.EnsureBlock"/>.
+    /// </summary>
+    public ObjectId BlockDefinition { get; init; }
+}
 
 /// <summary>
 /// Turns a <see cref="Primitive"/> from the Python side into a real AutoCAD
@@ -23,11 +47,7 @@ public static class PrimitiveBuilder
     /// <summary>
     /// Create the entity for a primitive. It is not yet in the database.
     /// </summary>
-    /// <param name="textStyle">
-    /// The CJK-capable text style, from <see cref="TextStyles.Ensure"/>. Passed in
-    /// rather than looked up so the caller can hoist the lookup out of its loop.
-    /// </param>
-    public static Entity Build(Primitive primitive, Database database, ObjectId textStyle)
+    public static Entity Build(Primitive primitive, BuildContext context)
     {
         var entity = primitive.Kind switch
         {
@@ -35,10 +55,11 @@ public static class PrimitiveBuilder
             PrimitiveKind.Polyline => BuildPolyline(primitive),
             PrimitiveKind.Circle => BuildCircle(primitive),
             PrimitiveKind.Arc => BuildArc(primitive),
-            PrimitiveKind.Text => BuildText(primitive, textStyle),
-            PrimitiveKind.MText => BuildMText(primitive, textStyle),
+            PrimitiveKind.Text => BuildText(primitive, context.TextStyle),
+            PrimitiveKind.MText => BuildMText(primitive, context.TextStyle),
             PrimitiveKind.Hatch => BuildHatch(primitive),
-            PrimitiveKind.Dimension => BuildDimension(primitive, database),
+            PrimitiveKind.Dimension => BuildDimension(primitive, context.Database),
+            PrimitiveKind.Insert => BuildInsert(primitive, context),
             _ => throw new ArgumentOutOfRangeException(
                 nameof(primitive), primitive.Kind, "unsupported primitive kind"),
         };
@@ -52,13 +73,21 @@ public static class PrimitiveBuilder
     /// </summary>
     /// <remarks>
     /// A hatch has to be appended to a block before it can be evaluated; doing it
-    /// earlier either throws or silently produces an empty hatch.
+    /// earlier either throws or silently produces an empty hatch. A dynamic block
+    /// reference is the same shape of problem: its properties are resolved against
+    /// the definition, and the definition settles only once the reference is in the
+    /// drawing.
     /// </remarks>
-    public static void Finish(Entity entity)
+    public static void Finish(Entity entity, Primitive primitive)
     {
-        if (entity is Hatch hatch)
+        switch (entity)
         {
-            hatch.EvaluateHatch(false);
+            case Hatch hatch:
+                hatch.EvaluateHatch(false);
+                break;
+            case BlockReference reference:
+                FinishInsert(reference, primitive);
+                break;
         }
     }
 
@@ -188,6 +217,207 @@ public static class PrimitiveBuilder
         };
         return dimension;
     }
+
+    private static Entity BuildInsert(Primitive p, BuildContext context)
+    {
+        if (string.IsNullOrWhiteSpace(p.Block))
+        {
+            throw new InvalidOperationException("an insert needs a block name");
+        }
+        if (context.BlockDefinition.IsNull)
+        {
+            throw new InvalidOperationException(
+                $"no definition for block '{p.Block}' was resolved for this insert");
+        }
+        if (p.ScaleX == 0.0 || p.ScaleY == 0.0)
+        {
+            // A zero scale collapses the block onto its insertion point: the
+            // reference exists and owns nothing visible, which reads to the user as
+            // "the plugin lost my column".
+            throw new InvalidOperationException(
+                $"inserting '{p.Block}' at a zero scale would be invisible");
+        }
+
+        return new BlockReference(Point(p, 0), context.BlockDefinition)
+        {
+            Rotation = Radians(p.Rotation),
+            ScaleFactors = new Scale3d(p.ScaleX, p.ScaleY, 1.0),
+        };
+    }
+
+    // ---------------------------------------------------------------- dynamic blocks
+
+    /// <summary>Apply the requested dynamic block properties, or say why not.</summary>
+    /// <remarks>
+    /// <para>
+    /// Every refusal here is deliberate, and none of them is silent. A dynamic block
+    /// serves a whole range of sizes through these properties, so a setting that
+    /// quietly does nothing yields a drawing that looks finished and is the wrong
+    /// size — worse than an error, because nothing downstream can tell. So an unknown
+    /// name, a property the current visibility state hides, a read-only property, and
+    /// a value outside the published set all throw.
+    /// </para>
+    /// <para>
+    /// The messages list what could have been asked for instead, which in practice is
+    /// enough to fix the call in one round.
+    /// </para>
+    /// </remarks>
+    private static void FinishInsert(BlockReference reference, Primitive p)
+    {
+        if (p.Properties is not { Count: > 0 })
+        {
+            return;
+        }
+
+        foreach (var (name, requested) in p.Properties)
+        {
+            // Re-read inside the loop: setting a visibility state adds and removes
+            // other properties, so the collection from the previous iteration is no
+            // longer the one to search.
+            var properties = DynamicProperties(reference);
+            var property = properties.FirstOrDefault(
+                candidate => string.Equals(candidate.PropertyName, name, StringComparison.OrdinalIgnoreCase));
+
+            if (property is null)
+            {
+                throw new InvalidOperationException(
+                    $"block '{reference.Name}' has no property '{name}'; it has {Names(properties)}");
+            }
+            if (!property.VisibleInCurrentVisibilityState)
+            {
+                throw new InvalidOperationException(
+                    $"property '{property.PropertyName}' of block '{reference.Name}' is hidden by its "
+                    + "current visibility state; set that property first. Visible now: "
+                    + Names(properties.Where(prop => prop.VisibleInCurrentVisibilityState)));
+            }
+            if (property.ReadOnly)
+            {
+                throw new InvalidOperationException(
+                    $"property '{property.PropertyName}' of block '{reference.Name}' is read-only");
+            }
+
+            property.Value = ValueFor(property, requested, reference.Name);
+        }
+    }
+
+    private static List<DynamicBlockReferenceProperty> DynamicProperties(BlockReference reference)
+    {
+        if (!reference.IsDynamicBlock)
+        {
+            return [];
+        }
+
+        // Indexed rather than foreach: this collection's enumerator is the non-generic
+        // one, so foreach would hand back object.
+        var collection = reference.DynamicBlockReferencePropertyCollection;
+        var properties = new List<DynamicBlockReferenceProperty>(collection.Count);
+        for (var i = 0; i < collection.Count; i++)
+        {
+            properties.Add(collection[i]);
+        }
+        return properties;
+    }
+
+    /// <summary>The value to assign, validated against what the block publishes.</summary>
+    /// <remarks>
+    /// When the property publishes an allowed set, the matching member of that set is
+    /// assigned rather than a converted copy of the request: the published object is
+    /// already the type AutoCAD wants (a short for one block, a long for the next), so
+    /// this validates and converts in one step and cannot guess the type wrong.
+    /// </remarks>
+    private static object ValueFor(
+        DynamicBlockReferenceProperty property, JsonNode? requested, string block)
+    {
+        var offered = (property.GetAllowedValues() ?? []).Where(value => value is not null).ToList();
+        if (offered.Count > 0)
+        {
+            foreach (var value in offered)
+            {
+                if (Matches(value!, requested))
+                {
+                    return value!;
+                }
+            }
+            throw new InvalidOperationException(
+                $"'{Text(requested)}' is not an allowed value for '{property.PropertyName}' of block "
+                + $"'{block}'; allowed: {Describe(offered)}");
+        }
+
+        // No published set, so the type of the current value is the only thing that
+        // says whether this property wants 300 or "300".
+        return property.Value switch
+        {
+            string => Text(requested),
+            bool => Flag(requested),
+            short => (short)Integer(requested, property, block),
+            int => (int)Integer(requested, property, block),
+            long => Integer(requested, property, block),
+            double => Number(requested, property, block),
+            null => throw new InvalidOperationException(
+                $"property '{property.PropertyName}' of block '{block}' has no value to match a "
+                + $"type against"),
+            var current => throw new InvalidOperationException(
+                $"property '{property.PropertyName}' of block '{block}' is of an unsupported type "
+                + $"({current.GetType().Name})"),
+        };
+    }
+
+    private static bool Matches(object allowed, JsonNode? requested) => allowed switch
+    {
+        string text => string.Equals(text, Text(requested), StringComparison.Ordinal),
+        bool flag => Flag(requested) == flag,
+        _ => requested is JsonValue value && value.TryGetValue<double>(out var number)
+            && Math.Abs(System.Convert.ToDouble(allowed, CultureInfo.InvariantCulture) - number) < 1e-9,
+    };
+
+    private static double Number(JsonNode? node, DynamicBlockReferenceProperty property, string block) =>
+        node is JsonValue value && value.TryGetValue<double>(out var number)
+            ? number
+            : throw new InvalidOperationException(
+                $"property '{property.PropertyName}' of block '{block}' takes a number, "
+                + $"not '{Text(node)}'");
+
+    /// <summary>A number for an integral property, refusing to truncate silently.</summary>
+    private static long Integer(JsonNode? node, DynamicBlockReferenceProperty property, string block)
+    {
+        var number = Number(node, property, block);
+        if (Math.Abs(number - Math.Round(number)) > 1e-9)
+        {
+            throw new InvalidOperationException(
+                $"property '{property.PropertyName}' of block '{block}' takes a whole number, "
+                + $"not {number.ToString(CultureInfo.InvariantCulture)}");
+        }
+        return (long)Math.Round(number);
+    }
+
+    private static bool Flag(JsonNode? node)
+    {
+        if (node is JsonValue value)
+        {
+            if (value.TryGetValue<bool>(out var flag))
+            {
+                return flag;
+            }
+            // "true" from a form field or a JSON string is still a truth value.
+            if (value.TryGetValue<string>(out var text) && bool.TryParse(text, out var parsed))
+            {
+                return parsed;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>The requested value as text, for messages and string-typed properties.</summary>
+    private static string Text(JsonNode? node) => node is null ? "" : node.ToJsonString().Trim('"');
+
+    private static string Names(IEnumerable<DynamicBlockReferenceProperty> properties)
+    {
+        var names = string.Join(", ", properties.Select(prop => $"'{prop.PropertyName}'"));
+        return names.Length > 0 ? names : "none";
+    }
+
+    private static string Describe(IEnumerable<object> values) =>
+        string.Join(", ", values.Select(value => value is string text ? $"'{text}'" : $"{value}"));
 
     // ---------------------------------------------------------------- helpers
 
