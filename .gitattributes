@@ -1,0 +1,6 @@
+# Normalise line endings so the repo is stable across platforms, and keep
+# binary assets untouched.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.ico binary
