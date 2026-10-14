@@ -16,6 +16,10 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <InvariantGlobalization>false</InvariantGlobalization>
+
+    <!-- AutoCAD's own assemblies reference several framework versions, so the
+         resolver always reports MSB3277. It is not actionable here. -->
+    <MSBuildWarningsAsMessages>$(MSBuildWarningsAsMessages);MSB3277</MSBuildWarningsAsMessages>
   </PropertyGroup>
 
 </Project>

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  AutoCAD autoloader manifest.
+
+  Installing into ApplicationPlugins means AutoCAD loads the plugin itself, which
+  matters because with SECURELOAD=1 (the stock setting) NETLOAD refuses to load
+  an assembly from an untrusted folder. ApplicationPlugins is not trusted
+  unconditionally, though: on a machine with SECURELOAD=1 and an empty
+  TRUSTEDPATHS, an unsigned bundle here raises the "Security - Unsigned
+  Executable" prompt on every load. scripts/trust-autocad.ps1 adds the folder to
+  TRUSTEDPATHS, which is what keeps the load silent after each rebuild.
+-->
+<ApplicationPackage SchemaVersion="1.0" AutodeskProduct="AutoCAD" ProductType="Application" AppVersion="0.1.0"
+    ProductCode="{7E4B2C1A-9F3D-4A56-8B21-0C6D5E7A9B13}"
+    UpgradeCode="{3A8F1D62-5C74-4E90-A1B3-6F2D8C4E5A71}"
+    Name="AcadMcp" Description="Step journal and steps palette for AutoCAD"
+    Author="LBurny" HelpFile="" SupportedLocales="Enu|Chs">
+
+  <CompanyDetails Name="LBurny" />
+
+  <Components Description="AutoCAD 2026">
+    <!-- R25.1 is AutoCAD 2026; the plugin is rebuilt per release. -->
+    <RuntimeRequirements OS="Win64" Platform="AutoCAD*" SeriesMin="R25.1" SeriesMax="R25.1" />
+    <ComponentEntry AppName="AcadMcp" Version="0.1.0"
+        ModuleName="./Contents/Windows/2026/AcadMcp.Plugin.dll"
+        AppDescription="Step journal, step engine and steps palette"
+        LoadOnAutoCADStartup="True"
+        LoadOnCommandInvocation="False"
+        LoadOnRequest="False">
+      <Commands GroupName="ACADMCP">
+        <Command Local="ACADMCPHELLO" Global="ACADMCPHELLO"
+                 Description="Open the AcadMcp steps palette" />
+        <Command Local="ACADMCPTEST" Global="ACADMCPTEST"
+                 Description="Run the AcadMcp step-engine self-test" />
+      </Commands>
+    </ComponentEntry>
+  </Components>
+</ApplicationPackage>

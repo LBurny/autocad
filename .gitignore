@@ -9,5 +9,9 @@ examples/output/
 bin/
 obj/
 
+# Assembled plugin bundle. The autoloader manifest beside Contents/ is source and
+# is tracked; the DLLs pack.sh copies in are build output.
+plugin/bundle/AcadMcp.bundle/Contents/
+
 # Agent session scratch (plan-mode drafts)
 .zcode/plans/

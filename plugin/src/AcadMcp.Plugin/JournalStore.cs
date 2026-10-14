@@ -39,24 +39,38 @@ public sealed class JournalStore
 
     public JournalStore(Database database) => _db = database;
 
-    /// <summary>The dictionary, created on demand.</summary>
+    /// <summary>
+    /// The journal dictionary: opened for writing when it may be created or
+    /// extended, and strictly read-only otherwise.
+    /// </summary>
+    /// <remarks>
+    /// The read-only path matters. Opening a dictionary <c>ForWrite</c> turns a
+    /// plain read into a database write, and AutoCAD answers that with
+    /// eLockViolation unless the caller holds a document lock — which a reader
+    /// has no reason to take.
+    /// </remarks>
     private DBDictionary OpenDictionary(Transaction tr, bool create)
     {
-        var nod = (DBDictionary)tr.GetObject(_db.NamedObjectsDictionaryId, OpenMode.ForRead);
-        if (nod.Contains(DictionaryName))
+        if (create)
         {
-            return (DBDictionary)tr.GetObject(nod.GetAt(DictionaryName), OpenMode.ForWrite);
+            var writable = (DBDictionary)tr.GetObject(_db.NamedObjectsDictionaryId, OpenMode.ForRead);
+            if (!writable.Contains(DictionaryName))
+            {
+                writable.UpgradeOpen();
+                var created = new DBDictionary();
+                writable.SetAt(DictionaryName, created);
+                tr.AddNewlyCreatedDBObject(created, true);
+                return created;
+            }
+            return (DBDictionary)tr.GetObject(writable.GetAt(DictionaryName), OpenMode.ForWrite);
         }
-        if (!create)
+
+        var nod = (DBDictionary)tr.GetObject(_db.NamedObjectsDictionaryId, OpenMode.ForRead);
+        if (!nod.Contains(DictionaryName))
         {
             throw new InvalidOperationException("no journal in this drawing");
         }
-
-        nod.UpgradeOpen();
-        var dictionary = new DBDictionary();
-        nod.SetAt(DictionaryName, dictionary);
-        tr.AddNewlyCreatedDBObject(dictionary, true);
-        return dictionary;
+        return (DBDictionary)tr.GetObject(nod.GetAt(DictionaryName), OpenMode.ForRead);
     }
 
     /// <summary>True when the drawing already carries a journal.</summary>

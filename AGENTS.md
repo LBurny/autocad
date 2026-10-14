@@ -34,6 +34,40 @@ uv run python examples/floor_plan_demo.py --com     # draw into a NEW AutoCAD dr
 The preview extra (matplotlib) is needed for any PNG output:
 `uv sync --extra preview`.
 
+## The plugin (`plugin/`)
+
+A .NET 8 plugin that runs *inside* AutoCAD: a per-step journal, the engine that
+applies and reverts steps, and a docked palette. The geometry stays in Python —
+the plugin is handed primitives (line, polyline, text, hatch, circle, arc) and
+only creates entities, records their handles, and keeps the log, so `geom.py`
+and `ops.py` remain the single source of coordinates.
+
+```
+plugin/
+  src/AcadMcp.Core/           journal model, rollback arithmetic. No AutoCAD reference.
+  src/AcadMcp.Plugin/         StepEngine, JournalStore (Xrecords), PrimitiveBuilder,
+                              SelfTest, PluginEntry, StepPanel, PluginLog
+  bundle/AcadMcp.bundle/      PackageContents.xml is source; Contents/ is build output
+  scripts/pack.sh             build and assemble the bundle
+  scripts/selftest.sh         pack, install, launch a scratch AutoCAD, print the report
+  scripts/trust-autocad.ps1   put the plugin folder into TRUSTEDPATHS
+  scripts/acad-state.ps1      is AutoCAD up, and is a modal dialog blocking it
+  tools/AcadMcp.ApiProbe/     AutoCAD API signatures via MetadataLoadContext
+tests/AcadMcp.Core.Tests/     xunit
+```
+
+```bash
+cd plugin
+dotnet test                     # journal arithmetic only, no AutoCAD needed
+./scripts/selftest.sh           # refuses to run while AutoCAD is open
+./scripts/selftest.sh --force   # the edit-build-test loop, ~15-40s
+```
+
+`selftest.sh` installs the bundle into the user-level `ApplicationPlugins`
+folder, launches a scratch AutoCAD with `ACADMCP_SELFTEST=1`, and prints the
+report. The plugin runs its checks at startup, logs them to
+`%TEMP%\acadmcp-plugin.log`, and ends with `AUTO-SELFTEST-DONE`.
+
 ## Architecture rules
 
 The split is deliberate; keep it when editing.
@@ -107,6 +141,41 @@ imports whichever is present; keep that compat shim if you touch the imports.
 test skips itself when a live session is present. Do not add tests that require
 AutoCAD to pass.
 
+**A loaded .NET assembly cannot be unloaded from AutoCAD.** Every plugin code
+change therefore costs an AutoCAD restart to try. That is why
+`tools/AcadMcp.ApiProbe` exists — it reads the AutoCAD assemblies as metadata
+with AutoCAD closed, so an API mistake does not cost a restart — and why the
+self-test runs itself unattended.
+
+**Unsigned DLLs in ApplicationPlugins still prompt.** That folder is *not*
+trusted unconditionally: with `SECURELOAD=1` and an empty `TRUSTEDPATHS` (this
+machine's state) AutoCAD raises "Security - Unsigned Executable" on every load.
+"Always Load" does not help, because each rebuild produces a new file and the
+prompt returns. While the prompt is up the plugin never loads, which shows up
+only as a log file that never appears — that is what silently broke the
+self-test. `scripts/trust-autocad.ps1` writes the folder into `TRUSTEDPATHS`, and
+it must run with AutoCAD **closed**: AutoCAD writes its profile back to the
+registry on exit and would overwrite it.
+
+**There is no managed API for undo grouping.** `Document`, `Database` and
+`TransactionManager` expose no undo members (`AddUndoMarker`/`SetUndoMark` in
+acmgd are native exports). So the plugin depends on measured behaviour instead:
+mutating the database and rewriting the journal in one transaction really does
+produce **one** undo record. The self-test proves it — after a rollback, one
+`_.UNDO 1` restores all six entities *and* the journal's handle lists. Keep any
+new mutation and its journal write in the same transaction, or that is lost.
+
+**`Editor.Command` throws `eInvalidInput` outside a command context.** From an
+idle handler the only way to run a command is `SendStringToExecute`, which queues
+it; a test that needs a command to have run must therefore finish from a later
+idle tick. The self-test's undo probe is split into two phases for this reason.
+
+**Reads must not open for write.** Opening the journal dictionary `ForWrite`
+turns a read into a database write, which AutoCAD rejects with `eLockViolation`
+unless the caller holds a document lock. `JournalStore.OpenDictionary(tr, create)`
+opens strictly read-only when `create` is false, and `StepEngine.Reload` takes a
+document lock. Both mistakes surfaced as a lock violation in a *reader*.
+
 ## Environment
 
 - AutoCAD 2026 (release 25.1) is at `F:\AutoCAD\AutoCAD 2026` — **not** under
@@ -114,6 +183,14 @@ AutoCAD to pass.
 - The venv runs Python 3.14; `requires-python` is `>=3.10`.
 - This package is registered as an `acadmcp` MCP server in the ZCode client
   config at `%USERPROFILE%\.zcode\cli\config.json`.
+- AutoCAD's security and path settings live per profile under
+  `HKCU\Software\Autodesk\AutoCAD\<release>\<product>\Profiles\<profile>\Variables`
+  (`SECURELOAD`, `TRUSTEDPATHS`). The default profile's folder name is localised —
+  `<<未命名配置>>` here — so scripts discover it by walking the tree instead of
+  naming it.
+- The plugin targets `net8.0-windows` and needs the .NET 8 **SDK** (only the
+  runtime was installed to begin with). AutoCAD's own assemblies are referenced
+  from `ACAD_DIR` with `Private=false`.
 
 ## Read before changing
 

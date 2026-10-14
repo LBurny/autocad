@@ -101,6 +101,7 @@ public sealed class StepEngine
     /// <summary>Re-read the journal from the drawing, discarding in-memory state.</summary>
     public Journal Reload()
     {
+        using var docLock = _doc.LockDocument();
         using var tr = _db.TransactionManager.StartTransaction();
         _journal = _store.Load(tr);
         tr.Commit();
