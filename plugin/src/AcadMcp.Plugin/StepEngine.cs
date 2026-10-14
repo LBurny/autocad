@@ -570,12 +570,18 @@ public sealed class StepEngine
             blockTable[BlockTableRecord.ModelSpace], OpenMode.ForWrite);
 
         var handles = new List<string>();
+        // Hoisted: every text primitive in a step shares one style, and looking it
+        // up per primitive would repeat the table walk for nothing.
+        var textStyle = primitives.Any(p => p.Kind is PrimitiveKind.Text or PrimitiveKind.MText)
+            ? TextStyles.Ensure(_db, tr)
+            : ObjectId.Null;
+
         foreach (var primitive in primitives)
         {
             EnsureLayer(tr, primitive.Layer);
             EnsureLinetype(tr, primitive.Linetype);
 
-            var entity = PrimitiveBuilder.Build(primitive, _db);
+            var entity = PrimitiveBuilder.Build(primitive, _db, textStyle);
             model.AppendEntity(entity);
             tr.AddNewlyCreatedDBObject(entity, true);
             PrimitiveBuilder.Finish(entity);

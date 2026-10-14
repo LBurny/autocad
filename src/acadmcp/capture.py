@@ -19,6 +19,32 @@ PW_RENDERFULLCONTENT = 2
 #: How long to let a restored window settle before capturing it.
 RESTORE_SETTLE_S = 0.6
 
+#: AutoCAD's main frame window class. Matched instead of the title, which carries
+#: the drawing name and the product year — neither of which this should care about.
+FRAME_CLASS_PREFIX = "AfxMDIFrame"
+
+
+def find_autocad_window() -> int:
+    """The handle of AutoCAD's main window, found without going through COM."""
+    try:
+        import win32gui
+    except ImportError as exc:  # pragma: no cover - platform dependent
+        raise BackendError("finding the AutoCAD window needs pywin32: uv sync") from exc
+
+    found: list[int] = []
+
+    def visit(hwnd: int, _: object) -> bool:
+        if win32gui.IsWindowVisible(hwnd) and win32gui.GetClassName(hwnd).startswith(
+            FRAME_CLASS_PREFIX
+        ):
+            found.append(hwnd)
+        return True
+
+    win32gui.EnumWindows(visit, None)
+    if not found:
+        raise BackendError("no AutoCAD window found — is AutoCAD running and visible?")
+    return found[0]
+
 
 def capture_window(hwnd: int, path: str) -> str:
     """Save a PNG of the window `hwnd` to `path` and return the path.

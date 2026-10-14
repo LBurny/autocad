@@ -1,16 +1,24 @@
 #!/usr/bin/env bash
 #
-# Build the plugin, install the bundle, and run its self-test in a scratch
-# AutoCAD — the edit-build-test loop for this plugin.
+# Build the plugin, install the bundle, and verify it in a scratch AutoCAD.
+#
+# Two suites, either or both in one launch:
+#
+#   --engine   the plugin's own self-test, run inside AutoCAD at startup
+#              (ACADMCP_SELFTEST=1): apply, journal round-trip, rollback, replay,
+#              the Ctrl+Z interaction, and that Chinese text gets the CJK style.
+#   --rpc      tests/live_rpc_check.py against the running plugin, over the real
+#              socket, using this repository's own client, backend and journal
+#              control. This is what proves the wire format and the two sides
+#              agree.
 #
 # Why the loop looks like this: a .NET assembly cannot be unloaded from AutoCAD,
 # so a running instance is always holding the previous build. Every change
 # therefore needs a fresh AutoCAD, and the only way that is bearable is to make
-# the whole cycle unattended. The plugin runs its own checks at startup
-# (ACADMCP_SELFTEST=1), reports to a log file, and this script reads it.
+# the whole cycle unattended.
 #
-# Two failure modes cost real time before they were handled here, so both are
-# now diagnosed explicitly instead of looking like a timeout:
+# Three failure modes cost real time before they were handled here, so each is now
+# diagnosed explicitly instead of looking like a timeout:
 #
 #   * the "Security - Unsigned Executable" prompt. SECURELOAD is 1 and
 #     TRUSTEDPATHS was empty, so AutoCAD blocked the load and the log file never
@@ -20,25 +28,34 @@
 #   * a modal dialog of any kind leaves the plugin unloaded and the log empty.
 #     scripts/acad-state.ps1 reports whether the AutoCAD frame is disabled, which
 #     is the reliable signal for that.
+#   * the report marker line carries a timestamp, so an awk pattern anchored at
+#     the start of the line matches nothing and the report comes out empty.
 #
 # Usage:
-#   scripts/selftest.sh              # refuses to run if AutoCAD is already open
-#   scripts/selftest.sh --force      # closes it first
-#   scripts/selftest.sh --keep       # leave the scratch AutoCAD running afterwards
-#   scripts/selftest.sh --wait 300   # seconds to wait for the report (default 240)
+#   scripts/selftest.sh              # both suites, refuses to close a running AutoCAD
+#   scripts/selftest.sh --engine     # the in-AutoCAD self-test only
+#   scripts/selftest.sh --rpc        # the live RPC exchange only
+#   scripts/selftest.sh --force      # close a running AutoCAD first
+#   scripts/selftest.sh --keep       # leave the scratch AutoCAD running
+#   scripts/selftest.sh --wait 300   # seconds to wait for each report (default 240)
 #
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+root="$(cd "$here/.." && pwd)"
 acad="${ACAD_DIR:-F:/AutoCAD/AutoCAD 2026}/acad.exe"
 plugins="$HOME/AppData/Roaming/Autodesk/ApplicationPlugins"
 log="$HOME/AppData/Local/Temp/acadmcp-plugin.log"
 force=0
 keep=0
 wait_s=240
+mode=all
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    --engine) mode=engine; shift ;;
+    --rpc) mode=rpc; shift ;;
+    --all) mode=all; shift ;;
     --force) force=1; shift ;;
     --keep) keep=1; shift ;;
     --wait) wait_s="${2:?--wait needs a number of seconds}"; shift 2 ;;
@@ -51,13 +68,59 @@ if [ ! -x "$acad" ]; then
   exit 2
 fi
 
+if [ "$mode" = "all" ]; then
+  run_engine=1
+  run_rpc=1
+else
+  run_engine=$([ "$mode" = "engine" ] && echo 1 || echo 0)
+  run_rpc=$([ "$mode" = "rpc" ] && echo 1 || echo 0)
+fi
+
+# Prefer the project's venv, which has the package installed editable. The live
+# check itself needs only the standard library, so a bare python will do too.
+python_exe="$root/.venv/Scripts/python.exe"
+[ -x "$python_exe" ] || python_exe=python
+
 acad_running() {
   powershell -NoProfile -Command \
     "@(Get-Process acad -ErrorAction SilentlyContinue).Count" 2>/dev/null | tr -d '[:space:]'
 }
 
-running=$(acad_running)
+wait_for_marker() {  # marker, description
+  local marker="$1" what="$2" i
+  for i in $(seq 1 $(( wait_s / 2 ))); do
+    if [ -f "$log" ] && grep -q "$marker" "$log" 2>/dev/null; then
+      return 0
+    fi
+    # From 15s in, if there is still no log at all, find out whether AutoCAD is
+    # simply blocked. Checking every 15s keeps this cheap: the probe spawns
+    # PowerShell and enumerates windows.
+    if [ ! -f "$log" ] && [ $(( i % 7 )) -eq 0 ] && [ "$(acad_running)" != "0" ]; then
+      local state
+      state=$(powershell -NoProfile -ExecutionPolicy Bypass -File "$here/scripts/acad-state.ps1" 2>/dev/null || true)
+      if printf '%s' "$state" | grep -q "enabled=False"; then
+        echo >&2
+        echo "AutoCAD is blocked by a modal dialog, so the plugin never loaded. Windows seen:" >&2
+        printf '%s\n' "$state" | grep '^window=' >&2 || true
+        echo >&2
+        echo "If that is the unsigned-DLL security prompt, trust the folder and retry:" >&2
+        echo "  powershell -File scripts/trust-autocad.ps1   (with AutoCAD closed)" >&2
+        return 2
+      fi
+    fi
+    sleep 2
+  done
+  echo "waited ${wait_s}s for $what and never saw it" >&2
+  return 1
+}
 
+cleanup() {
+  if [ "$keep" != "1" ]; then
+    powershell -NoProfile -Command "Stop-Process -Name acad -Force -ErrorAction SilentlyContinue" || true
+  fi
+}
+
+running=$(acad_running)
 if [ "${running:-0}" != "0" ] && [ "$force" != "1" ]; then
   echo "AutoCAD is running ($running instance(s))." >&2
   echo "A running AutoCAD holds the previous build and cannot reload it." >&2
@@ -95,89 +158,67 @@ mkdir -p "$plugins"
 cp -r "$here/bundle/AcadMcp.bundle" "$plugins/"
 
 rm -f "$log"
-echo "launching a scratch AutoCAD (waiting up to ${wait_s}s) ..."
+if [ "$run_engine" = "1" ]; then
+  echo "launching a scratch AutoCAD with the self-test armed (waiting up to ${wait_s}s) ..."
+  launch_env="\$env:ACADMCP_SELFTEST='1';"
+else
+  echo "launching a scratch AutoCAD (waiting up to ${wait_s}s) ..."
+  launch_env=""
+fi
 powershell -NoProfile -Command \
-  "\$env:ACADMCP_SELFTEST='1'; Start-Process -FilePath '$acad' -ArgumentList '/nologo'" >/dev/null
+  "$launch_env Start-Process -FilePath '$acad' -ArgumentList '/nologo'" >/dev/null
 
 started=$(date +%s)
 elapsed() { echo $(( $(date +%s) - started )); }
 
-done_marker=0
-dialog_seen=0
-ticks=$(( wait_s / 2 ))
-for i in $(seq 1 "$ticks"); do
-  if [ -f "$log" ] && grep -q "AUTO-SELFTEST-DONE" "$log" 2>/dev/null; then
-    done_marker=1
-    break
-  fi
-  # From 15s in, if there is still no log at all, find out whether AutoCAD is
-  # simply blocked. Checking every 15s keeps this cheap: the probe spawns
-  # PowerShell and enumerates windows.
-  if [ ! -f "$log" ] && [ $(( i % 7 )) -eq 0 ] && [ "$(acad_running)" != "0" ]; then
-    state=$(powershell -NoProfile -ExecutionPolicy Bypass -File "$here/scripts/acad-state.ps1" 2>/dev/null || true)
-    if printf '%s' "$state" | grep -q "enabled=False"; then
-      dialog_seen=1
-      echo
-      echo "AutoCAD is blocked by a modal dialog, so the plugin never loaded. Windows seen:"
-      printf '%s\n' "$state" | grep '^window=' || true
-      echo
-      echo "If that is the unsigned-DLL security prompt, trust the folder and retry:"
-      echo "  powershell -File scripts/trust-autocad.ps1   (with AutoCAD closed)"
-      break
-    fi
-  fi
-  sleep 2
-done
+status=0
 
-echo "elapsed: $(elapsed)s"
-
-cleanup() {
-  if [ "$keep" != "1" ]; then
-    powershell -NoProfile -Command "Stop-Process -Name acad -Force -ErrorAction SilentlyContinue" || true
-  fi
-}
-
-if [ ! -f "$log" ]; then
-  cleanup
-  if [ "$dialog_seen" = "1" ]; then
+if [ "$run_engine" = "1" ]; then
+  if ! wait_for_marker "AUTO-SELFTEST-DONE" "the self-test report"; then
+    echo "--- full log ---" >&2
+    [ -f "$log" ] && cat "$log" >&2
+    cleanup
     exit 1
   fi
-  echo "no plugin log after $(elapsed)s: the bundle did not load." >&2
-  echo "Check that AutodeskProduct/ProductType are set in PackageContents.xml," >&2
-  echo "and that $(dirname "$plugins/AcadMcp.bundle") is in TRUSTEDPATHS." >&2
-  exit 1
+  echo "engine self-test: $(elapsed)s"
+
+  # The report is everything after the marker line the engine writes. Timestamped
+  # lines after it are dropped, which also removes AUTO-SELFTEST-DONE. `|| true`
+  # matters: when the slice is empty grep exits 1 and `set -e` would kill the
+  # script before it could print anything.
+  report=$(awk '/self-test report$/{found=1; next} found' "$log" \
+    | grep -vE '^[0-9]{4}-[0-9]{2}-[0-9]{2} ' || true)
+  printf '%s\n' "$report"
+
+  if printf '%s' "$report" | grep -q "CHECK(S) FAILED"; then
+    echo "--- full log ---"
+    cat "$log"
+    status=1
+  elif ! printf '%s' "$report" | grep -q "all checks passed"; then
+    echo "the engine run did not finish cleanly; full log:"
+    cat "$log"
+    status=1
+  fi
 fi
 
-if [ "$done_marker" != "1" ]; then
-  echo "the run never reached AUTO-SELFTEST-DONE; full log:" >&2
-  cat "$log" >&2
-  cleanup
-  exit 1
-fi
-
-# The report is everything after the marker line the engine writes. The marker
-# is a PluginLog line, so it carries a timestamp prefix and must not be anchored
-# at the start of the line; that anchoring is what made an earlier version of
-# this script print an empty report. Timestamped lines after the marker are
-# dropped, which also removes AUTO-SELFTEST-DONE. `|| true` matters: when the
-# slice is empty grep exits 1 and `set -e` would kill the script before it could
-# print anything.
-report=$(awk '/self-test report$/{found=1; next} found' "$log" \
-  | grep -vE '^[0-9]{4}-[0-9]{2}-[0-9]{2} ' || true)
-printf '%s\n' "$report"
-
-if printf '%s' "$report" | grep -q "CHECK(S) FAILED"; then
-  echo
-  echo "--- full log ---"
-  cat "$log"
-  status=1
-elif ! printf '%s' "$report" | grep -q "all checks passed"; then
-  echo
-  echo "the run did not finish cleanly; full log:"
-  cat "$log"
-  status=1
-else
-  status=0
+if [ "$run_rpc" = "1" ]; then
+  # The listener binds during Initialize, before the self-test runs, so this
+  # marker appears early. In --all mode the wait above has already happened, and
+  # waiting for it again is instant.
+  if ! wait_for_marker "rpc listening" "the RPC listener"; then
+    echo "--- full log ---" >&2
+    [ -f "$log" ] && cat "$log" >&2
+    cleanup
+    exit 1
+  fi
+  echo "live RPC check: $(elapsed)s"
+  if rpc_out=$("$python_exe" "$root/tests/live_rpc_check.py" 2>&1); then
+    rpc_status=0
+  else
+    rpc_status=$?
+  fi
+  printf '%s\n' "$rpc_out"
+  [ "$rpc_status" != "0" ] && status=1
 fi
 
 cleanup

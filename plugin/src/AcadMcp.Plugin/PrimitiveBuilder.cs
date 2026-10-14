@@ -23,7 +23,11 @@ public static class PrimitiveBuilder
     /// <summary>
     /// Create the entity for a primitive. It is not yet in the database.
     /// </summary>
-    public static Entity Build(Primitive primitive, Database database)
+    /// <param name="textStyle">
+    /// The CJK-capable text style, from <see cref="TextStyles.Ensure"/>. Passed in
+    /// rather than looked up so the caller can hoist the lookup out of its loop.
+    /// </param>
+    public static Entity Build(Primitive primitive, Database database, ObjectId textStyle)
     {
         var entity = primitive.Kind switch
         {
@@ -31,8 +35,8 @@ public static class PrimitiveBuilder
             PrimitiveKind.Polyline => BuildPolyline(primitive),
             PrimitiveKind.Circle => BuildCircle(primitive),
             PrimitiveKind.Arc => BuildArc(primitive),
-            PrimitiveKind.Text => BuildText(primitive),
-            PrimitiveKind.MText => BuildMText(primitive),
+            PrimitiveKind.Text => BuildText(primitive, textStyle),
+            PrimitiveKind.MText => BuildMText(primitive, textStyle),
             PrimitiveKind.Hatch => BuildHatch(primitive),
             PrimitiveKind.Dimension => BuildDimension(primitive, database),
             _ => throw new ArgumentOutOfRangeException(
@@ -82,16 +86,26 @@ public static class PrimitiveBuilder
     private static Entity BuildArc(Primitive p) =>
         new Arc(Point(p, 0), p.Radius, Radians(p.StartAngle), Radians(p.EndAngle));
 
-    private static Entity BuildText(Primitive p)
+    private static Entity BuildText(Primitive p, ObjectId textStyle)
     {
         var position = Point(p, 0);
+        var height = p.Height > 0 ? p.Height : 2.5;
         var text = new DBText
         {
             TextString = p.Text,
-            Height = p.Height > 0 ? p.Height : 2.5,
+            Height = height,
             Rotation = Radians(p.Rotation),
             Position = position,
         };
+
+        if (!textStyle.IsNull)
+        {
+            // Repointing a text's style can reset properties on it, so the style
+            // goes on before the height is re-applied — and before the alignment
+            // modes below, for the same reason.
+            text.TextStyleId = textStyle;
+            text.Height = height;
+        }
 
         var (horizontal, vertical) = AlignmentFor(p.Align);
         if (horizontal != TextHorizontalMode.TextLeft)
@@ -105,19 +119,27 @@ public static class PrimitiveBuilder
         return text;
     }
 
-    private static Entity BuildMText(Primitive p)
+    private static Entity BuildMText(Primitive p, ObjectId textStyle)
     {
         var position = Point(p, 0);
-        return new MText
+        var height = p.Height > 0 ? p.Height : 2.5;
+        var text = new MText
         {
             Contents = p.Text,
-            TextHeight = p.Height > 0 ? p.Height : 2.5,
+            TextHeight = height,
             Location = position,
             // A zero-width mtext is rejected by AutoCAD, so fall back to the same
             // generous default the DXF backend uses.
             Width = p.Width > 0 ? p.Width : 6000.0,
             Attachment = p.Align == "left" ? AttachmentPoint.TopLeft : AttachmentPoint.MiddleCenter,
         };
+
+        if (!textStyle.IsNull)
+        {
+            text.TextStyleId = textStyle;
+            text.TextHeight = height;
+        }
+        return text;
     }
 
     private static Entity BuildHatch(Primitive p)

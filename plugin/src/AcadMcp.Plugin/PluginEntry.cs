@@ -35,6 +35,11 @@ public sealed class PluginEntry : IExtensionApplication
             var name = typeof(PluginEntry).Assembly.GetName();
             PluginLog.Write($"initialize: {name.Name} {name.Version}");
 
+            // Initialize runs on AutoCAD's main thread, which is why the queue can
+            // learn here which thread it must never be waited on from.
+            IdleQueue.Attach();
+            StartRpc();
+
             if (Environment.GetEnvironmentVariable(SelfTestVariable) == "1")
             {
                 ScheduleSelfTest();
@@ -43,6 +48,28 @@ public sealed class PluginEntry : IExtensionApplication
         catch (System.Exception error)
         {
             PluginLog.Write("initialize failed", error);
+        }
+    }
+
+    /// <summary>
+    /// Open the RPC port, or carry on without it.
+    /// </summary>
+    /// <remarks>
+    /// A second AutoCAD on the same machine, or any other process sitting on the
+    /// port, must not stop the plugin from loading: the palette works in-process
+    /// and needs no socket. So a failure here is reported and forgotten.
+    /// </remarks>
+    private static void StartRpc()
+    {
+        var port = RpcServer.ConfiguredPort();
+        try
+        {
+            RpcServer.Start(port);
+            PluginLog.Write($"rpc listening on 127.0.0.1:{port}");
+        }
+        catch (System.Exception error)
+        {
+            PluginLog.Write($"rpc could not bind 127.0.0.1:{port}: {error.Message}");
         }
     }
 
@@ -83,6 +110,8 @@ public sealed class PluginEntry : IExtensionApplication
     public void Terminate()
     {
         PluginLog.Write("terminate");
+        RpcServer.Current?.Dispose();
+        IdleQueue.Detach();
         StepPanel.Destroy();
     }
 }

@@ -284,6 +284,25 @@ public static class SelfTest
         report.Check("recorded handles exist in the drawing", CountPresent(db, handles) == 6,
             $"present={CountPresent(db, handles)}");
 
+        // --- Chinese must not come out as question marks -------------------
+        // Storing the right characters is not enough: an SHX font with no big font
+        // renders every one of them as '?', so the style the text was drawn with is
+        // part of whether this worked.
+        var roomText = DescribeText(db, "\u65e0\u83cc\u5ba4");
+        report.Check("the room text is in the drawing", roomText is not null);
+        if (roomText is not null)
+        {
+            report.Check("it uses the CJK text style",
+                string.Equals(roomText.Style, TextStyles.Name, StringComparison.OrdinalIgnoreCase),
+                $"style={roomText.Style}");
+            report.Check("that style carries the SHX big font the glyphs need",
+                string.Equals(roomText.BigFont, "gbcbig.shx", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(roomText.Font, "gbenor.shx", StringComparison.OrdinalIgnoreCase),
+                $"font={roomText.Font} big={roomText.BigFont}");
+            report.Check("repointing the style did not clobber the text height",
+                Math.Abs(roomText.Height - 350) < 1e-6, $"height={roomText.Height}");
+        }
+
         // --- the journal survives a re-read from the drawing --------------
         var reloaded = engine.Reload();
         report.Check("journal round-trips through the DWG", reloaded.Count == 3, $"count={reloaded.Count}");
@@ -413,6 +432,55 @@ public static class SelfTest
         {
             report.Check("the scratch drawing can be discarded", false, error.Message);
         }
+    }
+
+    /// <summary>
+    /// What was read off a text entity, copied out of its transaction.
+    /// </summary>
+    /// <remarks>
+    /// A snapshot rather than the entity: a database object is only usable inside
+    /// the transaction that opened it, so handing the caller a live <c>DBText</c>
+    /// would fail the moment the check touched it.
+    /// </remarks>
+    private sealed record TextFacts(string Content, string Style, double Height, string Font, string BigFont);
+
+    /// <summary>How the first text entity with this content was actually drawn.</summary>
+    private static TextFacts? DescribeText(Database db, string content)
+    {
+        using var tr = db.TransactionManager.StartTransaction();
+        var model = (BlockTableRecord)tr.GetObject(
+            SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForRead);
+
+        foreach (var id in model)
+        {
+            if (tr.GetObject(id, OpenMode.ForRead) is not DBText text
+                || text.IsErased
+                || text.TextString != content)
+            {
+                continue;
+            }
+
+            var style = text.TextStyleName;
+            var facts = new TextFacts(
+                text.TextString, style, text.Height, "", "");
+            var (font, bigFont) = ReadStyleFonts(tr, db, style);
+            tr.Commit();
+            return facts with { Font = font, BigFont = bigFont };
+        }
+        tr.Commit();
+        return null;
+    }
+
+    private static (string Font, string BigFont) ReadStyleFonts(Transaction tr, Database db, string name)
+    {
+        var table = (TextStyleTable)tr.GetObject(db.TextStyleTableId, OpenMode.ForRead);
+        if (!table.Has(name))
+        {
+            return ("", "");
+        }
+        var record = (TextStyleTableRecord)tr.GetObject(table[name], OpenMode.ForRead);
+        // FileName, not Font: for an SHX style this is where the .shx name lives.
+        return (record.FileName, record.BigFontFileName);
     }
 
     /// <summary>How many of these handles still resolve to a live object.</summary>

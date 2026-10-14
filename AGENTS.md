@@ -8,17 +8,21 @@ DXF file. Published at https://github.com/LBurny/autocad.
 
 ```
 src/acadmcp/
-  geom.py        pure 2D geometry: offsets, mitre joins, areas. No CAD imports.
-  layers.py      drafting standard: layer names, ACI colours, text heights, mm sizes
-  ops.py         architectural operations (walls, doors, rooms, cores, annotation)
-  capture.py     Win32 window capture, used only by the COM backend
-  server.py      the MCP tool surface (38 tools)
+  geom.py               pure 2D geometry: offsets, mitre joins, areas. No CAD imports.
+  layers.py             drafting standard: layer names, ACI colours, text heights, mm sizes
+  ops.py                architectural operations (walls, doors, rooms, cores, annotation)
+  capture.py            Win32 window capture, and finding the AutoCAD frame
+  server.py             the MCP tool surface (38 tools)
+  acad_plugin_client.py the socket client for the in-AutoCAD plugin
+  steps.py              step-journal control, and the step_control action table
   backends/
-    base.py      the Backend contract every driver implements
-    dxf.py       ezdxf driver — no AutoCAD needed, renders PNG
-    com.py       ActiveX driver — draws into a running AutoCAD
+    base.py             the Backend contract every driver implements
+    dxf.py              ezdxf driver — no AutoCAD needed, renders PNG
+    com.py              ActiveX driver — draws into a running AutoCAD
+    plugin.py           records primitives per step and hands them to the plugin
 examples/floor_plan_demo.py
-tests/           test_geom.py, test_backends.py
+tests/                  test_geom.py, test_backends.py, test_plugin_client.py,
+                        live_rpc_check.py (needs AutoCAD, so pytest never runs it)
 ```
 
 ## Commands
@@ -37,19 +41,26 @@ The preview extra (matplotlib) is needed for any PNG output:
 ## The plugin (`plugin/`)
 
 A .NET 8 plugin that runs *inside* AutoCAD: a per-step journal, the engine that
-applies and reverts steps, and a docked palette. The geometry stays in Python —
-the plugin is handed primitives (line, polyline, text, hatch, circle, arc) and
-only creates entities, records their handles, and keeps the log, so `geom.py`
-and `ops.py` remain the single source of coordinates.
+applies and reverts steps, a loopback RPC port, and a docked palette. The geometry
+stays in Python — the plugin is handed primitives (line, polyline, text, hatch,
+circle, arc, dimension) and only creates entities, records their handles, and keeps
+the log, so `geom.py` and `ops.py` remain the single source of coordinates.
+
+Why the plugin exists at all: it puts each step in one transaction with its journal
+write, so a rollback is one Ctrl+Z away from being undone as a unit, and the journal
+travels inside the DWG — which is what lets the palette keep working with the MCP
+server stopped.
 
 ```
 plugin/
   src/AcadMcp.Core/           journal model, rollback arithmetic. No AutoCAD reference.
   src/AcadMcp.Plugin/         StepEngine, JournalStore (Xrecords), PrimitiveBuilder,
-                              SelfTest, PluginEntry, StepPanel, PluginLog
+                              TextStyles, SelfTest, PluginEntry, StepPanel, PluginLog
+  src/AcadMcp.Plugin/Rpc/     RpcServer (the socket), IdleQueue (main-thread dispatch),
+                              DrawingApi (layers, units, model space, new document)
   bundle/AcadMcp.bundle/      PackageContents.xml is source; Contents/ is build output
   scripts/pack.sh             build and assemble the bundle
-  scripts/selftest.sh         pack, install, launch a scratch AutoCAD, print the report
+  scripts/selftest.sh         pack, install, launch a scratch AutoCAD, verify
   scripts/trust-autocad.ps1   put the plugin folder into TRUSTEDPATHS
   scripts/acad-state.ps1      is AutoCAD up, and is a modal dialog blocking it
   tools/AcadMcp.ApiProbe/     AutoCAD API signatures via MetadataLoadContext
@@ -59,14 +70,34 @@ tests/AcadMcp.Core.Tests/     xunit
 ```bash
 cd plugin
 dotnet test                     # journal arithmetic only, no AutoCAD needed
-./scripts/selftest.sh           # refuses to run while AutoCAD is open
+./scripts/selftest.sh           # both suites; refuses to run while AutoCAD is open
+./scripts/selftest.sh --engine  # the in-AutoCAD self-test only
+./scripts/selftest.sh --rpc     # the live RPC exchange only
 ./scripts/selftest.sh --force   # the edit-build-test loop, ~15-40s
 ```
 
-`selftest.sh` installs the bundle into the user-level `ApplicationPlugins`
-folder, launches a scratch AutoCAD with `ACADMCP_SELFTEST=1`, and prints the
-report. The plugin runs its checks at startup, logs them to
-`%TEMP%\acadmcp-plugin.log`, and ends with `AUTO-SELFTEST-DONE`.
+`selftest.sh` installs the bundle into the user-level `ApplicationPlugins` folder,
+launches one scratch AutoCAD, and runs up to two suites in it:
+
+- **engine** — the plugin tests itself at startup (`ACADMCP_SELFTEST=1`), logging to
+  `%TEMP%\acadmcp-plugin.log` and ending with `AUTO-SELFTEST-DONE`.
+- **rpc** — `tests/live_rpc_check.py` drives the running plugin over the real
+  socket with this repository's own client, backend and journal control.
+
+### The RPC port
+
+Loopback only, 127.0.0.1, `ACADMCP_PORT` or 9880. One JSON object per line, one
+response per line carrying the request's `id`; `ping` comes back as
+`{"pong": true, "queue": "attached"}`. `{"ok": false, "blocked": true}` means the
+plugin was there but AutoCAD could not run the call in time, and the message says
+what was in the way. The Python side is `acad_plugin_client.py`; `steps.py` wraps
+the journal actions, and its `CONTROL_ACTIONS` table is the single list the MCP
+tool dispatches through.
+
+The port is unauthenticated, so any local process can drive the drawing. That is
+the same trust level the AutoCAD instance already has — the binding to loopback is
+what keeps it off the network. Do not widen it.
+
 
 ## Architecture rules
 
@@ -175,6 +206,28 @@ turns a read into a database write, which AutoCAD rejects with `eLockViolation`
 unless the caller holds a document lock. `JournalStore.OpenDictionary(tr, create)`
 opens strictly read-only when `create` is false, and `StepEngine.Reload` takes a
 document lock. Both mistakes surfaced as a lock violation in a *reader*.
+
+**`Application.Idle` fires while a command is waiting for input.** So draining the
+queue on every idle tick would slip our edits inside somebody else's command.
+`IdleQueue` checks `Document.CommandInProgress` first and waits its turn. The same
+property is why the queue can describe a stall: it is written on the main thread
+and read from the socket thread, so a blocked request gets "AutoCAD is in the LINE
+command" instead of a bare timeout. Idle *not* firing is the signal for a modal
+dialog, which no API can report off-thread.
+
+**An SHX font goes on `TextStyleTableRecord.FileName`, not `.Font`.** `.Font` takes
+a TrueType family name, and assigning it a `.shx` name throws `eInvalidInput` — that
+is how the first version of `TextStyles` failed. `.BigFontFileName` is where the
+big font goes. This matters because an SHX font with no big font renders every
+Chinese character as `?`, which is also why the self-test checks the style and the
+font files of the text it drew, not just the characters it stored.
+
+**The socket client must not retry a drawing call.** If the connection dies, the
+request may already have been carried out, so re-sending `apply` would draw the
+step twice. `RETRY_SAFE` in `acad_plugin_client.py` lists the read-only methods
+allowed a second attempt and nothing else. `tests/test_plugin_client.py` pins this
+down with a fake socket, including the case where the fake deliberately drops the
+connection.
 
 ## Environment
 

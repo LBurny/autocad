@@ -115,8 +115,8 @@ draw_room(boundary=[(0, 0), (4000, 0), (4000, 3000), (0, 3000)], name="无菌室
 sees the drawing directly rather than being told a file path:
 
 ```python
-drawing_screenshot()                                  # the whole drawing
-drawing_screenshot(window=[0, 3600, 7000, 8000])      # just the lab suite
+drawing_screenshot()  # the whole drawing
+drawing_screenshot(window=[0, 3600, 7000, 8000])  # just the lab suite
 ```
 
 `window` is `[min_x, min_y, max_x, max_y]` in millimetres. Use it. A whole floor
