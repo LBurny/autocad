@@ -13,8 +13,9 @@ import math
 from collections.abc import Sequence
 from typing import Any
 
-from . import geom, layers
+from . import catalog, geom, layers, settings
 from .backends.base import Backend
+from .catalog import Element
 from .geom import Point, Vec
 
 # ---------------------------------------------------------------------------
@@ -23,10 +24,16 @@ from .geom import Point, Vec
 
 
 def setup_layers(be: Backend) -> list[str]:
-    """Create the standard architectural layers. Safe to call repeatedly."""
-    for name, (color, linetype) in layers.LAYERS.items():
+    """Create the standard architectural layers. Safe to call repeatedly.
+
+    A project's own layers are laid over the standard ones: its scheme is the one that
+    applies to its drawings, and the standard set is only a starting point for a drawing
+    that has no project behind it.
+    """
+    scheme = {**layers.LAYERS, **settings.current().layers}
+    for name, (color, linetype) in scheme.items():
         be.ensure_layer(name, color=color, linetype=linetype)
-    return sorted(layers.LAYERS)
+    return sorted(scheme)
 
 
 # ---------------------------------------------------------------------------
@@ -660,3 +667,171 @@ def leader_note(
         )
     )
     return made
+
+
+# ---------------------------------------------------------------------------
+# library elements
+# ---------------------------------------------------------------------------
+
+
+def place_element(
+    be: Backend,
+    element: Element,
+    at: Point,
+    *,
+    variant: str | None = None,
+    params: dict[str, Any] | None = None,
+    rotation: float = 0.0,
+    scale: float = 1.0,
+    layer: str | None = None,
+    tag: str | None = None,
+    tag_offset: float | None = None,
+    tag_layer: str = "A-ANNO",
+    tag_height: float = layers.H_TAG,
+) -> list[Any]:
+    """Place one catalogue element: a library block reference, plus its tag.
+
+    The block is inserted, not redrawn, so the drawing gets the definition the standard
+    library actually holds — one that a colleague's AutoCAD can explode, edit and measure
+    exactly as if they had inserted it by hand. `variant` picks a size from the catalogue
+    and `params` overrides individual dynamic properties on top of it.
+    """
+    made: list[Any] = [
+        be.insert(
+            element.block,
+            at,
+            source=element.source or None,
+            rotation=rotation,
+            scale=scale,
+            properties=element.settings(variant, params),
+            layer=layer or element.layer,
+        )
+    ]
+    if tag:
+        made.append(_element_tag(be, tag, at, tag_offset, tag_layer, tag_height))
+    return made
+
+
+def place_along(
+    be: Backend,
+    element: Element,
+    start: Point,
+    end: Point,
+    *,
+    count: int | None = None,
+    spacing: float | None = None,
+    inset: float = 0.0,
+    rotation: float | None = None,
+    variant: str | None = None,
+    params: dict[str, Any] | None = None,
+    scale: float = 1.0,
+    layer: str | None = None,
+    tag: bool = True,
+    tag_offset: float | None = None,
+) -> dict[str, Any]:
+    """Repeat an element along a run — a row of columns, a wall of windows.
+
+    `rotation` defaults to the direction of the run, which is what makes a row of doors all
+    lie in the wall they are in rather than all facing the same way.
+    """
+    points = catalog.positions_along(
+        geom.xy(start), geom.xy(end), count=count, spacing=spacing, inset=inset
+    )
+    direction = _run_direction(start, end) if rotation is None else float(rotation)
+    tags = _numbering(be, element, len(points)) if tag else []
+    made: list[Any] = []
+    for index, point in enumerate(points):
+        made += place_element(
+            be,
+            element,
+            point,
+            variant=variant,
+            params=params,
+            rotation=direction,
+            scale=scale,
+            layer=layer,
+            tag=tags[index] if index < len(tags) else None,
+            tag_offset=tag_offset,
+        )
+    return {"placed": len(points), "rotation": direction, "tags": tags, "points": points}
+
+
+def place_grid(
+    be: Backend,
+    element: Element,
+    xs: Sequence[float],
+    ys: Sequence[float],
+    *,
+    variant: str | None = None,
+    params: dict[str, Any] | None = None,
+    rotation: float = 0.0,
+    scale: float = 1.0,
+    layer: str | None = None,
+    tag: bool = True,
+    tag_offset: float | None = None,
+) -> dict[str, Any]:
+    """Place an element at every intersection of two coordinate lists.
+
+    That is how a frame of columns is laid out: the axis positions are what the drawing is
+    dimensioned to, so they are what the placement takes.
+    """
+    points = catalog.positions_grid(list(xs), list(ys))
+    tags = _numbering(be, element, len(points)) if tag else []
+    made: list[Any] = []
+    for index, point in enumerate(points):
+        made += place_element(
+            be,
+            element,
+            point,
+            variant=variant,
+            params=params,
+            rotation=rotation,
+            scale=scale,
+            layer=layer,
+            tag=tags[index] if index < len(tags) else None,
+            tag_offset=tag_offset,
+        )
+    return {"placed": len(points), "tags": tags, "points": points}
+
+
+def _element_tag(
+    be: Backend,
+    tag: str,
+    at: Point,
+    offset: float | None,
+    layer: str,
+    height: float,
+) -> Any:
+    """The tag beside a placed element. Offset along +Y, which is up the sheet."""
+    x, y = geom.xy(at)
+    dy = height * 2.0 if offset is None else float(offset)
+    return be.text((x, y + dy), tag, height, layer=layer, align="center")
+
+
+def _numbering(be: Backend, element: Element, how_many: int) -> list[str]:
+    """The next `how_many` tag numbers, taken from the numbers the drawing already has."""
+    if not element.tag_prefix or how_many < 1:
+        return []
+    existing = existing_tags(be)
+    first = catalog.next_tag(element.tag_prefix, existing)
+    if not first:
+        return []
+    prefix, _, number = first.rpartition("-")
+    start = int(number)
+    return [f"{prefix}-{start + i}" for i in range(how_many)]
+
+
+def existing_tags(be: Backend, layer: str | None = None, limit: int = 2000) -> list[str]:
+    """Every text in the drawing, for numbering to be derived from rather than stored."""
+    return [
+        str(row["text"])
+        for row in be.entities(layer=layer, limit=limit)
+        if row.get("text")
+    ]
+
+
+def _run_direction(start: Point, end: Point) -> float:
+    """The run's bearing in degrees, counter-clockwise from +X."""
+    x0, y0 = geom.xy(start)
+    x1, y1 = geom.xy(end)
+    return math.degrees(math.atan2(y1 - y0, x1 - x0))

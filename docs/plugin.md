@@ -147,8 +147,8 @@ Loopback only, `ACADMCP_PORT` or 9880. One JSON object per line in, one per line
 
 Methods: `ping`, `status`, `info`, `get_steps`, `reload`, `apply`, `plan`, `run_next`,
 `run_all`, `run_to`, `rollback_to`, `reject`, `accept`, `note`, `snapshot`,
-`clear_plan`, `reset`, `update`, `ensure_layer`, `set_units_mm`, `entities`, `blocks`,
-`ensure_block`, `new_document`.
+`clear_plan`, `reset`, `update`, `ensure_layer`, `set_units_mm`, `zoom_extents`,
+`entities`, `blocks`, `ensure_block`, `new_document`.
 
 The port is unauthenticated: any process on this machine can drive the drawing. That
 is the same trust level the AutoCAD instance already has, and binding to loopback is
@@ -206,6 +206,57 @@ the whole collection, allowed values included. The self-test asserts the geometr
 came with an import by measuring extents (a 400 × 400 block at scale 1.5 and 2 measures
 600 × 800), because a definition that imported without its contents would otherwise look
 like a success.
+
+## Repeating elements: the catalogue
+
+Placement is one thing; knowing *which* block stands for "a 900 door" is another, and that
+is what the catalogue is: a plain JSON file (`src/acadmcp/data/elements.json`), read
+tolerantly, naming for each element its library block, the parameters that select a size,
+the layer and the tag prefix.
+
+```json
+{"key": "door", "label": "门 (single leaf)", "block": "门 - 公制",
+ "source": "{library}\\Architectural - Metric.dwg", "layer": "A-DOOR", "tag_prefix": "M",
+ "params": {"墙厚": 150},
+ "variants": {"900": {"params": {"门尺寸": 900}, "notes": "M0921"}}}
+```
+
+Every block name in the shipped catalogue was read off AutoCAD's own libraries with
+`library_list`, not guessed, and `element_types` re-checks it against the library every
+time: an entry whose block the library has not got is reported, and so is a library that
+could not be read at all, because "could not check" is not "fine".
+
+Tools:
+
+| tool | what it does |
+|---|---|
+| `library_list(source)` | the blocks in the open drawing, or in a library .dwg, with each dynamic block's parameters |
+| `element_types(category)` | what the catalogue offers, and whether it still matches the library |
+| `place_element(type, at, variant, params, rotation, tag)` | one element, one step |
+| `place_along(type, start, end, count, spacing, inset)` | a run: a row of columns, a wall of windows |
+| `place_grid(type, xs, ys)` | every intersection of two coordinate lists: a frame |
+
+A whole run is one step, so "take back that row of columns" is one action. Tags are
+numbered from the tags the drawing already has (`M-1`, `M-2`, …) and never from a stored
+counter: a counter is a second copy of a fact the drawing holds, and the two part company
+the first time somebody edits by hand. `place_along` takes its rotation from the direction
+of the run, which is what makes a row of doors lie in the wall rather than all face the
+same way.
+
+A project supplies its own `acadmcp.json` to point `{library}` at its own block library,
+add its own catalogue file (merged over the package's, so it restates only what it
+disagrees with) and define its own layers. See `examples/acadmcp.json`.
+
+### What the catalogue cannot do yet
+
+- Concrete columns, footings and shear walls have no block in AutoCAD's sample library, so
+  they are still drawn as geometry (`draw_column` and friends). The catalogue is for
+  elements that really are a block somewhere.
+- The library's own limits come through: the door block's wall thicknesses are 100, 150 and
+  450 mm, so it does not fit the 200 mm wall this package draws by default. The catalogue
+  says so in that entry's `notes` rather than papering over it.
+- Text heights and the default dimension style are not yet overridable from
+  `acadmcp.json`, only layers are.
 
 ## Persistence, and why it is deliberately simple
 
@@ -276,7 +327,9 @@ dotnet test                                  # journal arithmetic, no AutoCAD
   DWG, rollback, replay, the accepted-step refusal, the `Ctrl+Z` interaction, and that
   the palette opens. Report in `%TEMP%\acadmcp-plugin.log`, ending `AUTO-SELFTEST-DONE`.
 - **rpc** — `tests/live_rpc_check.py` drives the running plugin over the real socket
-  using this repository's own client, backend, journal control and MCP tools.
+  using this repository's own client, backend, journal control and MCP tools. It also
+  places a frame of studs, a run of windows and a door out of AutoCAD's own block library,
+  checks what landed, rolls it back, and reports what is in the libraries it read.
 
 `tools/AcadMcp.ApiProbe` dumps AutoCAD API signatures by reading the assemblies as
 metadata with AutoCAD closed. It exists because a loaded .NET assembly cannot be

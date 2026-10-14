@@ -165,6 +165,10 @@ class PluginBackend:
         status = self.client.call("status")
         return {**drawing, "journal": {k: v for k, v in status.items() if k != "unrecoverable"}}
 
+    def zoom_extents(self) -> dict[str, Any]:
+        """Frame the whole drawing. Synchronous, so a screenshot taken next shows it."""
+        return self.client.call("zoom_extents")
+
     def entities(self, layer: str | None = None, limit: int = 200) -> list[dict]:
         return self.client.call("entities", layer=layer, limit=limit)["entities"]
 
@@ -267,6 +271,41 @@ class PluginBackend:
             layer=layer,
             offset=offset,
             text_height=text_height or 0.0,
+        )
+
+    def insert(
+        self,
+        block: str,
+        at: Point,
+        *,
+        source: str | None = None,
+        rotation: float = 0.0,
+        scale: float = 1.0,
+        scale_x: float | None = None,
+        scale_y: float | None = None,
+        properties: dict[str, Any] | None = None,
+        layer: str = "0",
+    ) -> int:
+        """Place a block reference, importing the definition if the drawing has not got it.
+
+        `properties` are the dynamic block's parameters — the size a beam or a door is
+        placed at. The plugin refuses a property the block has not got rather than ignoring
+        it, because a wrong size that looks right is worse than an error: see
+        `PrimitiveBuilder.FinishInsert`.
+        """
+        return self._record(
+            "insert",
+            [at],
+            layer=layer,
+            block=block,
+            source=source,
+            rotation=rotation,
+            # One scale for both axes unless they are given separately, so the common case
+            # stays a single number. Both always travel: the plugin would otherwise have to
+            # guess whether a missing one means 1.0.
+            scale_x=scale if scale_x is None else scale_x,
+            scale_y=scale if scale_y is None else scale_y,
+            properties=properties,
         )
 
     # --- steps -------------------------------------------------------------

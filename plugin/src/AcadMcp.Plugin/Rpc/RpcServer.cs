@@ -311,6 +311,9 @@ public sealed class RpcServer : IDisposable
             case "set_units_mm":
                 return DrawingApi.SetUnitsMm(document);
 
+            case "zoom_extents":
+                return DrawingApi.ZoomExtents(document);
+
             case "entities":
                 return new JsonObject
                 {

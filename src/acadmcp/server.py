@@ -24,11 +24,12 @@ except ImportError:  # pragma: no cover - mcp 1.x
     from mcp.server.fastmcp import FastMCP as _Server
     from mcp.server.fastmcp import Image
 
-from . import geom, layers, ops
+from . import catalog, geom, layers, ops, settings
 from .acad_plugin_client import PluginClient, PluginError, PluginUnavailable
 from .backends import make_backend
 from .backends.base import Backend, BackendError
 from .backends.plugin import PluginBackend
+from .catalog import Element
 from .steps import StepSession, describe_steps
 
 mcp = _Server("AutoCAD-MCP")
@@ -94,19 +95,30 @@ def drawing_help() -> dict[str, Any]:
         "backends": {
             "dxf": "headless ezdxf document; no AutoCAD needed, previewable to PNG",
             "com": "drives a running AutoCAD over COM; entities appear live in the editor",
+            "plugin": "drives the in-AutoCAD plugin in steps you can review and roll back",
         },
         "workflow": [
             "drawing_new(backend='dxf'|'com', path=...) or drawing_open(path)",
+            "plugin_connect() + step_begin/step_commit to draw in AutoCAD as steps",
             "draw_axis_grid(...) to lay out the structural grid",
             "draw_wall / draw_wall_with_openings / draw_room for the envelope and partitions",
             "draw_door, draw_window, draw_column for openings and structure",
+            "place_element / place_along / place_grid to repeat a library element — a frame"
+            " of columns, a wall of windows — sized through the block's dynamic parameters",
             "draw_stair, draw_lift, draw_shaft for the core and risers",
             "draw_room / add_room_label for names and computed areas",
             "add_dimension / add_dimension_chain, annotate for annotation",
             "drawing_preview(...) to eyeball it, drawing_save(...) to keep it",
         ],
+        "element_library": {
+            "how": "element_types() lists what the catalogue offers; library_list(source) "
+            "lists the blocks in a library .dwg and their dynamic parameters",
+            "catalogue": "a JSON file naming the library block, size variants, layer and tag "
+            "prefix for each element; a project adds its own via acadmcp.json",
+            "tags": "numbered from the tags already in the drawing, never from a stored counter",
+        },
         "conventions": {
-            "layers": sorted(layers.LAYERS),
+            "layers": sorted(settings.current().layers or layers.LAYERS),
             "room_area": "computed from the wall centreline ring minus half a wall thickness",
             "angles": "degrees, counter-clockwise from +X",
             "door_swing": "'left' or 'right' relative to the wall direction",
@@ -709,6 +721,40 @@ def _require_plugin() -> PluginBackend:
     return backend
 
 
+def _entry(key: str) -> Element:
+    """The catalogue entry for this key, or a refusal that lists what there is."""
+    element = catalog.current().get(key)
+    if element is None:
+        raise BackendError(
+            f"no element '{key}' in the catalogue; it has: {', '.join(catalog.current().keys())}"
+        )
+    return element
+
+
+def _placed(be: PluginBackend, op: str, label: str, params: dict[str, Any], work: Any) -> dict:
+    """Run one placement call as a single step, the way drawing through the plugin works."""
+    be.begin_step(op, label=label, params=params)
+    try:
+        summary = work()
+    except BaseException:
+        be.abort_step()
+        raise
+    outcome = _outcome(be.commit_step(), "apply")
+    return {**outcome, **summary} if isinstance(summary, dict) else outcome
+
+
+def _placement(be: PluginBackend, op: str, label: str, params: dict[str, Any], work: Any) -> dict:
+    """Like `_placed`, but a bad catalogue argument comes back as a refusal to the caller.
+
+    A variant name that does not exist is a caller's mistake, not a drawing failure, and the
+    catalogue raises to say so; this is where that becomes a message rather than a traceback.
+    """
+    try:
+        return _placed(be, op, label, params, work)
+    except ValueError as exc:
+        raise BackendError(str(exc)) from exc
+
+
 def _outcome(response: dict[str, Any], action: str) -> dict[str, Any]:
     """Flatten the plugin's reply into something a reader can use."""
     result = response.get("result", {})
@@ -890,6 +936,194 @@ def step_control(
     except (PluginError, ValueError) as exc:
         raise BackendError(str(exc)) from exc
     return _outcome(response, action)
+
+
+@mcp.tool()
+def library_list(source: str | None = None, limit: int = 500) -> dict[str, Any]:
+    """List the block definitions in the open drawing, or in a library .dwg.
+
+    This is what the element catalogue is written against, so it is also how a catalogue
+    that has drifted from the library is caught. Dynamic blocks come back with their
+    parameters, the values each accepts and which are read-only. A library file is opened
+    read-only on the side and never becomes a reference to it.
+    """
+    try:
+        return {"ok": True, **_client().call("blocks", source=source, limit=int(limit))}
+    except (PluginError, PluginUnavailable) as exc:
+        raise BackendError(str(exc)) from exc
+
+
+@mcp.tool()
+def element_types(category: str | None = None, check_library: bool = True) -> dict[str, Any]:
+    """What the element catalogue offers, and whether the library still matches it.
+
+    The catalogue is a plain JSON file naming, for each element, which library block stands
+    for it and which parameters select a size. A project supplies its own file — an
+    institute's model numbers and wall thicknesses are its own — and this reports anything
+    that could not be read, anything it had to skip, and every entry whose block the
+    library has not got.
+    """
+    loaded = catalog.current()
+    out: dict[str, Any] = {
+        "ok": True,
+        "count": len(loaded.elements),
+        "skipped": loaded.skipped,
+        "library": {str(path): library for path, library in loaded.libraries.items()},
+        "categories": {
+            name: [element.describe() for element in items]
+            for name, items in loaded.by_category(category).items()
+        },
+    }
+    if check_library:
+        problems = _check_catalog(loaded)
+        out["problems"] = problems
+        out["matches_library"] = not problems
+    return out
+
+
+def _check_catalog(loaded: catalog.Catalog) -> list[str]:
+    """Compare the catalogue against the libraries it names, reading each one once."""
+    try:
+        client = _client()
+    except (PluginError, PluginUnavailable):
+        return ["AutoCAD is not reachable, so the catalogue could not be checked"]
+
+    known: dict[str, list[str]] = {}
+    for source in loaded.sources():
+        if source in known:
+            continue
+        try:
+            known[source] = [
+                block["name"] for block in client.call("blocks", source=source)["blocks"]
+            ]
+        except PluginError as exc:
+            return [f"could not read '{source}': {exc}"]
+    return loaded.check_against(known)
+
+
+@mcp.tool()
+def place_element(
+    type: str,  # noqa: A002 - the tool surface speaks the caller's language
+    at: Any,
+    variant: str | None = None,
+    params: dict[str, Any] | None = None,
+    rotation: float = 0.0,
+    scale: float = 1.0,
+    tag: bool = True,
+    tag_offset: float | None = None,
+) -> dict[str, Any]:
+    """Place one catalogue element from the library, as a single step.
+
+    The block's definition is imported into the drawing if it is not there yet, and the
+    reference is placed at `at`. `variant` picks a size from the catalogue ("900" for a
+    900 mm door) and `params` overrides individual dynamic properties on top. With
+    tag=True the next free tag number is derived from the tags already in the drawing —
+    numbers are never stored, so a tag added by hand cannot desynchronise them.
+    """
+    be = _require_plugin()
+    element = _entry(type)
+
+    def work() -> list[Any]:
+        tags = ops._numbering(be, element, 1) if tag else []
+        return ops.place_element(
+            be,
+            element,
+            geom.xy(at),
+            variant=variant,
+            params=params,
+            rotation=float(rotation),
+            scale=float(scale),
+            tag=tags[0] if tags else None,
+            tag_offset=tag_offset,
+        )
+
+    return _placement(
+        be,
+        "place_element",
+        f"{element.label} {variant or element.default_variant}".strip(),
+        {"type": element.key, "at": geom.xy(at), "variant": variant, "params": params or {}},
+        work,
+    )
+
+
+@mcp.tool()
+def place_along(
+    type: str,  # noqa: A002
+    start: Any,
+    end: Any,
+    count: int | None = None,
+    spacing: float | None = None,
+    inset: float = 0.0,
+    variant: str | None = None,
+    params: dict[str, Any] | None = None,
+    rotation: float | None = None,
+    tag: bool = True,
+) -> dict[str, Any]:
+    """Repeat a catalogue element along a run, as one step.
+
+    Give either `count` (that many, evenly spread, ends included) or `spacing` (every that
+    far, starting at `start`). `inset` pulls the ends in, which is what keeps a column off
+    a corner. `rotation` defaults to the direction of the run, so a row of doors lies in
+    the wall rather than all facing the same way.
+    """
+    be = _require_plugin()
+    element = _entry(type)
+    return _placement(
+        be,
+        "place_along",
+        f"{len(_positions(start, end, count, spacing, inset))} x {element.label}",
+        {"type": element.key, "start": geom.xy(start), "end": geom.xy(end), "count": count,
+         "spacing": spacing},
+        lambda: ops.place_along(
+            be,
+            element,
+            geom.xy(start),
+            geom.xy(end),
+            count=count,
+            spacing=spacing,
+            inset=float(inset),
+            rotation=None if rotation is None else float(rotation),
+            variant=variant,
+            params=params,
+            tag=tag,
+        ),
+    )
+
+
+@mcp.tool()
+def place_grid(
+    type: str,  # noqa: A002
+    xs: list[float],
+    ys: list[float],
+    variant: str | None = None,
+    params: dict[str, Any] | None = None,
+    rotation: float = 0.0,
+    tag: bool = True,
+) -> dict[str, Any]:
+    """Place a catalogue element at every intersection of two coordinate lists.
+
+    A frame of columns is dimensioned to its axis positions, so those are what this takes:
+    the same `xs` and `ys` the axis grid was drawn to.
+    """
+    be = _require_plugin()
+    element = _entry(type)
+    return _placement(
+        be,
+        "place_grid",
+        f"{len(xs) * len(ys)} x {element.label}",
+        {"type": element.key, "xs": list(xs), "ys": list(ys)},
+        lambda: ops.place_grid(
+            be, element, list(xs), list(ys), variant=variant, params=params,
+            rotation=float(rotation), tag=tag,
+        ),
+    )
+
+
+def _positions(start: Any, end: Any, count: int | None, spacing: float | None, inset: float):
+    """The points a run would place at, for the step's label. Raises the same way the op does."""
+    return catalog.positions_along(
+        geom.xy(start), geom.xy(end), count=count, spacing=spacing, inset=float(inset)
+    )
 
 
 def main() -> None:

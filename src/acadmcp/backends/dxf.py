@@ -356,3 +356,26 @@ class DxfBackend:
         )
         dim.render()
         return dim
+
+    def insert(
+        self,
+        block: str,
+        at: Point,
+        *,
+        source: str | None = None,
+        rotation: float = 0.0,
+        scale: float = 1.0,
+        scale_x: float | None = None,
+        scale_y: float | None = None,
+        properties: dict[str, Any] | None = None,
+        layer: str = "0",
+    ) -> Any:
+        """Refused: this backend draws from nothing, so there is no definition to copy.
+
+        ezdxf could hold a block, but the definition has to come from a library .dwg, which
+        ezdxf cannot read. Reading one is worth doing and is not done yet.
+        """
+        raise BackendError(
+            "the 'dxf' backend cannot insert blocks: it cannot read a library .dwg to copy "
+            "a definition from. Use backend='plugin' to place library elements in AutoCAD."
+        )

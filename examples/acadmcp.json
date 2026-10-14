@@ -1,0 +1,20 @@
+{
+  "_comment": [
+    "An example project file. Copy it to the root of your own project as acadmcp.json and",
+    "edit it: everything here is optional, and each key replaces or adds to the package's",
+    "own defaults rather than restating them.",
+    "",
+    "It is found by walking up from the working directory, so one file covers every drawing",
+    "in a project tree."
+  ],
+
+  "library": "F:\\AutoCAD\\AutoCAD 2026\\Sample\\zh-CN\\Dynamic Blocks",
+
+  "catalog": ["standard/elements.json"],
+
+  "layers": {
+    "A-WALL": { "color": 7, "linetype": "CONTINUOUS" },
+    "我们的柱": [3, "CONTINUOUS"],
+    "S-BEAM": [1, "CONTINUOUS"]
+  }
+}

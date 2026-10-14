@@ -343,6 +343,87 @@ internal static class DrawingApi
         return found;
     }
 
+    /// <summary>Zoom the current view to fit everything in the model space.</summary>
+    /// <remarks>
+    /// Synchronously, through the current view record, not by queueing a <c>ZOOM</c> command:
+    /// the reason to zoom is usually to photograph the drawing next, and a queued command
+    /// would let the picture be taken of the view as it was before. The extents are measured
+    /// off the entities rather than read from <c>Extmin</c>/<c>Extmax</c>, which AutoCAD only
+    /// refreshes on its own terms and which are therefore stale exactly when they matter.
+    /// </remarks>
+    public static JsonObject ZoomExtents(Document document)
+    {
+        var db = document.Database;
+        using var docLock = document.LockDocument();
+        using var tr = db.TransactionManager.StartTransaction();
+        var model = (BlockTableRecord)tr.GetObject(
+            SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForRead);
+
+        Extents3d? box = null;
+        foreach (var id in model)
+        {
+            if (tr.GetObject(id, OpenMode.ForRead) is not Entity entity || entity.IsErased)
+            {
+                continue;
+            }
+            try
+            {
+                var extents = entity.GeometricExtents;
+                box = box is null ? extents : Union(box.Value, extents);
+            }
+            catch (Autodesk.AutoCAD.Runtime.Exception)
+            {
+                // Some entities have no extents (a zero-length line, a text with no
+                // glyphs). One of those must not cost the whole zoom.
+            }
+        }
+        tr.Commit();
+
+        if (box is null)
+        {
+            return new JsonObject { ["ok"] = false, ["message"] = "there is nothing to zoom to" };
+        }
+
+        var low = box.Value.MinPoint;
+        var high = box.Value.MaxPoint;
+        var width = Math.Max(high.X - low.X, 1.0);
+        var height = Math.Max(high.Y - low.Y, 1.0);
+
+        using var view = document.Editor.GetCurrentView();
+        var centre = new Point2d((low.X + high.X) / 2.0, (low.Y + high.Y) / 2.0);
+
+        // Fit the drawing inside the view's own shape, with a margin. Fitting the width and
+        // letting the height follow, or the other way round, is what keeps a long thin plan
+        // readable in a window that is not the same shape as it is.
+        var aspect = view.Height > 1e-9 ? view.Width / view.Height : 1.0;
+        const double margin = 1.1;
+        if (width / height >= aspect)
+        {
+            view.Width = width * margin;
+            view.Height = view.Width / aspect;
+        }
+        else
+        {
+            view.Height = height * margin;
+            view.Width = view.Height * aspect;
+        }
+        view.CenterPoint = centre;
+        document.Editor.SetCurrentView(view);
+
+        return new JsonObject
+        {
+            ["ok"] = true,
+            ["width"] = view.Width,
+            ["height"] = view.Height,
+            ["entities"] = model.Cast<ObjectId>().Count(),
+        };
+    }
+
+    private static Extents3d Union(Extents3d a, Extents3d b) =>
+        new(
+            new Point3d(Math.Min(a.MinPoint.X, b.MinPoint.X), Math.Min(a.MinPoint.Y, b.MinPoint.Y), 0),
+            new Point3d(Math.Max(a.MaxPoint.X, b.MaxPoint.X), Math.Max(a.MaxPoint.Y, b.MaxPoint.Y), 0));
+
     private static void LoadLinetype(Database db, string name, Transaction tr)
     {
         var linetypes = (LinetypeTable)tr.GetObject(db.LinetypeTableId, OpenMode.ForRead);

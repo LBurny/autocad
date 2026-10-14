@@ -114,3 +114,25 @@ class Backend(Protocol):
         layer: str = "0",
         text_height: float | None = None,
     ) -> Any: ...
+
+    def insert(
+        self,
+        block: str,
+        at: Point,
+        *,
+        source: str | None = None,
+        rotation: float = 0.0,
+        scale: float = 1.0,
+        scale_x: float | None = None,
+        scale_y: float | None = None,
+        properties: dict[str, Any] | None = None,
+        layer: str = "0",
+    ) -> Any:
+        """Place a block reference, importing the definition if it is not there yet.
+
+        Only the plugin backend has this so far; the others raise
+        :class:`BackendError`. It is in the contract rather than on one backend because
+        placing a library element is an ordinary drawing operation, and an op that quietly
+        worked on one backend and not another would be worse than one that says so.
+        """
+        ...

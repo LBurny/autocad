@@ -454,6 +454,24 @@ class ComBackend:
         self._style(e, layer)
         return e
 
+    def insert(
+        self,
+        block: str,
+        at: Point,
+        *,
+        source: str | None = None,
+        rotation: float = 0.0,
+        scale: float = 1.0,
+        scale_x: float | None = None,
+        scale_y: float | None = None,
+        properties: dict[str, Any] | None = None,
+        layer: str = "0",
+    ) -> Any:
+        """Refused: this backend has no block library to draw from."""
+        raise BackendError(
+            "the 'com' backend cannot insert blocks yet; the plugin backend can, and it is the one that keeps the drawing's step journal"
+        )
+
     # --- helpers -----------------------------------------------------------
     def _style(self, entity: Any, layer: str, linetype: str | None = None) -> None:
         # Styling must never abort a drawing that otherwise succeeded.

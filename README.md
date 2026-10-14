@@ -89,7 +89,10 @@ uv run python examples/floor_plan_demo.py --com      # draw into running AutoCAD
 **Annotation** — `draw_axis_grid`, `add_text`, `add_leader_note`,
 `add_dimension`, `add_dimension_chain`, `add_hatch`
 
-### The two calls that matter most
+**Library elements** — `library_list`, `element_types`, `place_element`,
+`place_along`, `place_grid`
+
+### The calls that matter most
 
 `draw_wall_with_openings` is the workhorse for reproducing a real plan. Instead of
 drawing wall faces and then trying to place door symbols on top of them, you give
@@ -106,6 +109,20 @@ draw_wall_with_openings(
     ],
 )
 ```
+
+`place_along` and `place_grid` are what a factory needs, where the same element repeats
+dozens of times: they insert a real block out of your own library at every position, size
+it through the block's dynamic parameters, number it from the tags the drawing already
+has, and land the whole run as **one step** you can take back in one action:
+
+```python
+place_grid("stud", xs=[0, 6000, 12000], ys=[0, 6000])       # a frame of columns
+place_along("window", start=[0, 0], end=[12000, 0], spacing=3000, variant="1200")
+```
+
+Which block stands for which element is a plain JSON catalogue — `element_types` shows it
+and reports any entry whose block your library has not got — and a project points it at its
+own library and layers with `acadmcp.json`. See [docs/plugin.md](docs/plugin.md).
 
 `draw_room` walls a ring in and reports the floor area it actually encloses —
 measured to the inner face of the walls, not the centreline, so the number is

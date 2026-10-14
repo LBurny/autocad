@@ -1,0 +1,168 @@
+{
+  "_comment": [
+    "The starter catalogue. Every block name here was read off AutoCAD 2026's own sample",
+    "libraries with the plugin's `blocks` call, not guessed. A project replaces this with",
+    "its own file (see acadmcp.json), because an institute's layer names, model numbers",
+    "and wall thicknesses are its own.",
+    "",
+    "{library} is substituted from the key below, or from ACADMCP_LIBRARY, so the same",
+    "catalogue works on a machine whose samples sit on another drive."
+  ],
+  "library": "F:\\AutoCAD\\AutoCAD 2026\\Sample\\zh-CN\\Dynamic Blocks",
+  "elements": [
+    {
+      "key": "door",
+      "label": "门 (single leaf)",
+      "category": "opening",
+      "block": "门 - 公制",
+      "source": "{library}\\Architectural - Metric.dwg",
+      "layer": "A-DOOR",
+      "tag_prefix": "M",
+      "default_variant": "900",
+      "params": { "墙厚": 150 },
+      "notes": "The block's wall thicknesses are 100, 150 and 450 only, so it does not suit the 200 mm wall this package draws by default. Set 墙厚 to one of the three, or point this entry at your own door block.",
+      "variants": {
+        "600": { "params": { "门尺寸": 600 }, "notes": "M0618" },
+        "700": { "params": { "门尺寸": 700 }, "notes": "M0718" },
+        "800": { "params": { "门尺寸": 800 }, "notes": "M0818" },
+        "900": { "params": { "门尺寸": 900 }, "notes": "M0921" },
+        "1000": { "params": { "门尺寸": 1000 }, "notes": "M1021" }
+      }
+    },
+    {
+      "key": "window",
+      "label": "窗 (plan)",
+      "category": "opening",
+      "block": "窗 - 公制",
+      "source": "{library}\\Architectural - Metric.dwg",
+      "layer": "A-WINDOW",
+      "tag_prefix": "C",
+      "default_variant": "1500",
+      "params": { "Wall": 150 },
+      "notes": "The block's width parameter is named DoorWidth, which is its own typo to live with. Wall takes 100, 150 or 450.",
+      "variants": {
+        "600": { "params": { "DoorWidth": 600 }, "notes": "C0609" },
+        "900": { "params": { "DoorWidth": 900 }, "notes": "C0915" },
+        "1200": { "params": { "DoorWidth": 1200 }, "notes": "C1218" },
+        "1500": { "params": { "DoorWidth": 1500 }, "notes": "C1521" }
+      }
+    },
+    {
+      "key": "window_elevation",
+      "label": "铝窗 (elevation)",
+      "category": "opening",
+      "block": "铝窗 (立面图) - 公制",
+      "source": "{library}\\Architectural - Metric.dwg",
+      "layer": "A-WINDOW",
+      "tag_prefix": "C",
+      "default_variant": "1500x1500",
+      "variants": {
+        "600x600": { "params": { "窗宽度": 600, "窗高度": 600 } },
+        "900x900": { "params": { "窗宽度": 900, "窗高度": 900 } },
+        "1200x1500": { "params": { "窗宽度": 1200, "窗高度": 1500 } },
+        "1500x1500": { "params": { "窗宽度": 1500, "窗高度": 1500 } }
+      }
+    },
+    {
+      "key": "stud",
+      "label": "钢立柱 (stud)",
+      "category": "structure",
+      "block": "立柱 - 公制",
+      "source": "{library}\\Architectural - Metric.dwg",
+      "layer": "S-COLUMN",
+      "tag_prefix": "G",
+      "default_variant": "50 x 100",
+      "params": { "立柱高度": 140, "立柱宽度": 76, "立柱数": "1" },
+      "notes": "A light-gauge stud, not a concrete column. The library's heights and widths are its own small set; a concrete column has no block in it and is drawn with draw_column instead.",
+      "variants": {
+        "50 x 100": { "params": { "立柱尺寸": "50 x 100" } },
+        "50 x 150": { "params": { "立柱尺寸": "50 x 150" } },
+        "50 x 200": { "params": { "立柱尺寸": "50 x 200" } },
+        "50 x 250": { "params": { "立柱尺寸": "50 x 250" } },
+        "50 x 300": { "params": { "立柱尺寸": "50 x 300" } }
+      }
+    },
+    {
+      "key": "beam_wf",
+      "label": "焊接 H 型钢梁 (WF)",
+      "category": "structure",
+      "block": "WF 梁 - 公制",
+      "source": "{library}\\Structural - Metric.dwg",
+      "layer": "S-BEAM",
+      "tag_prefix": "GL",
+      "default_variant": "200x200x8",
+      "notes": "W is the flange width, H the overall depth, Ft the flange thickness — all free dimensions, so a section is given by three numbers rather than chosen from a list.",
+      "variants": {
+        "150x150x7": { "params": { "W": 150, "H": 150, "Ft": 7 } },
+        "200x200x8": { "params": { "W": 200, "H": 200, "Ft": 8 } },
+        "300x300x10": { "params": { "W": 300, "H": 300, "Ft": 10 } },
+        "400x400x13": { "params": { "W": 400, "H": 400, "Ft": 13 } }
+      }
+    },
+    {
+      "key": "beam_i",
+      "label": "工字钢 (I)",
+      "category": "structure",
+      "block": "I 形梁 - 公制",
+      "source": "{library}\\Structural - Metric.dwg",
+      "layer": "S-BEAM",
+      "tag_prefix": "GL",
+      "default_variant": "200x100x7",
+      "notes": "W is the depth, Wt the web/flange thickness, Ft the flange width.",
+      "variants": {
+        "160x74x5": { "params": { "W": 160, "Wt": 5, "Ft": 74 } },
+        "200x100x7": { "params": { "W": 200, "Wt": 7, "Ft": 100 } },
+        "300x125x9": { "params": { "W": 300, "Wt": 9, "Ft": 125 } },
+        "400x155x12": { "params": { "W": 400, "Wt": 12, "Ft": 155 } }
+      }
+    },
+    {
+      "key": "channel",
+      "label": "槽钢 (channel)",
+      "category": "structure",
+      "block": "通道 - 公制",
+      "source": "{library}\\Structural - Metric.dwg",
+      "layer": "S-BEAM",
+      "tag_prefix": "GL",
+      "default_variant": "100x48x5",
+      "notes": "D is the depth, Fw the flange width, Ft the thickness.",
+      "variants": {
+        "80x43x5": { "params": { "D": 80, "Fw": 43, "Ft": 5 } },
+        "100x48x5": { "params": { "D": 100, "Fw": 48, "Ft": 5 } },
+        "160x63x6": { "params": { "D": 160, "Fw": 63, "Ft": 6 } },
+        "200x73x7": { "params": { "D": 200, "Fw": 73, "Ft": 7 } }
+      }
+    },
+    {
+      "key": "light",
+      "label": "荧光灯 (recessed light)",
+      "category": "equipment",
+      "block": "荧光灯 (隐藏式) - 公制",
+      "source": "{library}\\Architectural - Metric.dwg",
+      "layer": "A-EQUIP",
+      "tag_prefix": "L",
+      "default_variant": "1200",
+      "notes": "Width and Height are free dimensions, in plan.",
+      "variants": {
+        "600": { "params": { "Width": 600, "Height": 600 } },
+        "1200": { "params": { "Width": 1200, "Height": 300 } },
+        "1500": { "params": { "Width": 1500, "Height": 300 } }
+      }
+    },
+    {
+      "key": "weld_symbol",
+      "label": "焊接符号",
+      "category": "annotation",
+      "block": "焊接符号 - 公制",
+      "source": "{library}\\Mechanical - Metric.dwg",
+      "layer": "A-ANNO",
+      "notes": "A symbol, not a tag: it carries no number, so placing one does not consume a tag number.",
+      "variants": {
+        "fillet": { "params": { "焊接符号": "圆角" } },
+        "square": { "params": { "焊接符号": "方形" } },
+        "v": { "params": { "焊接符号": "V" } },
+        "backing": { "params": { "焊接符号": "背衬" } }
+      }
+    }
+  ]
+}

@@ -238,6 +238,12 @@ if [ "$run_rpc" = "1" ]; then
     exit 1
   fi
   echo "live RPC check: $(elapsed)s"
+  # The element check places library blocks into the drawing and can photograph them:
+  # `--shot path.png` gives both pictures, the palette from the engine phase and the
+  # placed elements from this one, since the first is taken before the second runs.
+  if [ -n "$shot" ]; then
+    export ACADMCP_SHOT_ELEMENTS="${shot%.png}-elements.png"
+  fi
   if rpc_out=$("$python_exe" "$root/tests/live_rpc_check.py" 2>&1); then
     rpc_status=0
   else

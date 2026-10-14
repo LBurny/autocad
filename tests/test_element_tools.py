@@ -1,0 +1,150 @@
+"""The element tools, driven against a plugin client that records instead of drawing.
+
+The drawing itself is exercised against real AutoCAD by ``live_rpc_check.py``. What is
+tested here is the wiring between the catalogue, the ops and the step boundary, which is
+where a placement can go wrong without AutoCAD's help: a size that never reaches the block,
+a tag numbered off the wrong list, or — the one this file was written after — a helper
+calling itself instead of the function it wraps.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+import acadmcp.server as server  # noqa: E402
+from acadmcp.backends.base import BackendError  # noqa: E402
+from acadmcp.backends.plugin import PluginBackend  # noqa: E402
+from acadmcp.catalog import Catalog  # noqa: E402
+
+
+class FakePlugin:
+    """Answers the plugin's wire protocol, keeping what the client sent."""
+
+    def __init__(self, texts: list[str] | None = None) -> None:
+        self.texts = list(texts or [])
+        self.steps: list[dict[str, Any]] = []
+
+    def call(self, method: str, **params: Any) -> Any:
+        if method == "apply":
+            self.steps.append(params["step"])
+            return {
+                "result": {
+                    "ok": True,
+                    "action": "apply",
+                    "message": "applied",
+                    "step": {"handles": ["1", "2"], "primitives": len(params["step"]["primitives"])},
+                },
+                "status": {"count": len(self.steps)},
+            }
+        if method == "entities":
+            return {"entities": [{"text": text} for text in self.texts]}
+        raise AssertionError(f"unexpected call: {method}")
+
+
+@pytest.fixture()
+def plugin():
+    catalog_client = FakePlugin()
+    be = PluginBackend()
+    be.client = catalog_client
+    server._state.reset(be, "plugin")
+    yield catalog_client
+    server._state.reset(None, None)
+
+
+def _inserts(client: FakePlugin) -> list[dict[str, Any]]:
+    return [
+        primitive
+        for step in client.steps
+        for primitive in step["primitives"]
+        if primitive["kind"] == "insert"
+    ]
+
+
+def _texts(client: FakePlugin) -> list[str]:
+    return [
+        primitive["text"]
+        for step in client.steps
+        for primitive in step["primitives"]
+        if primitive["kind"] == "text"
+    ]
+
+
+def test_placing_one_element_sets_the_variant_size_on_the_block(plugin):
+    result = server.place_element("door", at=[1000, 2000], variant="800", rotation=90, tag=False)
+
+    assert result["ok"]
+    assert len(plugin.steps) == 1
+    placed = _inserts(plugin)[0]
+    assert placed["block"] == "门 - 公制"
+    assert placed["points"] == [1000.0, 2000.0]
+    assert placed["rotation"] == 90
+    assert placed["properties"] == {"墙厚": 150, "门尺寸": 800}
+    assert _texts(plugin) == []
+
+
+def test_placing_a_run_numbers_from_the_tags_the_drawing_has(plugin):
+    plugin.texts = ["M-1", "M-4"]
+
+    result = server.place_along("door", start=[0, 0], end=[6000, 0], count=3)
+
+    assert result["placed"] == 3
+    assert result["tags"] == ["M-5", "M-6", "M-7"]
+    assert _texts(plugin) == ["M-5", "M-6", "M-7"]
+    assert all(placed["properties"]["门尺寸"] == 900 for placed in _inserts(plugin))
+
+
+def test_a_run_lies_along_its_wall(plugin):
+    result = server.place_along("window", start=[0, 0], end=[0, 6000], count=2, variant="1200")
+
+    assert result["rotation"] == 90
+    assert all(placed["rotation"] == 90 for placed in _inserts(plugin))
+    assert all(placed["properties"]["DoorWidth"] == 1200 for placed in _inserts(plugin))
+
+
+def test_a_grid_places_one_element_per_intersection(plugin):
+    result = server.place_grid("stud", xs=[0, 6000], ys=[10, 20, 30])
+
+    assert result["placed"] == 6
+    assert len(_inserts(plugin)) == 6
+
+
+def test_a_variant_that_does_not_exist_is_refused_not_substituted(plugin):
+    with pytest.raises(BackendError, match="no variant '950'"):
+        server.place_element("door", at=[0, 0], variant="950")
+
+    # Nothing was drawn and no step was left open for the next call to trip over.
+    assert plugin.steps == []
+    assert server._state.backend.open_step == ""
+
+
+def test_an_element_that_is_not_in_the_catalogue_is_refused_with_the_list(plugin):
+    with pytest.raises(BackendError, match="no element 'chair'.*beam_wf"):
+        server.place_element("chair", at=[0, 0])
+
+
+def test_element_types_reports_what_it_skipped_and_cannot_check():
+    listed = server.element_types()
+
+    assert listed["ok"]
+    assert listed["count"] == len(Catalog.load().elements)
+    assert listed["skipped"] == []
+    # No AutoCAD in a pytest run, so the catalogue cannot be checked against the library.
+    # That has to come back as "unchecked", never as "fine": a catalogue that has drifted
+    # from its library places the wrong block, and silence is how that ships.
+    assert listed["matches_library"] is False
+    assert listed["problems"]
+    assert "could not read" in listed["problems"][0]
+    assert "AcadMcp plugin" in listed["problems"][0]
+
+
+def test_a_placement_without_the_plugin_is_refused_rather_than_drawn_elsewhere():
+    server._state.reset(None, None)
+
+    with pytest.raises(BackendError, match="plugin_connect"):
+        server.place_element("door", at=[0, 0])

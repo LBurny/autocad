@@ -293,6 +293,26 @@ step 2 placed another copy, rolling step 1 back must leave the definition standi
 `Ctrl+Z` of the importing step *does* remove the definition, together with that step's
 reference and journal record — correctly, since all three were one transaction.
 
+**The element catalogue is data, and it is checked against the library, not trusted.** Every
+block name in `src/acadmcp/data/elements.json` was read off AutoCAD's libraries with
+`library_list`; `element_types` re-checks the names at call time and reports entries whose
+block the library has not got, and a library it could not read, because "could not check" is
+not "fine". Loading is tolerant (a broken entry is skipped and *counted*, never raised, the
+same rule the journal follows) but a *named variant that does not exist* raises rather than
+falling back: placing the wrong size silently is the same failure as setting a dynamic
+property the block has not got. Tags are numbered from the tags already in the drawing and
+never from a stored counter. Layer names, model numbers and wall thicknesses come from
+`acadmcp.json` and the catalogue file, never from `layers.py` — a standard is the drawing
+office's, not this package's.
+
+**A queued zoom is useless before a screenshot.** `ZOOM` cannot be run from the plugin's idle
+handler (`Editor.Command` throws `eInvalidInput` outside a command context) and queueing it
+via `SendStringToExecute` means the picture is taken of the view as it was *before*. That is
+why `zoom_extents` sets the current view record synchronously (`Editor.GetCurrentView` /
+`SetCurrentView` on the `ViewTableRecord`, which lives in **accoremgd**, not acmgd or
+acdbmgd) and measures the extents off the entities rather than reading `Extmin`/`Extmax`,
+which AutoCAD only refreshes on its own terms.
+
 ## Environment
 
 - AutoCAD 2026 (release 25.1) is at `F:\AutoCAD\AutoCAD 2026` — **not** under

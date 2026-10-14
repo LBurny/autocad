@@ -17,6 +17,8 @@ LAYERS: dict[str, tuple[int, str]] = {
     "A-DOOR": (4, "CONTINUOUS"),
     "A-WINDOW": (4, "CONTINUOUS"),
     "A-COLUMN": (7, "CONTINUOUS"),
+    "S-COLUMN": (7, "CONTINUOUS"),
+    "S-BEAM": (7, "CONTINUOUS"),
     "A-STAIR": (2, "CONTINUOUS"),
     "A-LIFT": (6, "CONTINUOUS"),
     "A-SHAFT": (30, "CONTINUOUS"),

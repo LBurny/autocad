@@ -388,7 +388,119 @@ def run(report: Report) -> None:
         client.close()
 
     check_mcp_tools(report)
+    place_elements(report)
     survey_libraries(report)
+
+
+def place_elements(report: Report) -> None:
+    """Place a catalogue's worth of real library elements into the open drawing.
+
+    The end of the journey, and the only check that uses the whole stack at once: the
+    catalogue says which block is a door, the plugin imports the definition out of AutoCAD's
+    library, the reference is sized through its dynamic properties, the number comes from the
+    tags the drawing already has, and the whole thing is one step that can be rolled back
+    without taking the definition with it.
+
+    It also leaves the drawing in a state worth photographing, which is the point of taking
+    the picture here rather than of an empty sheet.
+    """
+    from acadmcp import server
+
+    listed = server.element_types()
+    report.check(
+        "the catalogue loads and matches the library it names",
+        listed["ok"] and listed["count"] > 0 and listed.get("matches_library") is True,
+        f"{listed['count']} element(s); problems: {listed.get('problems')} "
+        f"skipped: {listed['skipped']}",
+    )
+
+    # A frame of studs, a wall of windows and a pair of doors, at sizes the catalogue's
+    # variants select rather than sizes written here.
+    frame = server.place_grid("stud", xs=[0, 6000, 12000], ys=[0, 6000], variant="50 x 150")
+    report.check("a grid of elements places in one step", frame["ok"], frame["message"])
+    report.check(
+        "one per axis intersection, each numbered from the drawing",
+        frame["placed"] == 6 and frame["tags"] == [f"G-{i}" for i in range(1, 7)],
+        f"placed={frame['placed']} tags={frame['tags']}",
+    )
+
+    wall = server.place_along("window", start=[0, 6000], end=[12000, 6000], spacing=3000, variant="1200")
+    report.check("a run of elements places in one step", wall["ok"], wall["message"])
+    report.check(
+        "an element with no tags in the drawing yet starts at one",
+        wall["tags"] == ["C-1", "C-2", "C-3", "C-4", "C-5"],
+        str(wall["tags"]),
+    )
+
+    door = server.place_element("door", at=[3000, 6000], variant="900", rotation=90)
+    report.check("a single element places", door["ok"], door["message"])
+    report.check(
+        "it is one step owning the reference and its tag",
+        len((door.get("step") or {}).get("handles") or []) == 2,
+        str(door.get("step")),
+    )
+
+    # What actually landed in the drawing, read back off the entities: the size asked for
+    # and nothing else's.
+    placed = [
+        row
+        for row in server.listing_entities(limit=500)["entities"]
+        if row.get("block")
+    ]
+    sizes = [row for row in placed if row.get("properties", {}).get("立柱尺寸") == "50 x 150"]
+    report.check(
+        "every placed element is a block reference at the size it was asked for",
+        len(sizes) == 6,
+        f"{len(sizes)} of {len(placed)} block reference(s) are 50 x 150 studs",
+    )
+    report.check(
+        "the drawing's tags are exactly the ones that were placed",
+        sorted(text for text in _texts(server) if text.startswith(("G-", "C-", "M-")))
+        == [f"C-{i}" for i in range(1, 6)] + [f"G-{i}" for i in range(1, 7)] + ["M-1"],
+        str(sorted(text for text in _texts(server) if text.startswith(("G-", "C-", "M-")))),
+    )
+
+    # The picture is taken here, with the elements still in the drawing: photographing
+    # after the rollback below would show an empty sheet.
+    _photograph(report)
+
+    # And now the invariant that matters, one more time, on elements: rolling back removes
+    # the references and leaves every definition they came from.
+    before = [row["handle"] for row in placed]
+    rolled = server.step_control("rollback_to", index=0, force=True)
+    report.check("rolling the elements back succeeds", rolled["ok"], rolled["message"])
+    after = [row["handle"] for row in server.listing_entities(limit=500)["entities"]]
+    report.check(
+        "the rollback removed every element it placed",
+        not set(before) & set(after),
+        f"{len(set(before) & set(after))} of {len(before)} left",
+    )
+    still_defined = {block["name"] for block in server.library_list()["blocks"]}
+    report.check(
+        "and left the definitions it imported standing",
+        {"立柱 - 公制", "窗 - 公制", "门 - 公制"} <= still_defined,
+        f"definitions now: {sorted(still_defined)}",
+    )
+
+
+def _texts(server: Any) -> list[str]:
+    return [str(row.get("text", "")) for row in server.listing_entities(limit=500)["entities"]]
+
+
+def _photograph(report: Report) -> None:
+    """Take the picture the user asked for, if one was asked for."""
+    path = os.environ.get("ACADMCP_SHOT_ELEMENTS")
+    if not path:
+        return
+    from acadmcp import server
+
+    try:
+        framed = server.acad_zoom_extents()
+        report.check("the view can be framed before photographing it", framed["ok"], str(framed))
+        server.drawing_screenshot(path)
+        report.note(f"photographed the placed elements to {path}")
+    except Exception as exc:  # noqa: BLE001 - a missing picture is not a failed check
+        report.note(f"could not photograph the elements: {type(exc).__name__}: {exc}")
 
 
 def survey_libraries(report: Report) -> None:
