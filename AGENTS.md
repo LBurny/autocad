@@ -17,13 +17,20 @@ src/acadmcp/
                         No CAD imports — it may import geom and layers and nothing else.
   verify.py             the drawing reconciled against the journal's own account of it.
                         No CAD imports, and none from this package either.
+  critique.py           the components checked against the journal (doors on walls, tags,
+                        masquerading text, sheet fit). Pure — geom, layers and sheet only.
+  capture_ops.py        element capture: journal steps become a block definition plus a
+                        catalogue entry, so a verified component is never re-derived.
   terms.py              the tool vocabulary: the AutoCAD command and the Chinese phrase for
                         each tool. Data plus lookup; no CAD imports.
+  prompts.py            the MCP prompt templates (floor_plan, headless_to_live,
+                        drawing_review). Pure text; no CAD imports.
   sheet.py              the sheet: paper sizes, plot scales, frame and title-block geometry,
                         and the PDF paper-size read-back. Pure — it imports layers for the
                         measured character width and nothing else, and no CAD library.
   capture.py            Win32 window capture, and finding the AutoCAD frame
-  server.py             the MCP tool surface (49 tools, each annotated by behaviour class)
+  server.py             the MCP tool surface (52 tools, each annotated by behaviour class),
+                        the audit middleware and the server instructions
   journal.py            the backend-neutral step journal (undo/redo bookkeeping). No CAD imports.
   acad_plugin_client.py the socket client for the in-AutoCAD plugin
   steps.py              step-journal control, and the step_control action table
@@ -44,6 +51,11 @@ tests/                  test_geom.py, test_backends.py, test_journal.py, test_re
                         test_tool_surface.py (annotations, naming, pagination),
                         test_verify.py (the journal's count against the drawing's),
                         test_terms.py (every tool has a vocabulary entry),
+                        test_prompts.py (the prompt registry against the tool registry),
+                        test_audit_middleware.py (tool-call logging, the instructions),
+                        test_critique.py (component checks against the journal),
+                        test_capture.py (element capture: block, catalogue, reopen),
+                        test_finalize_gate.py (the three check/capture tools, wired),
                         test_doc_numbers.py (the docs and the evaluation answers),
                         test_sheet.py (paper, scale, frame, title block, PDF read-back),
                         test_sheet_backend.py (the page setup and paperspace, read back),
@@ -52,14 +64,19 @@ tests/                  test_geom.py, test_backends.py, test_journal.py, test_re
                         test_input_validation.py (caller mistakes surface as readable errors),
                         test_live_screenshot.py (no restore, no rename on export),
                         sandbox_driver.py (fresh-server sandbox for live drawing exercises),
+                        sandbox_prompts_check.py / sandbox_audit_check.py /
+                        sandbox_correctness_check.py (what it drives: the prompts and
+                        instructions over the wire, the audit log, and critique → finalize
+                        → capture, refused and then passed),
                         live_rpc_check.py (needs AutoCAD, so pytest never runs it)
 ```
 
 ## Commands
 
 ```bash
-uv run pytest -q                      # 415 tests, ~12s, no AutoCAD required
+uv run pytest -q                      # 488 tests, ~12s, no AutoCAD required
 uv run pytest tests/test_terms.py -q  # adding a tool without a vocabulary entry fails here
+uv run pytest tests/test_prompts.py -q  # a prompt naming a tool that does not exist fails here
 uv run python scripts/check_doc_numbers.py   # docs and evaluation answers vs the tree
 uv run ruff check . --output-format concise
 uv run ruff format .
@@ -69,8 +86,9 @@ uv run python examples/floor_plan_demo.py --com     # draw into a NEW AutoCAD dr
 ```
 
 `check_doc_numbers.py` derives the tool count, the collected test count, the journal payload
-version and every `evaluation.xml` answer from the tree, and exits non-zero when the prose
-disagrees. `tests/test_doc_numbers.py` runs it as a gate, because this repository has no CI
+version and every `evaluation.xml` answer from the tree, and exits non-zero when the document
+— or the source, which quotes the same counts in its own docstrings — disagrees.
+`tests/test_doc_numbers.py` runs it as a gate, because this repository has no CI
 and a test is the only thing that ever runs. It exists because one answer had silently gone
 stale: the catalogue grew a fifth structure element and the evaluation kept answering 4.
 

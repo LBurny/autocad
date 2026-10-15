@@ -183,6 +183,43 @@ def equipment(
     return ops.draw_equipment(be, (x, y), (x + float(width), y + float(depth)), name, layer=layer)
 
 
+def insert_captured(
+    be,
+    at: Point,
+    *,
+    rotation: float = 0.0,
+    width: float | None = None,
+    layer: str = "",
+    **params: Any,
+) -> list[Any]:
+    """A captured element: a block definition that lives in the drawing, placed at `at`.
+
+    The definition is not a library block — a capture wrote it into the drawing from
+    geometry that was drawn and checked — so this works on any backend the capture worked
+    on, and the name comes from the entry's `params` rather than from a library file. `at`
+    is the base point the capture chose, which its own docstring records: a door's hinge, a
+    component's corner.
+
+    A measured `width` is refused rather than ignored. The block is fixed geometry, and a
+    capture does not carry what the geometry is measured *from*, so there is no honest way to
+    resize it — drawing it at its captured size into a measured hole is the wrong size that
+    looks right.
+    """
+    block = str(params.get("block", "")).strip()
+    if not block:
+        raise ValueError(
+            "a captured element needs the definition it places, under 'block' in its catalogue "
+            "entry's params; re-register it, or place it with place_element from a capture"
+        )
+    if width is not None:
+        raise ValueError(
+            "a captured element is a block of the geometry that was captured, so it cannot be "
+            "resized to a measured width; capture it at the size wanted, or use a parametric "
+            "entry whose twin takes a width"
+        )
+    return [be.insert(block, at, rotation=rotation, layer=layer or "0")]
+
+
 #: What a catalogue entry may name in its ``op``: the single list a catalogue is written
 #: against. Kept as data so the registry, the refusal and the documentation cannot drift.
 CATALOG_OPS: dict[str, Callable[..., list[Any]]] = {
@@ -193,6 +230,7 @@ CATALOG_OPS: dict[str, Callable[..., list[Any]]] = {
     "stair": stair,
     "shaft": shaft,
     "equipment": equipment,
+    "insert_captured": insert_captured,
 }
 
 

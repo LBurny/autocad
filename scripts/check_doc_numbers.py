@@ -155,6 +155,11 @@ def check() -> list[str]:
         ("tools", r"\((\d+) tools", "AGENTS.md"),
         ("tests", r"# (\d+) tests", "AGENTS.md"),
         ("tools", r"the (\d+)-tool MCP surface", "README.md"),
+        # The source states the count too, in a sentence explaining a design choice, and a
+        # docstring is nobody's idea of a document — which is how one of them said 44 for
+        # five tools' worth of drift. Anything stating the count is checked, code or prose.
+        ("tools", r"At (\d+) tools", "src/acadmcp/terms.py"),
+        ("tools", r"vocabulary of the (\d+) tools", "src/acadmcp/server.py"),
     ]:
         found = re.search(pattern, _read(name))
         if found is None:

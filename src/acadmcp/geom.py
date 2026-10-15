@@ -48,6 +48,18 @@ def dist(a: Point, b: Point) -> float:
     return math.hypot(a[0] - b[0], a[1] - b[1])
 
 
+def dist_point_segment(p: Point, a: Point, b: Point) -> float:
+    """Distance from p to the segment ab — not to the infinite line."""
+    ax, ay = xy(a)
+    bx, by = xy(b)
+    px, py = xy(p)
+    dx, dy = bx - ax, by - ay
+    if dx == 0 and dy == 0:
+        return dist(p, a)
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)))
+    return dist(p, (ax + t * dx, ay + t * dy))
+
+
 def unit(a: Point) -> Vec:
     n = length(a)
     if n < EPS:

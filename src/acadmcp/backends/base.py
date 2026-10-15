@@ -45,6 +45,12 @@ class Backend(Protocol):
     #: and say so.
     supports_sheet: bool
 
+    #: Whether this backend can create a block definition from primitives. Declared rather than
+    #: probed for the same reason the other two are: which half of a capture can happen has to be
+    #: known before anything is drawn. Only the dxf driver implements it this wave; the live
+    #: drivers refuse by name.
+    supports_block_create: bool
+
     # --- layers & document -------------------------------------------------
     def ensure_layer(
         self, name: str, color: int | None = None, linetype: str | None = None
@@ -220,5 +226,19 @@ class Backend(Protocol):
         :class:`BackendError`. It is in the contract rather than on one backend because
         placing a library element is an ordinary drawing operation, and an op that quietly
         worked on one backend and not another would be worse than one that says so.
+        """
+        ...
+
+    def create_block(self, name: str, primitives: list[dict[str, Any]], base_point: Point) -> Any:
+        """Create a block definition from recorded primitives, `base_point` its origin.
+
+        A block definition is **document state**: it is not journalled, and a rollback never
+        erases it. `create_block` is therefore called directly rather than through a recorded
+        draw method — the same rule the page setup and the plugin's `EnsureBlock` follow —
+        because an element captured into a definition and then placed is two steps, and
+        rolling the first back must leave the definition standing or the second's reference
+        would dangle. Only the dxf backend implements this so far; the others raise
+        :class:`BackendError` naming the capability, the honest refusal `insert` makes where a
+        library block cannot go.
         """
         ...

@@ -111,3 +111,21 @@ def test_ring_self_intersects_flags_a_ring_that_touches_itself():
     # crossing, but no meaningful inside either.
     touching = [(0, 0), (1000, 0), (1000, 1000), (500, 0)]
     assert geom.ring_self_intersects(touching)
+
+
+def test_dist_point_segment_measures_to_the_segment_not_its_line():
+    # Beside the middle, where the foot of the perpendicular is on the segment, the
+    # answer is the same as to the infinite line.
+    assert geom.dist_point_segment((5, 3), (0, 0), (10, 0)) == 3.0
+    assert geom.dist_point_segment((3, 0), (0, 0), (10, 0)) == 0.0
+
+
+def test_dist_point_segment_clamps_past_both_ends():
+    # Past an end the nearest point is that end, not the line's foot — which is the
+    # whole reason a wall centreline is tested segment by segment.
+    assert geom.dist_point_segment((15, 4), (0, 0), (10, 0)) == math.hypot(5, 4)
+    assert geom.dist_point_segment((-5, 4), (0, 0), (10, 0)) == math.hypot(5, 4)
+
+
+def test_dist_point_segment_handles_a_degenerate_segment():
+    assert geom.dist_point_segment((3, 4), (1, 1), (1, 1)) == math.hypot(2, 3)

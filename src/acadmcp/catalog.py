@@ -333,6 +333,35 @@ class Catalog:
             if element is not None:
                 self.elements[element.key] = element
 
+    def register(self, payload: dict[str, Any]) -> Element:
+        """Add one entry at runtime — a captured element — strictly, or not at all.
+
+        Unlike loading, this **raises**. A capture is a direct caller action with a caller
+        waiting for the answer, so a broken payload has to name its own fault instead of being
+        counted in `skipped` and forgotten; a capture that appeared to work and added nothing
+        is the failure this is meant to prevent. The per-entry reader is the loader's own, so a
+        registered entry cannot come to mean something a file entry does not.
+
+        A duplicate key is refused rather than replaced: the entry may be what a drawing was
+        drawn with, and overwriting it silently would redraw somebody's elements with whatever
+        was captured last.
+        """
+        if not isinstance(payload, dict):
+            raise ValueError("a catalogue entry must be an object")
+        reason: list[str] = []
+        element = _read_element(payload, where="<capture>", skipped=reason, library="")
+        if element is None:
+            raise ValueError(
+                "cannot register the captured element: " + "; ".join(reason or ["unreadable"])
+            )
+        if element.key in self.elements:
+            raise ValueError(
+                f"the catalogue already has an entry '{element.key}'; a capture adds a new "
+                "element rather than replacing one — capture under another key"
+            )
+        self.elements[element.key] = element
+        return element
+
     # --- lookup ------------------------------------------------------------
 
     def get(self, key: str) -> Element | None:

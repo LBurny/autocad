@@ -55,6 +55,12 @@ class RecordingBackend:
     #: same reason `supports_insert` is: the refusal inside a step is deferred to the commit.
     supports_sheet = False
 
+    #: No backend here writes a block definition unless it says so. A definition is document
+    #: state — it outlives an undo — so only a driver that can write one safely offers it; the
+    #: live drivers refuse by name rather than write half a definition. Declared for the same
+    #: reason `supports_insert` is.
+    supports_block_create = False
+
     def __init__(self) -> None:
         self.journal = Journal()
         self._op = ""
@@ -69,6 +75,20 @@ class RecordingBackend:
             f"backend {self.name!r} cannot {what}: a sheet needs a paperspace layout, and only "
             "the dxf driver writes one. Use drawing_new(backend='dxf') for a sheet, or set the "
             "page setup in AutoCAD itself"
+        )
+
+    def create_block(self, name: str, primitives: list[dict[str, Any]], base_point: Point) -> Any:
+        """Refused: no live driver writes a block definition yet.
+
+        A definition is document state, and turning recorded primitives into one is a dxf
+        driver's job this wave — the plugin would need a C# path and the com driver a
+        `Blocks.Add` plus `CopyObjects` round trip. Refusing by name is what keeps a capture
+        from silently producing an element nobody can place.
+        """
+        raise BackendError(
+            f"backend {self.name!r} cannot create a block definition: only the dxf driver "
+            "writes one. Capture the element into a DXF drawing "
+            "(drawing_new(backend='dxf')) and place it from there"
         )
 
     def set_page_setup(
@@ -241,6 +261,55 @@ class RecordingBackend:
             }
             for s in self.journal.steps
         ]
+
+    def step_primitives(self, indices: list[int]) -> list[dict[str, Any]]:
+        """The recorded primitives of the named applied steps, in order.
+
+        The accessor capture reads the journal through, on any recording backend: the local
+        journal keeps `StepRecord`s while the plugin's step rows carry the same primitives
+        under the same key, and both come back flattened here. A step that is not there, or
+        that has been undone, raises rather than being skipped — a caller asked for geometry
+        that is on the drawing, and capturing something else instead is exactly the mistake
+        this machinery exists to prevent.
+        """
+        rows = {row.get("index"): row for row in self.step_rows() if isinstance(row, dict)}
+        by_index = {step.index: step for step in self.journal.steps}
+        gathered: list[dict[str, Any]] = []
+        for index in indices:
+            wanted = int(index)
+            row = rows.get(wanted)
+            step = by_index.get(wanted)
+            if row is None and step is None:
+                raise ValueError(
+                    f"no step {wanted}: this drawing records "
+                    f"{len(by_index) or len(rows)} step(s), so there is nothing to capture there"
+                )
+            state = row.get("state") if row is not None else step.state
+            if str(state) not in ("applied", "accepted"):
+                raise ValueError(
+                    f"step {wanted} is {state}, not applied; only geometry that is on the "
+                    "drawing can be captured"
+                )
+            primitives = row.get("primitives") if row is not None else None
+            if not isinstance(primitives, list):
+                # The local journal's rows carry a count, not the primitives; the StepRecord
+                # is where they are.
+                primitives = step.primitives if step is not None else []
+            gathered.extend(dict(p) for p in primitives)
+        return gathered
+
+    def record_block_intent(
+        self, name: str, primitives: list[dict[str, Any]], base_point: Point
+    ) -> int:
+        """Record a capture's intent into the open step, and return its index.
+
+        Every drawing tool call is one step, and a step that recorded nothing cannot be
+        committed — so a capture, which draws nothing into the model, records one `block`
+        primitive carrying the definition it made. A definition is document state and no step
+        owns it, so applying this primitive only *ensures* the definition is there: it yields
+        no entity of the model's and a rollback of the capture leaves the definition standing.
+        """
+        return self._record("block", [base_point], name=name, primitives=list(primitives))
 
     # --- the catalogue that drew it ----------------------------------------
 

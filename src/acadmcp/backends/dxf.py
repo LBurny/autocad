@@ -24,7 +24,7 @@ from ..catalog import Catalog
 from ..geom import Point, xy
 from ..journal import Journal
 from .base import BackendError
-from .recording import RecordingBackend, unflatten_points
+from .recording import RecordingBackend, flatten_points, unflatten_points
 
 #: Text style registering a CJK-capable TrueType face. SimSun rather than SimHei
 #: because SimHei has no superscript-two glyph, which the area labels need.
@@ -267,6 +267,11 @@ class DxfBackend(RecordingBackend):
     #: The one driver that writes paperspace: the page setup goes onto the file's own LAYOUT
     #: entity, which is where AutoCAD reads it, so a DXF saved here opens already configured.
     supports_sheet = True
+
+    #: The one driver that writes a block definition from primitives. A definition is document
+    #: state — ezdxf keeps it in the file's own BLOCKS table, beside the journal — so a captured
+    #: element travels inside the drawing exactly as its catalogue entry does.
+    supports_block_create = True
 
     #: Where the journal lives inside the file: root dictionary → ACADMCP_JOURNAL →
     #: JOURNAL. Same idea as the plugin's DWG journal: the steps travel with the drawing,
@@ -1047,30 +1052,127 @@ class DxfBackend(RecordingBackend):
         properties: dict[str, Any] | None = None,
         layer: str = "0",
     ) -> Any:
-        """Refused: this backend draws from nothing, so there is no definition to copy.
+        """Place a block reference, where this drawing already holds the definition.
 
-        ezdxf could hold a block, but the definition has to come from a library .dwg, which
-        ezdxf cannot read. Reading one is worth doing and is not done yet.
+        The dxf backend cannot read a library .dwg, so `source` cannot bring a definition in
+        — but a definition an earlier :meth:`create_block` wrote into *this* drawing can be
+        placed, which is how a captured element reaches the paper. A name the drawing has not
+        got is refused rather than substituted: drawing a parametric twin in place of the
+        block that was asked for is a right-looking element of the wrong identity, which is
+        the failure the whole catalogue exists to prevent.
         """
-        # Inside a step the refusal is deferred to the commit, where the recorded
-        # primitive reaches _apply_primitive and raises there — same outcome, but
-        # the step machinery owns the failure path.
+        if block not in self.doc.blocks:
+            raise BackendError(
+                "the dxf backend cannot import block definitions; capture the element first "
+                "(element_capture) or place it on the plugin backend"
+            )
+        if properties:
+            # ezdxf has no dynamic-block API, so a size given here would be dropped without a
+            # word — a right-looking element of the wrong size, which the catalogue exists to
+            # prevent. A captured block is plain geometry and needs no parameters.
+            raise BackendError(
+                "the dxf backend cannot set a dynamic block's parameters: ezdxf has no "
+                "dynamic block API, so they would be silently dropped. Place a captured "
+                "element, or set the parameters in AutoCAD"
+            )
+        # Hybrid like every other primitive: eager outside a step, recorded inside one, so a
+        # captured element's reference is one undoable step like any other entity.
         if self.open_step:
             return self._record(
                 "insert",
                 [at],
                 layer=layer,
                 block=block,
-                source=source,
                 rotation=rotation,
+                # Both scales always travel, so no reader has to guess whether a missing one
+                # means 1.0 — the shape the plugin's wire format already uses.
                 scale_x=scale if scale_x is None else scale_x,
                 scale_y=scale if scale_y is None else scale_y,
-                properties=properties,
             )
-        raise BackendError(
-            "the 'dxf' backend cannot insert blocks: it cannot read a library .dwg to copy "
-            "a definition from. Use backend='plugin' to place library elements in AutoCAD."
+        return self._draw_insert(
+            block,
+            at,
+            rotation=rotation,
+            scale_x=scale if scale_x is None else scale_x,
+            scale_y=scale if scale_y is None else scale_y,
+            layer=layer,
         )
+
+    def _draw_insert(
+        self,
+        block: str,
+        at: Point,
+        *,
+        rotation: float = 0.0,
+        scale_x: float = 1.0,
+        scale_y: float = 1.0,
+        layer: str = "0",
+    ) -> Any:
+        self._ops += 1
+        reference = self.msp.add_blockref(str(block), xy(at))
+        reference.dxf.rotation = float(rotation)
+        reference.dxf.layer = layer
+        reference.dxf.xscale = float(scale_x)
+        reference.dxf.yscale = float(scale_y)
+        return reference
+
+    def create_block(
+        self, name: str, primitives: list[dict[str, Any]], base_point: Point
+    ) -> dict[str, Any]:
+        """Write a block definition from recorded primitives, `base_point` its origin.
+
+        A definition is **document state**, not a step's to own: this is called directly,
+        never through a recorded draw method, so nothing journals it and a rollback never
+        erases it — the same rule the page setup and the plugin's `EnsureBlock` follow. The
+        step that later places a reference to it is an ordinary journalled step, and rolling
+        that step back leaves the definition standing.
+
+        The primitives are the journal's own, in the vocabulary :meth:`_apply` takes, with
+        every point translated so `base_point` becomes the origin. A name the drawing already
+        holds is refused rather than replaced: other references point at that definition, and
+        silently redefining it would move geometry somebody else placed.
+        """
+        name = str(name or "").strip()
+        if not name:
+            raise ValueError("a block definition needs a name")
+        primitives = [dict(p) for p in primitives]
+        if not primitives:
+            raise ValueError(f"block {name!r} would be empty; there was nothing to capture")
+        for prim in primitives:
+            # A frame's coordinates are paper millimetres, drawn at 1:1 on a layout; a block is
+            # model geometry by definition, so sheet furniture in one is a category error.
+            if prim.get("paper"):
+                raise BackendError(
+                    f"block {name!r} cannot hold sheet furniture: a {prim.get('kind', '?')} "
+                    "primitive marked 'paper' is drawn in paper millimetres, and a block is "
+                    "model geometry"
+                )
+        if name in self.doc.blocks:
+            raise BackendError(
+                f"this drawing already has a block definition named {name!r}; a capture does "
+                "not replace one that other references may point at"
+            )
+
+        block = self.doc.blocks.new(name)
+        origin_x, origin_y = xy(base_point)
+        for prim in primitives:
+            self._apply_on(block, self._rebase_primitive(prim, origin_x, origin_y))
+        return {"block": name, "entities": len(primitives)}
+
+    @staticmethod
+    def _rebase_primitive(prim: dict[str, Any], origin_x: float, origin_y: float) -> dict[str, Any]:
+        """One primitive with every point moved so `(origin_x, origin_y)` becomes the origin.
+
+        Points travel flat in the journal, so they are rebuilt flat: the `_draw_*` methods
+        unflatten them again, and the two must agree or the definition lands somewhere else.
+        """
+        if origin_x == 0.0 and origin_y == 0.0:
+            return prim
+        points = unflatten_points(prim.get("points", []))
+        return {
+            **prim,
+            "points": flatten_points([(x - origin_x, y - origin_y) for x, y in points]),
+        }
 
     # --- journal application ------------------------------------------------
     def _apply_primitive(self, prim: dict[str, Any]) -> Any:
@@ -1167,6 +1269,37 @@ class DxfBackend(RecordingBackend):
                 layer=prim.get("layer", "0"),
                 text_height=height,
             )
+        if kind == "insert":
+            # A captured element's reference, placed from a definition this drawing already
+            # holds. A definition it has not got is refused here, in the applier, so replaying
+            # another drawing's library insert onto this backend is *reported* by
+            # `drawing_replay` rather than raising out of ezdxf unmasked.
+            name = str(prim["block"])
+            if name not in self.doc.blocks:
+                raise BackendError(
+                    f"the 'dxf' backend cannot apply an insert of {name!r}: this drawing has no "
+                    "such block definition, and ezdxf cannot read a library .dwg to import one. "
+                    "Capture the element on this backend first, or place it on the plugin backend"
+                )
+            return self._draw_insert(
+                name,
+                pts[0],
+                rotation=float(prim.get("rotation", 0.0)),
+                scale_x=float(prim.get("scale_x", 1.0)),
+                scale_y=float(prim.get("scale_y", 1.0)),
+                layer=prim.get("layer", "0"),
+            )
+        if kind == "block":
+            # A capture's recorded intent. The definition is document state, so applying this
+            # only makes sure it is there — idempotent, and nothing of the model's comes out,
+            # which is why `_apply` records no handle for it and a rollback cannot erase it.
+            # Replaying a capture onto a fresh drawing is what creates the definition there.
+            name = str(prim["name"])
+            if name not in self.doc.blocks:
+                self.create_block(
+                    name, list(prim.get("primitives", [])), pts[0] if pts else (0.0, 0.0)
+                )
+            return None
         if kind == "viewport":
             return self._draw_viewport(pts[0], prim)
         raise BackendError(
@@ -1236,7 +1369,15 @@ class DxfBackend(RecordingBackend):
         return ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0)
 
     def _apply(self, primitives: list[dict[str, Any]]) -> list[str]:
-        return [self._apply_primitive(p).dxf.handle for p in primitives]
+        handles: list[str] = []
+        for prim in primitives:
+            entity = self._apply_primitive(prim)
+            # A `block` intent yields nothing of the model's, so it contributes no handle:
+            # the definition it ensures is document state, and an undo that cannot erase it
+            # is the point. Everything else draws an entity and is journalled by handle.
+            if entity is not None:
+                handles.append(entity.dxf.handle)
+        return handles
 
     def _paper_layouts(self) -> list[Any]:
         """Every layout but the model, in the order the file lists them.

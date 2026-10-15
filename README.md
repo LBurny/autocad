@@ -76,6 +76,10 @@ uv run python examples/floor_plan_demo.py --com      # draw into running AutoCAD
 **Journal** — `drawing_undo`, `drawing_redo`, `drawing_history`, `drawing_rollback_to`,
 `drawing_replay`, `drawing_summary`
 
+**Checks** — `drawing_verify` (the drawing against the journal),
+`drawing_critique` (the components against the journal), `drawing_finalize`
+(the done-gate: refuses while an error stands)
+
 **Layers and text** — `layer_create` (no name = the standard set), `set_text_style`
 
 **Primitives** — `draw_line`, `draw_polyline`, `draw_rect`, `draw_circle`
@@ -92,7 +96,10 @@ uv run python examples/floor_plan_demo.py --com      # draw into running AutoCAD
 `add_dimension` (2 points or a chain), `add_hatch`
 
 **Library elements** — `library_list`, `element_types`, `place_element`,
-`place_along`, `place_grid`
+`place_along`, `place_grid`, `element_capture` (draw it once, then place it forever)
+
+**Prompts** — `floor_plan`, `headless_to_live`, `drawing_review`: templates that
+walk a client through the workflow and its verification gates.
 
 ### The calls that matter most
 
@@ -210,7 +217,7 @@ wired up here.
 
 ```
 src/acadmcp/
-  geom.py        pure 2D geometry (no CAD deps)     server.py     the 49-tool MCP surface
+  geom.py        pure 2D geometry (no CAD deps)     server.py     the 52-tool MCP surface
   ops.py         backend-agnostic operations        journal.py    step bookkeeping
   backends/      dxf / com / plugin drivers         catalog.py    the element catalogue
   catalog_ops.py the parametric twins               summary.py    design summary from the journal

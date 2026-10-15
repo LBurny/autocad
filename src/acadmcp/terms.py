@@ -5,7 +5,7 @@ tools were not ranked badly — they were unsearchable. The fix is data: one rec
 naming the AutoCAD commands it stands for, and the phrases — Chinese among them — that
 somebody would actually type.
 
-This module is deliberately not a search engine. At 49 tools the whole surface fits in a
+This module is deliberately not a search engine. At 52 tools the whole surface fits in a
 client's context, so nothing needs ranking; what is needed is a way from the word a person
 used to the tool that does it, which is `lookup` and the `term` argument of `drawing_help`.
 `tests/test_terms.py` refuses to let a tool exist without a record here — the same rule the
@@ -110,6 +110,14 @@ TOOL_TERMS: dict[str, Term] = {
     "drawing_verify": Term(
         cad=("AUDIT",),
         phrases=("verify", "检查图纸", "核对", "查错", "图纸和记录对不对"),
+    ),
+    "drawing_critique": Term(
+        cad=("CHECKSTANDARDS",),
+        phrases=("critique", "构件核查", "组件检查", "门画对了吗", "标准检查"),
+    ),
+    "drawing_finalize": Term(
+        cad=(),
+        phrases=("finalize", "收官", "验收", "完成检查", "图纸做完了吗"),
     ),
     "drawing_replay": Term(
         cad=(),
@@ -260,6 +268,10 @@ TOOL_TERMS: dict[str, Term] = {
             "焊接符号",
             "灯具",
         ),
+    ),
+    "element_capture": Term(
+        cad=("BLOCK", "WBLOCK"),
+        phrases=("capture element", "收编构件", "做成块", "创建块", "沉淀构件", "画一次以后用"),
     ),
     "place_along": Term(
         cad=("DIVIDE", "MEASURE"),

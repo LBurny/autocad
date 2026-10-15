@@ -14,8 +14,11 @@ Run it with ``acadmcp`` or ``python -m acadmcp.server``.
 from __future__ import annotations
 
 import contextlib
+import inspect
+import logging
 import subprocess
 import tempfile
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -29,7 +32,20 @@ except ImportError:  # pragma: no cover - mcp 1.x
 
 from mcp.types import ToolAnnotations
 
-from . import catalog, geom, layers, ops, settings, sheet, summary, terms, verify
+from . import (
+    capture_ops,
+    catalog,
+    critique,
+    geom,
+    layers,
+    ops,
+    prompts,
+    settings,
+    sheet,
+    summary,
+    terms,
+    verify,
+)
 from .acad_plugin_client import PluginClient, PluginError, PluginUnavailable
 from .backends import make_backend
 from .backends.base import Backend, BackendError
@@ -37,7 +53,86 @@ from .backends.plugin import PluginBackend
 from .catalog import Element
 from .steps import StepSession, describe_steps
 
-mcp = _Server("autocad_mcp")
+log = logging.getLogger("acadmcp")
+
+# The briefing a client receives at initialize. It names tools and prompts, and
+# tests/test_audit_middleware.py checks every `word(` in it against the live
+# tool registry, so a renamed tool breaks the suite rather than a client's
+# first session.
+_INSTRUCTIONS = """\
+Architectural floor-plan server: walls, rooms, doors, windows, cores, catalogue
+elements, sheets. Millimetres everywhere; degrees counter-clockwise from +X.
+
+The fast path:
+1. drawing_new(backend="dxf") — headless is the default; AutoCAD is not needed.
+2. draw_wall_with_openings(points=<ring>, closed=True, openings=[...]) — the
+   building envelope as ONE closed run, never four separate runs.
+3. draw_room(boundary=<wall centreline ring>, name=...) once per room.
+4. place_element, draw_axis_grid, add_dimension — then drawing_sheet(paper=...,
+   scale=...) and read its fits flag.
+5. Verify before reporting done: drawing_screenshot() and look at it,
+   drawing_verify() must say "matches", drawing_summary() read back against the
+   brief, and drawing_critique() checks the components against the journal —
+   then drawing_finalize(), the done-gate, which refuses while an error stands.
+
+One tool call is one journal step: drawing_undo() takes the last call back, and
+drawing_replay(backend="plugin") carries a headless draft into live AutoCAD.
+Three prompt templates — floor_plan, headless_to_live, drawing_review — walk
+through each workflow in full.
+"""
+
+
+def _result_is_error(result: Any) -> bool:
+    """Read the error flag off whatever shape the result arrived as.
+
+    The middleware tier sits above serialisation, so the result may be the raw
+    dict, a BaseModel carrying ``isError``, or an object exposing ``is_error``.
+    """
+    if isinstance(result, dict):
+        return bool(result.get("isError"))
+    return bool(getattr(result, "isError", getattr(result, "is_error", False)))
+
+
+class _AuditMiddleware:
+    """Log every tool call with its elapsed time.
+
+    Follows the mcp 2.x ``ServerMiddleware`` protocol — an async
+    ``(ctx, call_next) -> result`` callable handed to the constructor's
+    ``middleware`` list — rather than FastMCP's ``add_middleware`` class API,
+    which this SDK does not have. ``ctx.params`` is raw (pre-validation), so a
+    malformed call still gets logged under the name it asked for.
+    """
+
+    async def __call__(self, ctx: Any, call_next: Any) -> Any:
+        if ctx.method != "tools/call":
+            return await call_next(ctx)
+        tool = (ctx.params or {}).get("name", "?")
+        start = time.monotonic()
+        try:
+            result = await call_next(ctx)
+        except Exception as exc:
+            elapsed = (time.monotonic() - start) * 1000
+            log.warning("TOOL ERR %-40s %6.1fms  %s", tool, elapsed, exc)
+            raise
+        elapsed = (time.monotonic() - start) * 1000
+        if _result_is_error(result):
+            log.warning("TOOL ERR %-40s %6.1fms  (refused)", tool, elapsed)
+        else:
+            log.info("TOOL OK  %-40s %6.1fms", tool, elapsed)
+        return result
+
+
+# The mcp 1.x fallback constructor has neither parameter, so both are gated on
+# the signature rather than on the import branch that picked _Server.
+_ctor_params = inspect.signature(_Server.__init__).parameters
+_server_kwargs: dict[str, Any] = {}
+if "instructions" in _ctor_params:
+    _server_kwargs["instructions"] = _INSTRUCTIONS
+if "middleware" in _ctor_params:
+    _server_kwargs["middleware"] = [_AuditMiddleware()]
+
+mcp = _Server("autocad_mcp", **_server_kwargs)
+prompts.register(mcp)
 
 # Tool annotations, one set per behaviour class — the client reads these to decide
 # what it may auto-approve, so the rules are:
@@ -257,7 +352,7 @@ def drawing_help(term: str | None = None) -> dict[str, Any]:
             "hint": ""
             if matches
             else (
-                "no tool matched. This index covers the vocabulary of the 49 tools — an "
+                "no tool matched. This index covers the vocabulary of the 52 tools — an "
                 "AutoCAD command name, an English phrase or a Chinese one. It does not cover "
                 "the element catalogue: for those, call element_types() (钢立柱, 焊接符号, "
                 "钢梁 and the rest live there), and call drawing_help() with no term for the "
@@ -722,6 +817,62 @@ def drawing_verify(limit: int = 20000) -> dict[str, Any]:
     )
     report["backend"] = be.name
     return report
+
+
+@mcp.tool(annotations=_READONLY)
+def drawing_critique(focus: str = "") -> dict[str, Any]:
+    """Check the drawing's components against the journal's own record of them.
+
+    `drawing_verify` asks "is everything the journal recorded still there"; this asks
+    "is what was drawn right": a door whose hinge sits on no recorded wall or on a wall
+    no opening was cut into, an opening measured past the end of its run, a tag that
+    breaks the M0921/C1521 convention or duplicates another, a text masquerading as a
+    dimension, a plan the sheet's viewport cannot hold at its scale. The checks read the
+    journal — present on every drawing this server made, on every backend — never an
+    optional side record, so an empty `issues` really means nothing was found. A row that
+    cannot be read is counted in `unreadable`, never raised.
+
+    `focus` runs one check by its code (an unknown code is refused, naming the valid
+    ones); empty runs them all. `counts` breaks the findings down by severity.
+    """
+    be = _state.require()
+    tag_prefixes = {
+        e.key: e.tag_prefix for e in catalog.current().elements.values() if e.tag_prefix
+    }
+    return {"ok": True, **critique.run(be.step_rows(), tag_prefixes, focus=focus)}
+
+
+@mcp.tool(annotations=_READONLY)
+def drawing_finalize() -> dict[str, Any]:
+    """The done-gate: verify and critique the drawing before it may be called finished.
+
+    Refuses while anything is wrong — `drawing_verify`'s verdict must be "matches" and
+    `drawing_critique` must hold no error-severity finding — and the refusal names what
+    failed, so a floating door or a lost entity is reported, not shipped. A drawing this
+    server did not draw gets "no_baseline" and is refused for that reason: the gate only
+    vouches for what the journal accounts for. Warnings do not block; they are reported.
+    """
+    report = drawing_verify()
+    verdict = report.get("verdict")
+    problems: list[str] = []
+    if verdict != "matches":
+        problems.append(f"drawing_verify says {verdict!r}, not 'matches'")
+    crit = drawing_critique()
+    errors = [i for i in crit["issues"] if i["severity"] == "error"]
+    if errors:
+        shown = "; ".join(i["message"] for i in errors[:5])
+        problems.append(f"{len(errors)} critique error(s): {shown}")
+    if problems:
+        raise BackendError("the drawing is not finished — " + " | ".join(problems))
+    summ = drawing_summary()
+    return {
+        "ok": True,
+        "verdict": verdict,
+        "warnings": crit["counts"]["warning"],
+        "rooms": len(summ.get("rooms", [])),
+        "openings": len(summ.get("openings", [])),
+        "elements": len(summ.get("elements", [])),
+    }
 
 
 @mcp.tool(annotations=_DESTRUCTIVE)
@@ -2010,6 +2161,66 @@ def place_grid(
     )
 
 
+@mcp.tool(annotations=_MUTATING)
+def element_capture(
+    steps: list[int],
+    key: str,
+    label: str = "",
+    tag_prefix: str = "",
+    layer: str = "",
+    category: str = "captured",
+    base_point: list[float] | None = None,
+) -> dict[str, Any]:
+    """Capture the geometry of journal steps as a reusable catalogue element.
+
+    Draw once, check, capture: the entities the named `steps` drew become a named block
+    definition and a catalogue entry, and from then on `place_element(type=key)` places
+    them anywhere — a component that was drawn and verified once is never re-derived.
+    `base_point` is the element's own reference point (its insertion origin); omitted, the
+    bounding box's min corner. `tag_prefix` joins the auto-numbering (a door's "M").
+
+    The block definition is document state, like the page setup: it is not journalled and
+    a rollback never erases it. The catalogue entry travels inside the drawing's journal,
+    so a captured element resolves on any machine that opens the file. Only the dxf
+    backend creates definitions for now; elsewhere the refusal names the capability.
+    """
+    be = _state.require()
+    if not getattr(be, "supports_block_create", False):
+        raise BackendError(
+            f"the {be.name} backend cannot create block definitions "
+            "(capability: block_create) — capture on the dxf backend"
+        )
+    if not steps or not all(
+        isinstance(s, int) and not isinstance(s, bool) and s >= 0 for s in steps
+    ):
+        raise ValueError(f"steps must be a non-empty list of step indices, got {steps!r}")
+    with _auto_step(
+        "element_capture",
+        {
+            "steps": [int(s) for s in steps],
+            "key": key,
+            "label": label,
+            "tag_prefix": tag_prefix,
+            "layer": layer,
+            "category": category,
+        },
+        label=key,
+    ):
+        return {
+            "ok": True,
+            **capture_ops.capture(
+                be,
+                steps=[int(s) for s in steps],
+                key=key,
+                label=label,
+                tag_prefix=tag_prefix,
+                layer=layer,
+                category=category,
+                base_point=base_point,
+            ),
+        }
+
+
 def _positions(start: Any, end: Any, count: int | None, spacing: float | None, inset: float):
     """The points a run would place at, for the step's label. Raises the same way the op does."""
     return catalog.positions_along(
@@ -2047,7 +2258,7 @@ def _surface_input_errors() -> None:
     Re-raising as BackendError (a ToolError) keeps the message after that
     prefix — the SDK re-wraps even ToolError, so the tool name appears twice
     on the wire, which is cosmetic and not worth fighting. Wrapped here, once,
-    rather than in 44 tool bodies.
+    rather than in every tool body.
     """
     for tool in mcp._tool_manager.list_tools():
         fn = tool.fn
@@ -2065,6 +2276,12 @@ _surface_input_errors()
 
 
 def main() -> None:
+    # basicConfig targets stderr, so the audit lines never touch stdout — that
+    # channel is the JSON-RPC protocol itself. Import time stays silent on
+    # purpose: a client embedding the module configures its own logging.
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    )
     mcp.run()
 
 

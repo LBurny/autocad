@@ -129,11 +129,22 @@ def test_every_adapter_shares_one_signature():
 
 
 def test_every_adapter_draws_something(be):
-    """A registry entry that draws nothing is a catalogue element that silently vanishes."""
+    """A registry entry that draws nothing is a catalogue element that silently vanishes.
+
+    `insert_captured` is the one whose input is a definition the drawing already holds rather
+    than a set of dimensions, so it needs one made first — that is what a capture does, and
+    the adapter places from it.
+    """
     for name in sorted(catalog_ops.CATALOG_OPS):
         fresh = make_backend("dxf")
+        params: dict = {}
+        if name == "insert_captured":
+            fresh.create_block(
+                "CAPTURED", [{"kind": "line", "points": [0.0, 0.0, 1000.0, 0.0]}], (0.0, 0.0)
+            )
+            params["block"] = "CAPTURED"
         with fresh.step("place_element"):
-            made = catalog_ops.CATALOG_OPS[name](fresh, (1000.0, 1000.0), layer="0")
+            made = catalog_ops.CATALOG_OPS[name](fresh, (1000.0, 1000.0), layer="0", **params)
         assert made, name
 
 
