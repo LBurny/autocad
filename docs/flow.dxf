@@ -489,7 +489,7 @@ $SKPOLY
   9
 $TDCREATE
  40
-2461329.9156828704
+2461329.9171990743
   9
 $TDUCREATE
  40
@@ -497,7 +497,7 @@ $TDUCREATE
   9
 $TDUPDATE
  40
-2461329.9158680555
+2461329.9174074074
   9
 $TDUUPDATE
  40
@@ -929,11 +929,11 @@ $PSTYLEMODE
   9
 $FINGERPRINTGUID
   2
-{8402922C-9AC3-44AB-A5E6-3E08B8C48913}
+{76B81AA9-B574-458A-B516-A03412DEE573}
   9
 $VERSIONGUID
   2
-{695E7DD8-65FF-4A6D-B12B-058088CD0863}
+{815C3724-8985-400B-85D4-B4DE187D61E0}
   9
 $EXTNAMES
 290
@@ -5759,19 +5759,19 @@ AcDbPolyline
  10
 0.0
  20
--130.0
+-120.0
  10
 860.0
  20
--130.0
+-120.0
  10
 860.0
  20
-130.0
+120.0
  10
 0.0
  20
-130.0
+120.0
   0
 LWPOLYLINE
   5
@@ -5791,19 +5791,19 @@ AcDbPolyline
  10
 1300.0
  20
--130.0
+-120.0
  10
 2100.0
  20
--130.0
+-120.0
  10
 2100.0
  20
-130.0
+120.0
  10
 1300.0
  20
-130.0
+120.0
   0
 LWPOLYLINE
   5
@@ -5821,21 +5821,21 @@ AcDbPolyline
  70
 1
  10
-3700.0
+3560.0
  20
-270.0
+180.0
  10
-5800.0
+5660.0
  20
-270.0
+180.0
  10
-5800.0
+5660.0
  20
-530.0
+420.0
  10
-3700.0
+3560.0
  20
-530.0
+420.0
   0
 LWPOLYLINE
   5
@@ -5853,21 +5853,21 @@ AcDbPolyline
  70
 1
  10
-3700.0
+3560.0
  20
--530.0
+-420.0
  10
-5800.0
+5660.0
  20
--530.0
+-420.0
  10
-5800.0
+5660.0
  20
--270.0
+-180.0
  10
-3700.0
+3560.0
  20
--270.0
+-180.0
   0
 LINE
   5
@@ -5931,13 +5931,13 @@ AcDbLine
  10
 2300.0
  20
-400.0
+300.0
  30
 0.0
  11
 2300.0
  21
--400.0
+-300.0
  31
 0.0
   0
@@ -5955,13 +5955,13 @@ AcDbLine
  10
 2300.0
  20
-400.0
+300.0
  30
 0.0
  11
-3580.0
+3440.0
  21
-400.0
+300.0
  31
 0.0
   0
@@ -5979,13 +5979,13 @@ AcDbLine
  10
 2300.0
  20
--400.0
+-300.0
  30
 0.0
  11
-3580.0
+3440.0
  21
--400.0
+-300.0
  31
 0.0
   0
@@ -6037,11 +6037,11 @@ SOLID
  10
 1180.0
  20
-34.0
+30.0
  10
 1180.0
  20
--34.0
+-30.0
  97
 0
  75
@@ -6093,17 +6093,17 @@ SOLID
  93
 3
  10
-3700.0
+3560.0
  20
-400.0
+300.0
  10
-3580.0
+3440.0
  20
-434.0
+330.0
  10
-3580.0
+3440.0
  20
-366.0
+270.0
  97
 0
  75
@@ -6155,17 +6155,17 @@ SOLID
  93
 3
  10
-3700.0
+3560.0
  20
--400.0
+-300.0
  10
-3580.0
+3440.0
  20
--366.0
+-270.0
  10
-3580.0
+3440.0
  20
--434.0
+-330.0
  97
 0
  75
@@ -6223,9 +6223,9 @@ A-ANNO
 100
 AcDbText
  10
-1030.0
+1020.0
  20
-80.0
+90.0
  30
 0.0
  40
@@ -6237,9 +6237,9 @@ HZ
  72
 1
  11
-1030.0
+1020.0
  21
-80.0
+90.0
  31
 0.0
 100
@@ -6295,9 +6295,9 @@ A-ANNO
 100
 AcDbText
  10
-2945.0
+2340.0
  20
-490.0
+340.0
  30
 0.0
  40
@@ -6306,18 +6306,14 @@ AcDbText
 COM (pywin32)
   7
 HZ
- 72
-1
  11
-2945.0
+2340.0
  21
-490.0
+340.0
  31
 0.0
 100
 AcDbText
- 73
-2
   0
 TEXT
   5
@@ -6331,9 +6327,9 @@ A-ANNO
 100
 AcDbText
  10
-2945.0
+2340.0
  20
--310.0
+-260.0
  30
 0.0
  40
@@ -6342,18 +6338,14 @@ AcDbText
 ezdxf
   7
 HZ
- 72
-1
  11
-2945.0
+2340.0
  21
--310.0
+-260.0
  31
 0.0
 100
 AcDbText
- 73
-2
   0
 TEXT
   5
@@ -6367,9 +6359,9 @@ A-ANNO
 100
 AcDbText
  10
-4750.0
+4610.0
  20
-400.0
+300.0
  30
 0.0
  40
@@ -6381,9 +6373,9 @@ HZ
  72
 1
  11
-4750.0
+4610.0
  21
-400.0
+300.0
  31
 0.0
 100
@@ -6403,9 +6395,9 @@ A-ANNO
 100
 AcDbText
  10
-4750.0
+4610.0
  20
--400.0
+-300.0
  30
 0.0
  40
@@ -6417,9 +6409,9 @@ HZ
  72
 1
  11
-4750.0
+4610.0
  21
--400.0
+-300.0
  31
 0.0
 100
@@ -7533,7 +7525,7 @@ DictionaryVariables
 280
 0
   1
-1.4.4 @ 2026-10-15T13:58:35.733988+00:00
+1.4.4 @ 2026-10-15T14:00:46.497615+00:00
   0
 VISUALSTYLE
   5
@@ -8269,13 +8261,13 @@ params": {"Width": 600, "Height": 600}, "notes": ""}, "1200": {"name": "1200", "
   1
 10a\u63a5\u7b26\u53f7": "\u5706\u89d2"}, "notes": ""}, "square": {"name": "square", "params": {"\u710a\u63a5\u7b26\u53f7": "\u65b9\u5f62"}, "notes": ""}, "v": {"name": "v", "params": {"\u710a\u63a5\u7b26\u53f7": "V"}, "notes": ""}, "backing": {"name": "backing", "params": {"\u710a\u63a5\u7b26\u53f7": "\u80cc\u886c"}, "notes": ""}}, "notes": "A symbol, not a tag: it carries no number, so placing one does not consume a tag number."}, {"key": "window", "label": "\u7a97 (plan)", "category": "opening", "block": "\u7a97 - \u516c\u5236", "op": "window_symbol", "kind": "both", "placement": "both", "width_param": "DoorWidth", "op_params": {"wall_thickness": 200}, "source": "F:\\AutoCAD\\AutoCAD 2026\\Sample\\zh-CN\\Dynamic Blocks\\Architectural - Metric.dwg", "layer": "A-WINDOW", "tag_prefix": "C", "default_variant": "1500", "params": {"Wall": 150}, "variants": {"600": {"name": "600", "params": {"DoorWidth": 600}, "notes": "C0609", "op_params": {"width": 600}}, "900": {"name": "900", "params": {"DoorWidth": 900}, "notes": "C0915", "op_params": {"width": 900}}, "1200": {"name": "1200", "params": {"DoorWidth": 1200}, "notes": "C1218", "op_params": {"width": 1200}}, "1500": {"name": "1500", "params": {"DoorWidth": 1500}, "notes": "C1521", "op_params": {"width": 1500}}}, "notes": "The block's width parameter is named DoorWidth, which is its own typo to live with \u2014 width_param is where that is written down, so a measured wall opening still reaches it. Wall takes 100, 150 or 450; the twin is drawn against 200."}, {"key": "window_elevation", "label": "\u94dd\u7a97 (elevation)", "category": "opening", "block": "\u94dd\u7a97 (\u7acb\u9762\u56fe) - \u516c\u5236", "op": "", "kind": "block", "placement": "block", "width_param": "", "op_params": {}, "source": "F:\\AutoCAD\\AutoCAD 2026\\Sample\\zh-CN\\Dynamic Blocks\\Architectural - Metric.dwg", "layer": "A-WINDOW", "tag_prefix": "C",
   1
- "default_variant": "1500x1500", "params": {}, "variants": {"600x600": {"name": "600x600", "params": {"\u7a97\u5bbd\u5ea6": 600, "\u7a97\u9ad8\u5ea6": 600}, "notes": ""}, "900x900": {"name": "900x900", "params": {"\u7a97\u5bbd\u5ea6": 900, "\u7a97\u9ad8\u5ea6": 900}, "notes": ""}, "1200x1500": {"name": "1200x1500", "params": {"\u7a97\u5bbd\u5ea6": 1200, "\u7a97\u9ad8\u5ea6": 1500}, "notes": ""}, "1500x1500": {"name": "1500x1500", "params": {"\u7a97\u5bbd\u5ea6": 1500, "\u7a97\u9ad8\u5ea6": 1500}, "notes": ""}}, "notes": ""}], "digest": "sha256:7e40701907eb6c4cd1d15d901fe81c5cb3b0121cb625f02a9ec561f437361499"}}, "steps": [{"index": 1, "op": "draw_rect", "label": "", "params": {"corner1": [0.0, -130.0], "corner2": [860.0, 130.0], "layer": "A-ANNO"}, "primitives": [{"kind": "polyline", "points": [0.0, -130.0, 860.0, -130.0, 860.0, 130.0, 0.0, 130.0], "layer": "A-ANNO", "closed": true}], "handles": ["A0"], "state": "applied"}, {"index": 2, "op": "draw_rect", "label": "", "params": {"corner1": [1300.0, -130.0], "corner2": [2100.0, 130.0], "layer": "A-ANNO"}, "primitives": [{"kind": "polyline", "points": [1300.0, -130.0, 2100.0, -130.0, 2100.0, 130.0, 1300.0, 130.0], "layer": "A-ANNO", "closed": true}], "handles": ["A1"], "state": "applied"}, {"index": 3, "op": "draw_rect", "label": "", "params": {"corner1": [3700.0, 270.0], "corner2": [5800.0, 530.0], "layer": "A-ANNO"}, "primitives": [{"kind": "polyline", "points": [3700.0, 270.0, 5800.0, 270.0, 5800.0, 530.0, 3700.0, 530.0], "layer": "A-ANNO", "closed": true}], "handles": ["A2"], "state": "applied"}, {"index": 4, "op": "draw_rect", "label": "", "params": {"corner1": [3700.0, -530.0], "corner2": [5800.0, -270.0], "layer": "A-ANNO"}, "primitives": [{"kind": "polyline", "points": [3700.0, -530.0, 5800.0, -530.0, 5800.0, -270.0, 3700.0, -270.0], "layer": "A-ANNO", "closed": true}], "handles": ["A3"], "state": "applied"}, {"i
+ "default_variant": "1500x1500", "params": {}, "variants": {"600x600": {"name": "600x600", "params": {"\u7a97\u5bbd\u5ea6": 600, "\u7a97\u9ad8\u5ea6": 600}, "notes": ""}, "900x900": {"name": "900x900", "params": {"\u7a97\u5bbd\u5ea6": 900, "\u7a97\u9ad8\u5ea6": 900}, "notes": ""}, "1200x1500": {"name": "1200x1500", "params": {"\u7a97\u5bbd\u5ea6": 1200, "\u7a97\u9ad8\u5ea6": 1500}, "notes": ""}, "1500x1500": {"name": "1500x1500", "params": {"\u7a97\u5bbd\u5ea6": 1500, "\u7a97\u9ad8\u5ea6": 1500}, "notes": ""}}, "notes": ""}], "digest": "sha256:7e40701907eb6c4cd1d15d901fe81c5cb3b0121cb625f02a9ec561f437361499"}}, "steps": [{"index": 1, "op": "draw_rect", "label": "", "params": {"corner1": [0.0, -120.0], "corner2": [860.0, 120.0], "layer": "A-ANNO"}, "primitives": [{"kind": "polyline", "points": [0.0, -120.0, 860.0, -120.0, 860.0, 120.0, 0.0, 120.0], "layer": "A-ANNO", "closed": true}], "handles": ["A0"], "state": "applied"}, {"index": 2, "op": "draw_rect", "label": "", "params": {"corner1": [1300.0, -120.0], "corner2": [2100.0, 120.0], "layer": "A-ANNO"}, "primitives": [{"kind": "polyline", "points": [1300.0, -120.0, 2100.0, -120.0, 2100.0, 120.0, 1300.0, 120.0], "layer": "A-ANNO", "closed": true}], "handles": ["A1"], "state": "applied"}, {"index": 3, "op": "draw_rect", "label": "", "params": {"corner1": [3560.0, 180.0], "corner2": [5660.0, 420.0], "layer": "A-ANNO"}, "primitives": [{"kind": "polyline", "points": [3560.0, 180.0, 5660.0, 180.0, 5660.0, 420.0, 3560.0, 420.0], "layer": "A-ANNO", "closed": true}], "handles": ["A2"], "state": "applied"}, {"index": 4, "op": "draw_rect", "label": "", "params": {"corner1": [3560.0, -420.0], "corner2": [5660.0, -180.0], "layer": "A-ANNO"}, "primitives": [{"kind": "polyline", "points": [3560.0, -420.0, 5660.0, -420.0, 5660.0, -180.0, 3560.0, -180.0], "layer": "A-ANNO", "closed": true}], "handles": ["A3"], "state": "applied"}, {"i
   1
-ndex": 5, "op": "draw_line", "label": "", "params": {"p1": [860.0, 0.0], "p2": [1180.0, 0.0], "layer": "A-ANNO", "linetype": null}, "primitives": [{"kind": "line", "points": [860.0, 0.0, 1180.0, 0.0], "layer": "A-ANNO"}], "handles": ["A4"], "state": "applied"}, {"index": 6, "op": "draw_line", "label": "", "params": {"p1": [2100.0, 0.0], "p2": [2300.0, 0.0], "layer": "A-ANNO", "linetype": null}, "primitives": [{"kind": "line", "points": [2100.0, 0.0, 2300.0, 0.0], "layer": "A-ANNO"}], "handles": ["A5"], "state": "applied"}, {"index": 7, "op": "draw_line", "label": "", "params": {"p1": [2300.0, 400.0], "p2": [2300.0, -400.0], "layer": "A-ANNO", "linetype": null}, "primitives": [{"kind": "line", "points": [2300.0, 400.0, 2300.0, -400.0], "layer": "A-ANNO"}], "handles": ["A6"], "state": "applied"}, {"index": 8, "op": "draw_line", "label": "", "params": {"p1": [2300.0, 400.0], "p2": [3580.0, 400.0], "layer": "A-ANNO", "linetype": null}, "primitives": [{"kind": "line", "points": [2300.0, 400.0, 3580.0, 400.0], "layer": "A-ANNO"}], "handles": ["A7"], "state": "applied"}, {"index": 9, "op": "draw_line", "label": "", "params": {"p1": [2300.0, -400.0], "p2": [3580.0, -400.0], "layer": "A-ANNO", "linetype": null}, "primitives": [{"kind": "line", "points": [2300.0, -400.0, 3580.0, -400.0], "layer": "A-ANNO"}], "handles": ["A8"], "state": "applied"}, {"index": 10, "op": "add_hatch", "label": "", "params": {"points": [[1300.0, 0.0], [1180.0, 34.0], [1180.0, -34.0]], "pattern": "ANSI31", "scale": 40.0, "angle": 0.0, "solid": true, "layer": "A-ANNO"}, "primitives": [{"kind": "hatch", "points": [1300.0, 0.0, 1180.0, 34.0, 1180.0, -34.0], "layer": "A-ANNO", "pattern": "ANSI31", "scale": 40.0, "angle": 0.0, "solid": true}], "handles": ["A9"], "state": "applied"}, {"index": 11, "op": "add_hatch", "label": "", "params": {"points": [[3700.0, 400.0], [3580.0, 434.0], [3580.0, 366.0]], "patt
+ndex": 5, "op": "draw_line", "label": "", "params": {"p1": [860.0, 0.0], "p2": [1180.0, 0.0], "layer": "A-ANNO", "linetype": null}, "primitives": [{"kind": "line", "points": [860.0, 0.0, 1180.0, 0.0], "layer": "A-ANNO"}], "handles": ["A4"], "state": "applied"}, {"index": 6, "op": "draw_line", "label": "", "params": {"p1": [2100.0, 0.0], "p2": [2300.0, 0.0], "layer": "A-ANNO", "linetype": null}, "primitives": [{"kind": "line", "points": [2100.0, 0.0, 2300.0, 0.0], "layer": "A-ANNO"}], "handles": ["A5"], "state": "applied"}, {"index": 7, "op": "draw_line", "label": "", "params": {"p1": [2300.0, 300.0], "p2": [2300.0, -300.0], "layer": "A-ANNO", "linetype": null}, "primitives": [{"kind": "line", "points": [2300.0, 300.0, 2300.0, -300.0], "layer": "A-ANNO"}], "handles": ["A6"], "state": "applied"}, {"index": 8, "op": "draw_line", "label": "", "params": {"p1": [2300.0, 300.0], "p2": [3440.0, 300.0], "layer": "A-ANNO", "linetype": null}, "primitives": [{"kind": "line", "points": [2300.0, 300.0, 3440.0, 300.0], "layer": "A-ANNO"}], "handles": ["A7"], "state": "applied"}, {"index": 9, "op": "draw_line", "label": "", "params": {"p1": [2300.0, -300.0], "p2": [3440.0, -300.0], "layer": "A-ANNO", "linetype": null}, "primitives": [{"kind": "line", "points": [2300.0, -300.0, 3440.0, -300.0], "layer": "A-ANNO"}], "handles": ["A8"], "state": "applied"}, {"index": 10, "op": "add_hatch", "label": "", "params": {"points": [[1300.0, 0.0], [1180.0, 30.0], [1180.0, -30.0]], "pattern": "ANSI31", "scale": 40.0, "angle": 0.0, "solid": true, "layer": "A-ANNO"}, "primitives": [{"kind": "hatch", "points": [1300.0, 0.0, 1180.0, 30.0, 1180.0, -30.0], "layer": "A-ANNO", "pattern": "ANSI31", "scale": 40.0, "angle": 0.0, "solid": true}], "handles": ["A9"], "state": "applied"}, {"index": 11, "op": "add_hatch", "label": "", "params": {"points": [[3560.0, 300.0], [3440.0, 330.0], [3440.0, 270.0]], "patt
   1
-ern": "ANSI31", "scale": 40.0, "angle": 0.0, "solid": true, "layer": "A-ANNO"}, "primitives": [{"kind": "hatch", "points": [3700.0, 400.0, 3580.0, 434.0, 3580.0, 366.0], "layer": "A-ANNO", "pattern": "ANSI31", "scale": 40.0, "angle": 0.0, "solid": true}], "handles": ["AA"], "state": "applied"}, {"index": 12, "op": "add_hatch", "label": "", "params": {"points": [[3700.0, -400.0], [3580.0, -366.0], [3580.0, -434.0]], "pattern": "ANSI31", "scale": 40.0, "angle": 0.0, "solid": true, "layer": "A-ANNO"}, "primitives": [{"kind": "hatch", "points": [3700.0, -400.0, 3580.0, -366.0, 3580.0, -434.0], "layer": "A-ANNO", "pattern": "ANSI31", "scale": 40.0, "angle": 0.0, "solid": true}], "handles": ["AB"], "state": "applied"}, {"index": 13, "op": "add_text", "label": "", "params": {"pos": [430.0, 0.0], "text": "AI client", "height": 100.0, "rotation": 0.0, "align": "center", "layer": "A-ANNO"}, "primitives": [{"kind": "text", "points": [430.0, 0.0], "layer": "A-ANNO", "text": "AI client", "height": 100.0, "rotation": 0.0, "align": "center"}], "handles": ["AC"], "state": "applied"}, {"index": 14, "op": "add_text", "label": "", "params": {"pos": [1030.0, 80.0], "text": "MCP", "height": 100.0, "rotation": 0.0, "align": "center", "layer": "A-ANNO"}, "primitives": [{"kind": "text", "points": [1030.0, 80.0], "layer": "A-ANNO", "text": "MCP", "height": 100.0, "rotation": 0.0, "align": "center"}], "handles": ["AD"], "state": "applied"}, {"index": 15, "op": "add_text", "label": "", "params": {"pos": [1700.0, 0.0], "text": "acadmcp", "height": 100.0, "rotation": 0.0, "align": "center", "layer": "A-ANNO"}, "primitives": [{"kind": "text", "points": [1700.0, 0.0], "layer": "A-ANNO", "text": "acadmcp", "height": 100.0, "rotation": 0.0, "align": "center"}], "handles": ["AE"], "state": "applied"}, {"index": 16, "op": "add_text", "label": "", "params": {"pos": [2945.0, 490.0], "text": "COM (pywin32
+ern": "ANSI31", "scale": 40.0, "angle": 0.0, "solid": true, "layer": "A-ANNO"}, "primitives": [{"kind": "hatch", "points": [3560.0, 300.0, 3440.0, 330.0, 3440.0, 270.0], "layer": "A-ANNO", "pattern": "ANSI31", "scale": 40.0, "angle": 0.0, "solid": true}], "handles": ["AA"], "state": "applied"}, {"index": 12, "op": "add_hatch", "label": "", "params": {"points": [[3560.0, -300.0], [3440.0, -270.0], [3440.0, -330.0]], "pattern": "ANSI31", "scale": 40.0, "angle": 0.0, "solid": true, "layer": "A-ANNO"}, "primitives": [{"kind": "hatch", "points": [3560.0, -300.0, 3440.0, -270.0, 3440.0, -330.0], "layer": "A-ANNO", "pattern": "ANSI31", "scale": 40.0, "angle": 0.0, "solid": true}], "handles": ["AB"], "state": "applied"}, {"index": 13, "op": "add_text", "label": "", "params": {"pos": [430.0, 0.0], "text": "AI client", "height": 100.0, "rotation": 0.0, "align": "center", "layer": "A-ANNO"}, "primitives": [{"kind": "text", "points": [430.0, 0.0], "layer": "A-ANNO", "text": "AI client", "height": 100.0, "rotation": 0.0, "align": "center"}], "handles": ["AC"], "state": "applied"}, {"index": 14, "op": "add_text", "label": "", "params": {"pos": [1020.0, 90.0], "text": "MCP", "height": 100.0, "rotation": 0.0, "align": "center", "layer": "A-ANNO"}, "primitives": [{"kind": "text", "points": [1020.0, 90.0], "layer": "A-ANNO", "text": "MCP", "height": 100.0, "rotation": 0.0, "align": "center"}], "handles": ["AD"], "state": "applied"}, {"index": 15, "op": "add_text", "label": "", "params": {"pos": [1700.0, 0.0], "text": "acadmcp", "height": 100.0, "rotation": 0.0, "align": "center", "layer": "A-ANNO"}, "primitives": [{"kind": "text", "points": [1700.0, 0.0], "layer": "A-ANNO", "text": "acadmcp", "height": 100.0, "rotation": 0.0, "align": "center"}], "handles": ["AE"], "state": "applied"}, {"index": 16, "op": "add_text", "label": "", "params": {"pos": [2340.0, 340.0], "text": "COM (pywin32
   1
-)", "height": 100.0, "rotation": 0.0, "align": "center", "layer": "A-ANNO"}, "primitives": [{"kind": "text", "points": [2945.0, 490.0], "layer": "A-ANNO", "text": "COM (pywin32)", "height": 100.0, "rotation": 0.0, "align": "center"}], "handles": ["AF"], "state": "applied"}, {"index": 17, "op": "add_text", "label": "", "params": {"pos": [2945.0, -310.0], "text": "ezdxf", "height": 100.0, "rotation": 0.0, "align": "center", "layer": "A-ANNO"}, "primitives": [{"kind": "text", "points": [2945.0, -310.0], "layer": "A-ANNO", "text": "ezdxf", "height": 100.0, "rotation": 0.0, "align": "center"}], "handles": ["B0"], "state": "applied"}, {"index": 18, "op": "add_text", "label": "", "params": {"pos": [4750.0, 400.0], "text": "running AutoCAD 2026", "height": 100.0, "rotation": 0.0, "align": "center", "layer": "A-ANNO"}, "primitives": [{"kind": "text", "points": [4750.0, 400.0], "layer": "A-ANNO", "text": "running AutoCAD 2026", "height": 100.0, "rotation": 0.0, "align": "center"}], "handles": ["B1"], "state": "applied"}, {"index": 19, "op": "add_text", "label": "", "params": {"pos": [4750.0, -400.0], "text": ".dxf file (+ PNG preview)", "height": 100.0, "rotation": 0.0, "align": "center", "layer": "A-ANNO"}, "primitives": [{"kind": "text", "points": [4750.0, -400.0], "layer": "A-ANNO", "text": ".dxf file (+ PNG preview)", "height": 100.0, "rotation": 0.0, "align": "center"}], "handles": ["B2"], "state": "applied"}]}
+)", "height": 100.0, "rotation": 0.0, "align": "left", "layer": "A-ANNO"}, "primitives": [{"kind": "text", "points": [2340.0, 340.0], "layer": "A-ANNO", "text": "COM (pywin32)", "height": 100.0, "rotation": 0.0, "align": "left"}], "handles": ["AF"], "state": "applied"}, {"index": 17, "op": "add_text", "label": "", "params": {"pos": [2340.0, -260.0], "text": "ezdxf", "height": 100.0, "rotation": 0.0, "align": "left", "layer": "A-ANNO"}, "primitives": [{"kind": "text", "points": [2340.0, -260.0], "layer": "A-ANNO", "text": "ezdxf", "height": 100.0, "rotation": 0.0, "align": "left"}], "handles": ["B0"], "state": "applied"}, {"index": 18, "op": "add_text", "label": "", "params": {"pos": [4610.0, 300.0], "text": "running AutoCAD 2026", "height": 100.0, "rotation": 0.0, "align": "center", "layer": "A-ANNO"}, "primitives": [{"kind": "text", "points": [4610.0, 300.0], "layer": "A-ANNO", "text": "running AutoCAD 2026", "height": 100.0, "rotation": 0.0, "align": "center"}], "handles": ["B1"], "state": "applied"}, {"index": 19, "op": "add_text", "label": "", "params": {"pos": [4610.0, -300.0], "text": ".dxf file (+ PNG preview)", "height": 100.0, "rotation": 0.0, "align": "center", "layer": "A-ANNO"}, "primitives": [{"kind": "text", "points": [4610.0, -300.0], "layer": "A-ANNO", "text": ".dxf file (+ PNG preview)", "height": 100.0, "rotation": 0.0, "align": "center"}], "handles": ["B2"], "state": "applied"}]}
   0
 DICTIONARYVAR
   5
@@ -8287,7 +8279,7 @@ DictionaryVariables
 280
 0
   1
-1.4.4 @ 2026-10-15T13:58:51.339516+00:00
+1.4.4 @ 2026-10-15T14:01:04.669696+00:00
   0
 ENDSEC
   0
