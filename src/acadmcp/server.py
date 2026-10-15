@@ -29,7 +29,7 @@ except ImportError:  # pragma: no cover - mcp 1.x
 
 from mcp.types import ToolAnnotations
 
-from . import catalog, geom, layers, ops, settings, summary
+from . import catalog, geom, layers, ops, settings, summary, terms, verify
 from .acad_plugin_client import PluginClient, PluginError, PluginUnavailable
 from .backends import make_backend
 from .backends.base import Backend, BackendError
@@ -224,8 +224,46 @@ def _window(window: Any) -> tuple[float, float, float, float] | None:
 
 
 @mcp.tool(annotations=_READONLY)
-def drawing_help() -> dict[str, Any]:
-    """List the available tool groups and the workflow to follow."""
+def drawing_help(term: str | None = None) -> dict[str, Any]:
+    """List the available tool groups and the workflow to follow.
+
+    Pass `term` to go from a word to the tool that does it — an AutoCAD command name
+    ("HATCH", "-INSERT"), an English phrase, or a Chinese one ("承重柱", "房间面积"). Each
+    match names the tool, what it matched on, the tool's own summary line and the AutoCAD
+    commands it stands for. The vocabulary is `acadmcp.terms`, and a tool cannot exist
+    without an entry there, which is what keeps this lookup from going stale.
+    """
+    if term:
+        # The summary is read off the live registry rather than stored beside the term, so
+        # it cannot drift from the tool's own docstring — the rule `summary.py` follows for
+        # room areas, applied to the surface that `drawing_summary` cannot see.
+        described = {t.name: (t.description or "") for t in mcp._tool_manager.list_tools()}
+        matches = []
+        for name, matched_on in terms.lookup(term):
+            record = terms.terms_for(name)
+            lines = described.get(name, "").strip().splitlines()
+            matches.append(
+                {
+                    "tool": name,
+                    "matched": matched_on,
+                    "summary": lines[0].strip() if lines else "",
+                    "cad": list(record.cad) if record else [],
+                }
+            )
+        return {
+            "term": term,
+            "count": len(matches),
+            "matches": matches,
+            "hint": ""
+            if matches
+            else (
+                "no tool matched. This index covers the vocabulary of the 47 tools — an "
+                "AutoCAD command name, an English phrase or a Chinese one. It does not cover "
+                "the element catalogue: for those, call element_types() (钢立柱, 焊接符号, "
+                "钢梁 and the rest live there), and call drawing_help() with no term for the "
+                "whole surface."
+            ),
+        }
     return {
         "units": "millimetres throughout",
         "backends": {
@@ -268,12 +306,20 @@ def drawing_help() -> dict[str, Any]:
             "checking_your_work": (
                 "drawing_summary first — rooms, areas, openings and counts as data. "
                 "drawing_history is what was drawn, one line per step. "
+                "drawing_verify checks the drawing against the journal's own account of "
+                "it, which is what catches a save that dropped entities. "
                 "drawing_screenshot last, and pass `window` to frame a detail."
             ),
             "recovering": (
                 "Every tool call is one journal step: drawing_undo(count) or "
                 "drawing_rollback_to(index) takes back exactly what was drawn, and "
                 "drawing_history gives the indices to aim at."
+            ),
+            "finding_a_tool": (
+                "drawing_help(term=...) turns a word into tools: an AutoCAD command name "
+                '("HATCH"), an English phrase, or a Chinese one ("承重柱"). Every tool '
+                "has a vocabulary entry in acadmcp.terms, and tests/test_terms.py fails if "
+                "one is added without it."
             ),
         },
         "conventions": {
@@ -544,6 +590,48 @@ def drawing_summary() -> dict[str, Any]:
     return {"ok": True, **summary.summarise(be.step_rows(), catalog=_recorded_catalog(be))}
 
 
+@mcp.tool(annotations=_READONLY)
+def drawing_verify(limit: int = 20000) -> dict[str, Any]:
+    """Check the drawing against the journal's own account of what it drew.
+
+    `verdict` is "matches" when every applied step's entities are there, "unaccounted" when
+    the drawing holds more than any step recorded (something drew outside a step), and
+    "missing" when it holds fewer (a save dropped them, or an erase went too far).
+    "walk_truncated" means the listing hit `limit`, so the count is a floor and no verdict is
+    possible — raise `limit` and ask again. "no_baseline" means the drawing holds entities and
+    records no steps at all, so there is nothing to reconcile: a file opened with
+    `drawing_open` carries no record of what was already in it, and that is reported rather
+    than called a fault.
+
+    A step's row carries an entity count rather than handles, so this says the total is
+    wrong without saying which entity is; `by_op` points at what was drawing when the books
+    stopped agreeing. `empty_steps` lists applied steps that recorded nothing, which is
+    ordinary for one that only ensured a layer and suspicious for one that draws.
+
+    On the com backend `reported_entities` is the drawing's own count, which can exceed the
+    listing because it includes proxy entities the listing skips; the two are reported side
+    by side rather than reconciled.
+    """
+    if int(limit) < 1:
+        raise ValueError(f"limit must be at least 1, got {limit}")
+    be = _state.require()
+    # One more row than asked for: a walk returning exactly `limit` has either reached the end
+    # or been cut short there, and the count alone cannot tell those apart. The extra row costs
+    # nothing and makes `truncated` a fact instead of a guess — a caller who reads the entity
+    # count out of drawing_status and passes it as `limit` used to get a false warning.
+    entities = be.entities(limit=int(limit) + 1)
+    info = be.info()
+    reported = info.get("entities") if isinstance(info, dict) else None
+    report = verify.reconcile(
+        be.step_rows(),
+        entities,
+        truncated=len(entities) > int(limit),
+        reported=reported if isinstance(reported, int) and reported >= 0 else None,
+    )
+    report["backend"] = be.name
+    return report
+
+
 @mcp.tool(annotations=_DESTRUCTIVE)
 def drawing_rollback_to(index: int) -> dict[str, Any]:
     """Erase everything drawn after step `index`, newest first.
@@ -653,22 +741,47 @@ def drawing_screenshot(
 
 
 @mcp.tool(annotations=_READONLY)
-def listing_entities(layer: str | None = None, limit: int = 100) -> dict[str, Any]:
+def listing_entities(layer: str | None = None, limit: int = 100, offset: int = 0) -> dict[str, Any]:
     """List entities, optionally filtered to one layer.
 
-    `has_more` tells you `limit` cut the list short; call again with a larger
-    limit for the rest. With a `layer` filter the answer also carries
-    `layer_known`: False means the layer name is not in the drawing at all,
-    which is how a typo is told apart from an empty layer.
+    Pages with `limit` and `offset`: `has_more` says the page was cut short and
+    `next_offset` is where the next page starts. `total_count` is the full count
+    when it is known — once a page reaches the end it is exact, and an
+    unfiltered listing reads the drawing's own entity count; a layer-filtered
+    page that has not reached the end reports None rather than walk the whole
+    drawing to find out.
+
+    With a `layer` filter the answer also carries `layer_known`: False means
+    the layer name is not in the drawing at all, which is how a typo is told
+    apart from an empty layer.
     """
     be = _state.require()
     if int(limit) < 1:
         raise ValueError(f"limit must be at least 1, got {limit}")
-    probe = be.entities(layer=layer, limit=int(limit) + 1)
+    if int(offset) < 0:
+        raise ValueError(f"offset must be at least 0, got {offset}")
+    # The Backend protocol has no offset, so a page is cut from one over-fetch;
+    # the protocol stays untouched and a shallow page costs one walk either way.
+    probe = be.entities(layer=layer, limit=int(offset) + int(limit) + 1)
+    page = probe[int(offset) : int(offset) + int(limit)]
+    has_more = len(probe) > int(offset) + int(limit)
+    total: int | None
+    if not has_more:
+        total = len(probe)  # the walk ended, so this many entities exist
+    elif layer is None:
+        # The drawing's own count — on com this may include proxy entities a
+        # listing skips, so it can exceed the last page a caller ever reaches.
+        reported = be.info().get("entities")
+        total = reported if isinstance(reported, int) else None
+    else:
+        total = None
     out: dict[str, Any] = {
-        "count": min(len(probe), int(limit)),
-        "has_more": len(probe) > int(limit),
-        "entities": probe[: int(limit)],
+        "count": len(page),
+        "offset": int(offset),
+        "has_more": has_more,
+        "next_offset": int(offset) + len(page) if has_more else None,
+        "total_count": total,
+        "entities": page,
     }
     if layer is not None:
         known = be.info().get("layers")
@@ -700,7 +813,7 @@ def layer_create(
 
 @mcp.tool(annotations=_IDEMPOTENT)
 def set_text_style(
-    name: str = "HZ", font: str = "simhei.ttf", big_font: str | None = None
+    name: str = "HZ", font: str = "simsun.ttc", big_font: str | None = None
 ) -> dict[str, Any]:
     """Point drawn text at a text style with a font that has CJK glyphs.
 
@@ -708,6 +821,10 @@ def set_text_style(
     fonts carry no Chinese characters, so text drawn without this comes out as
     "?". TrueType (the default here) needs no big font; pass both a font and a
     big font (e.g. gbenor.shx with gbcbig.shx) to match a client's own standard.
+
+    The default is SimSun because it was measured: SimHei, the obvious other choice,
+    has no superscript-two glyph, so every `m²` label came out as a box. Repointing a
+    style does not repaint text already drawn, which is why the backends issue a regen.
     """
     be = _state.require()
     setter = getattr(be, "set_text_style", None)
@@ -1050,7 +1167,13 @@ def draw_equipment(
 
     kind="shaft" draws a service riser instead (强电井/弱电井/水井): the same
     captioned rectangle plus a diagonal cross, on A-SHAFT.
+
+    `kind` is a closed set for the same reason `swing` and `axis` are: a misspelt
+    "shfts" drew an ordinary equipment box and said ok, so a riser silently became
+    a machine.
     """
+    if kind not in ("equipment", "shaft"):
+        raise ValueError(f"kind must be 'equipment' or 'shaft', got {kind!r}")
     a, b = _pt(corner1), _pt(corner2)
     params = {"corner1": a, "corner2": b, "name": name, "kind": kind}
     with _auto_step("draw_equipment", params) as be:
@@ -1526,7 +1649,7 @@ def step_control(
 
 
 @mcp.tool(annotations=_READONLY)
-def library_list(source: str | None = None, limit: int = 500) -> dict[str, Any]:
+def library_list(source: str | None = None, limit: int = 500, offset: int = 0) -> dict[str, Any]:
     """List the block definitions in the open drawing, or in a library .dwg.
 
     This is what the element catalogue is written against, so it is also how a catalogue
@@ -1534,19 +1657,28 @@ def library_list(source: str | None = None, limit: int = 500) -> dict[str, Any]:
     parameters, the values each accepts and which are read-only. A library file is opened
     read-only on the side and never becomes a reference to it.
 
-    `has_more` tells you `limit` cut the list short; call again with a larger
-    limit for the rest.
+    Pages with `limit` and `offset`: `has_more` says the page was cut short and
+    `next_offset` is where the next page starts. `total_count` is the full count
+    once a page reaches the end; before that it is None, because the plugin's
+    blocks call reports no library-wide total without reading the whole file.
     """
     if int(limit) < 1:
         raise ValueError(f"limit must be at least 1, got {limit}")
+    if int(offset) < 0:
+        raise ValueError(f"offset must be at least 0, got {offset}")
     try:
-        result = _client().call("blocks", source=source, limit=int(limit) + 1)
+        result = _client().call("blocks", source=source, limit=int(offset) + int(limit) + 1)
     except (PluginError, PluginUnavailable) as exc:
         raise BackendError(str(exc)) from exc
     blocks = result.get("blocks", [])
-    result["blocks"] = blocks[: int(limit)]
-    result["count"] = min(len(blocks), int(limit))
-    result["has_more"] = len(blocks) > int(limit)
+    page = blocks[int(offset) : int(offset) + int(limit)]
+    has_more = len(blocks) > int(offset) + int(limit)
+    result["blocks"] = page
+    result["count"] = len(page)
+    result["offset"] = int(offset)
+    result["has_more"] = has_more
+    result["next_offset"] = int(offset) + len(page) if has_more else None
+    result["total_count"] = len(blocks) if not has_more else None
     return {"ok": True, **result}
 
 

@@ -15,8 +15,12 @@ src/acadmcp/
   catalog_ops.py        the parametric twins a catalogue entry draws where blocks cannot insert
   summary.py            derives a design summary (rooms, openings, elements) from the journal.
                         No CAD imports — it may import geom and layers and nothing else.
+  verify.py             the drawing reconciled against the journal's own account of it.
+                        No CAD imports, and none from this package either.
+  terms.py              the tool vocabulary: the AutoCAD command and the Chinese phrase for
+                        each tool. Data plus lookup; no CAD imports.
   capture.py            Win32 window capture, and finding the AutoCAD frame
-  server.py             the MCP tool surface (46 tools, each annotated by behaviour class)
+  server.py             the MCP tool surface (47 tools, each annotated by behaviour class)
   journal.py            the backend-neutral step journal (undo/redo bookkeeping). No CAD imports.
   acad_plugin_client.py the socket client for the in-AutoCAD plugin
   steps.py              step-journal control, and the step_control action table
@@ -27,6 +31,7 @@ src/acadmcp/
     com.py              ActiveX driver — draws into a running AutoCAD; journals in memory
     plugin.py           records primitives per step and hands them to the plugin
 examples/floor_plan_demo.py
+scripts/check_doc_numbers.py   every quotable number, derived from the tree; non-zero on drift
 evaluations/            read-only QA pairs + fixture DXF + harness, per the mcp-builder guide
 tests/                  test_geom.py, test_backends.py, test_journal.py, test_recording.py,
                         test_dxf_journal.py, test_plugin_backend.py, test_server_journal.py,
@@ -34,6 +39,9 @@ tests/                  test_geom.py, test_backends.py, test_journal.py, test_re
                         test_catalog.py, test_catalog_ops.py, test_catalog_identity.py,
                         test_summary.py, test_element_tools.py,
                         test_tool_surface.py (annotations, naming, pagination),
+                        test_verify.py (the journal's count against the drawing's),
+                        test_terms.py (every tool has a vocabulary entry),
+                        test_doc_numbers.py (the docs and the evaluation answers),
                         test_dxf_create_render.py (drawing_new create, theme colours, glyphs),
                         test_input_validation.py (caller mistakes surface as readable errors),
                         test_live_screenshot.py (no restore, no rename on export),
@@ -44,13 +52,21 @@ tests/                  test_geom.py, test_backends.py, test_journal.py, test_re
 ## Commands
 
 ```bash
-uv run pytest -q                      # 312 tests, ~10s, no AutoCAD required
+uv run pytest -q                      # 359 tests, ~12s, no AutoCAD required
+uv run pytest tests/test_terms.py -q  # adding a tool without a vocabulary entry fails here
+uv run python scripts/check_doc_numbers.py   # docs and evaluation answers vs the tree
 uv run ruff check . --output-format concise
 uv run ruff format .
 uv run python examples/floor_plan_demo.py           # DXF + PNG into examples/output/
 uv run python examples/floor_plan_demo.py --com     # draw into a NEW AutoCAD drawing
-.venv/Scripts/python.exe tests/sandbox_driver.py path/to/script.py   # sandbox run, see below
+`.venv/Scripts/python.exe tests/sandbox_driver.py path/to/script.py   # sandbox run, see below
 ```
+
+`check_doc_numbers.py` derives the tool count, the collected test count, the journal payload
+version and every `evaluation.xml` answer from the tree, and exits non-zero when the prose
+disagrees. `tests/test_doc_numbers.py` runs it as a gate, because this repository has no CI
+and a test is the only thing that ever runs. It exists because one answer had silently gone
+stale: the catalogue grew a fifth structure element and the evaluation kept answering 4.
 
 `sandbox_driver.py` is how a live drawing exercise stays honest: it launches a
 fresh `python -m acadmcp.server` from the current working tree for every run
@@ -436,7 +452,7 @@ existed with no tool in front of it — and `drawing_history` now returns machin
 plugin an *accepted* step blocks a rollback and the refusal is reported, not swallowed;
 `step_control(action='rollback_to', index=..., force=True)` overrides it. The dxf journal
 persists inside the
-file (root dictionary `ACADMCP`, one XRecord, JSON `ensure_ascii`-escaped and chunked
+file (root dictionary `ACADMCP_JOURNAL`, one XRecord, JSON `ensure_ascii`-escaped and chunked
 at 1900 chars because a group-code-1 string tops out at 2049) and survives
 `drawing_open` — handles are stable across ezdxf save/load, so an old session's steps
 stay undoable. Handles change on redo: `RecordingBackend.redo` stores the fresh ones
@@ -540,7 +556,7 @@ so reopening a drawing elsewhere silently resolved its doors against something e
 `Journal.meta["catalog"]` now carries the identity **and the entries** (`Catalog.identity()`
 produces it, `Catalog.adopt()` consumes it), because a drawing that records only a file path
 resolves to something else on the next machine. Persistence: the DXF keeps it in the same
-`ACADMCP` XRecord as the journal; the COM backend writes a `<drawing>.<ext>.acadmcp.json`
+`ACADMCP_JOURNAL` XRecord as the journal; the COM backend writes a `<drawing>.<ext>.acadmcp.json`
 **sidecar** beside a save, because ActiveX exposes no way to write an XRecord (that is the
 plugin's route) — `drawing_save`/`drawing_status` name the sidecar, so a file appearing next
 to the drawing is never unannounced. The plugin backend is the exception: its journal lives
@@ -560,6 +576,30 @@ read-only `drawing_summary` tool wraps. A row it cannot read — no `op`, no rea
 an undone step — is counted and warned about, never raised, the rule the catalogue loader and
 the journal reader already follow. `annotation` counts one per *step*, not per entity: a
 dimension chain is one annotation here.
+
+**A handler keyed on an op name no tool produces reports a number nobody can move, and a
+test can keep it that way.** `HANDLERS` was keyed `"add_axis_grid"` while `server.py` records
+`draw_axis_grid`, so `annotation.axis_grids` was 0 for every real drawing — and
+`tests/test_summary.py` fed the handler that same impossible op name, so the suite stayed
+green. `HANDLERS` also carried a `"draw_shaft"` key for a tool that does not exist
+(`draw_equipment(kind="shaft")` records `draw_equipment`). The fix is not just the two keys:
+the test now reads the op names out of `server.py` with a regex over `_auto_step("…")` and
+`_placement(be, "…")`, so the table cannot drift from its producers again. The same shape of
+bug is worth looking for wherever a dict is keyed by a string a human typed.
+
+**`drawing_verify` reconciles the journal against the drawing, and reading it found a
+contract two backends were not both meeting.** `Backend.step_rows` documents a row carrying
+"how many entities it drew", and `RecordingBackend` does — but `PluginBackend` handed back
+the plugin's own rows verbatim, which carry `handles` and `primitives` and no `entities` at
+all. Nothing had depended on the key before, so nothing noticed; `reconcile` treating a
+missing count as zero would have reported every correct plugin drawing as holding entities
+no step recorded. The row is now normalised where it is produced (`PluginBackend.step_rows`
+derives the count from `len(handles)`), and `verify.reconcile` warns rather than assuming
+zero when a row still cannot be counted — for a check like this, a *false* verdict is worse
+than saying nothing. The invariant it rests on is measured, not assumed: a mitred envelope
+with a door, a room label, an axis grid, a dimension and a placed element totalled 38
+entities and the drawing held 38, through draw, save, reopen, undo and redo. It is a count,
+not a handle list, so it says the total is wrong without saying which entity is.
 
 **A client that passes metres used to draw a 4 mm room and be told it succeeded.**
 `geom.plausible(value, what, low, high)` now refuses a dimension outside a deliberately wide

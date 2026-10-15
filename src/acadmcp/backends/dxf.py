@@ -207,10 +207,16 @@ class DxfBackend(RecordingBackend):
 
     name = "dxf"
 
-    #: Where the journal lives inside the file: root dictionary → ACADMCP → JOURNAL.
-    #: Same idea as the plugin's DWG journal: the steps travel with the drawing, so
-    #: opening a saved file can still undo what a previous session drew.
-    JOURNAL_DICT = "ACADMCP"
+    #: Where the journal lives inside the file: root dictionary → ACADMCP_JOURNAL →
+    #: JOURNAL. Same idea as the plugin's DWG journal: the steps travel with the drawing,
+    #: so opening a saved file can still undo what a previous session drew.
+    #: The name is a compound on purpose — a bare `ACADMCP` is claimed by other tooling in
+    #: this space, which registers XDATA appids under that prefix and a root dictionary of
+    #: its own. Two applications sharing one name is how a reader ends up reading the wrong
+    #: record; a compound nobody else has picked cannot be misread.
+    JOURNAL_DICT = "ACADMCP_JOURNAL"
+    #: The name this package wrote before the above existed. Read, never written.
+    LEGACY_JOURNAL_DICT = "ACADMCP"
     JOURNAL_KEY = "JOURNAL"
     #: A group-code-1 string tops out at 2049 bytes; JSON is escaped to ASCII first,
     #: so chunk by characters with margin.
@@ -294,9 +300,15 @@ class DxfBackend(RecordingBackend):
         target = path or self.path
         if not target:
             raise BackendError("no output path given and the document has none")
-        Path(target).parent.mkdir(parents=True, exist_ok=True)
-        self._write_journal()
-        self.doc.saveas(target)
+        try:
+            Path(target).parent.mkdir(parents=True, exist_ok=True)
+            self._write_journal()
+            self.doc.saveas(target)
+        except OSError as exc:
+            # Unwrapped, this is an OSError and the SDK masks it behind a bare "Error
+            # executing tool drawing_save" — the same silence `_read_journal` refuses for a
+            # read. The path and the reason are the whole recovery signal.
+            raise BackendError(f"cannot write DXF {target!r}: {exc}") from exc
         self.path = target
         return target
 
@@ -892,11 +904,39 @@ class DxfBackend(RecordingBackend):
                 for i in range(0, len(payload), self.JOURNAL_CHUNK)
             ]
         )
+        self._drop_legacy_journal()
+
+    def _drop_legacy_journal(self) -> None:
+        """Move a pre-rename record out of the way once this build has rewritten it.
+
+        Leaving it would put two JOURNAL records in one file, and a reader that prefers the
+        old name — an older build, or this one if the lookup order were ever flipped — would
+        read steps this build has already replaced. Only our own key moves: a dictionary of
+        that name holding anyone else's data is theirs and stays, and it is discarded only
+        when ours was the only thing in it.
+        """
+        legacy = self.doc.rootdict.get(self.LEGACY_JOURNAL_DICT)
+        if legacy is None:
+            return
+        if self.JOURNAL_KEY in legacy:
+            legacy.discard(self.JOURNAL_KEY)
+        if not len(legacy):
+            self.doc.rootdict.discard(self.LEGACY_JOURNAL_DICT)
+
+    def _find_journal_record(self) -> Any:
+        """Our record, under the current name and then under the one we used to write."""
+        for name in (self.JOURNAL_DICT, self.LEGACY_JOURNAL_DICT):
+            dictionary = self.doc.rootdict.get(name)
+            if dictionary is None:
+                continue
+            record = dictionary.get(self.JOURNAL_KEY)
+            if record is not None:
+                return record
+        return None
 
     def _read_journal(self) -> None:
         self.journal_unreadable = ""
-        dictionary = self.doc.rootdict.get(self.JOURNAL_DICT)
-        xrecord = dictionary.get(self.JOURNAL_KEY) if dictionary else None
+        xrecord = self._find_journal_record()
         if xrecord is None:
             return
         payload = "".join(str(tag.value) for tag in xrecord.tags if tag.code == 1)

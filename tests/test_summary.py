@@ -191,7 +191,11 @@ def test_annotation_counts_one_per_step_not_one_per_entity():
             _step(1, "add_dimension", {"points": [[0, 0], [1000, 0], [3000, 0], [6000, 0]]}),
             _step(2, "add_text", {"pos": [0, 0], "text": "车间"}),
             _step(3, "add_leader_note", {"anchor": [0, 0], "text": "见详图"}),
-            _step(4, "add_axis_grid", {"x_positions": [0, 3000], "y_positions": [0]}),
+            # The op names here must be the ones `server.py` actually records. This row read
+            # "add_axis_grid" — a name no tool has ever produced — so the handler it was meant
+            # to exercise was dead and `axis_grids` was 0 for every real drawing while this
+            # test stayed green. See `test_the_op_names_are_the_ones_tools_record` below.
+            _step(4, "draw_axis_grid", {"x_positions": [0, 3000], "y_positions": [0]}),
             _step(5, "add_hatch", {"points": [[0, 0], [1000, 0], [1000, 1000]]}),
         ]
     )
@@ -202,6 +206,26 @@ def test_annotation_counts_one_per_step_not_one_per_entity():
         "axis_grids": 1,
         "hatches": 1,
     }
+
+
+def test_every_handler_key_is_an_op_a_tool_actually_records():
+    """A key no tool produces is dead code that reports a number nobody can move.
+
+    `summary.HANDLERS` is keyed by the op each tool records — `_auto_step("op", …)` for the
+    drawing tools and `_placement(be, "op", …)` for the three that place catalogue elements.
+    Reading the keys off `server.py` rather than trusting a hand-written list is what keeps
+    the two in step; one of them had silently drifted to a name no tool has ever produced.
+    """
+    import re
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1] / "src" / "acadmcp" / "server.py"
+    text = source.read_text(encoding="utf-8")
+    recorded = set(re.findall(r'_auto_step\(\s*"([a-z_]+)"', text))
+    recorded |= set(re.findall(r'_placement\(\s*\w+\s*,\s*"([a-z_]+)"', text))
+    assert recorded, "no op names found; the patterns above have drifted, not the code"
+    unknown = sorted(set(summary.HANDLERS) - recorded)
+    assert not unknown, f"summary handlers for ops no tool records: {unknown}"
 
 
 def test_the_catalogue_identity_is_echoed_but_not_guessed():

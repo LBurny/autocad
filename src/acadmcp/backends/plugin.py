@@ -448,8 +448,18 @@ class PluginBackend(RecordingBackend):
 
         The plugin owns this journal, so the rows come over RPC rather than out of the
         in-memory `Journal` this backend also carries (which the plugin path never uses).
+
+        The plugin sends the handles a step produced; the row `Backend.step_rows` promises
+        carries the entity *count*. Deriving it here rather than leaving it to each reader
+        is what keeps `drawing_verify` a read-back written once — a reader that had to know
+        which backend spells the number how would be one reader per backend.
         """
-        return self.client.call("get_steps", offset=0, limit=10000)["steps"]
+        rows = self.client.call("get_steps", offset=0, limit=10000)["steps"]
+        for row in rows:
+            if "entities" not in row:
+                handles = row.get("handles")
+                row["entities"] = len(handles) if isinstance(handles, list) else None
+        return rows
 
     def rollback_to(self, index: int) -> dict[str, Any]:
         """Roll the DWG journal back to `index`, delegating to the plugin.

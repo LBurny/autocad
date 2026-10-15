@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from acadmcp import ops  # noqa: E402
 from acadmcp.backends import make_backend  # noqa: E402
+from acadmcp.backends.dxf import DxfBackend  # noqa: E402
 from acadmcp.catalog import Element, Variant  # noqa: E402
 
 
@@ -160,7 +161,7 @@ def test_a_large_journal_chunks_and_reassembles(tmp_path):
 
     # Read the file with plain ezdxf: the journal is ordinary document data.
     doc = readfile(target)
-    xrecord = doc.rootdict["ACADMCP"]["JOURNAL"]
+    xrecord = doc.rootdict[DxfBackend.JOURNAL_DICT][DxfBackend.JOURNAL_KEY]
     chunks = [str(tag.value) for tag in xrecord.tags if tag.code == 1]
     assert len(chunks) > 1  # genuinely split, not one giant tag
     assert json.loads("".join(chunks)) == be.journal.to_dict()
@@ -182,7 +183,9 @@ def test_an_unreadable_journal_is_reported_not_raised(tmp_path):
     be.save(target)
 
     doc = readfile(target)
-    doc.rootdict["ACADMCP"]["JOURNAL"].tags = Tags([DXFTag(1, "not json at all")])
+    doc.rootdict[DxfBackend.JOURNAL_DICT][DxfBackend.JOURNAL_KEY].tags = Tags(
+        [DXFTag(1, "not json at all")]
+    )
     doc.saveas(target)
 
     reopened = make_backend("dxf", path=target)
@@ -218,3 +221,84 @@ def test_entities_reports_a_block_reference_under_both_names(be):
     assert inserts == [
         {"type": "INSERT", "layer": "0", "block": "TEST_BLOCK", "definition": "TEST_BLOCK"}
     ]
+
+
+# --- the name our record goes under ----------------------------------------
+
+
+def test_the_journal_names_itself_and_leaves_no_legacy_record(tmp_path):
+    """`ACADMCP` is claimed by another server too, so our record says its own name."""
+    import ezdxf
+
+    be = make_backend("dxf")
+    with be.step("room"):
+        ops.draw_wall_run(be, [(0, 0), (5000, 0)], 200)
+    target = str(tmp_path / "named.dxf")
+    be.save(target)
+
+    doc = ezdxf.readfile(target)
+    assert DxfBackend.JOURNAL_DICT in doc.rootdict
+    assert be.JOURNAL_KEY in doc.rootdict[DxfBackend.JOURNAL_DICT]
+    assert DxfBackend.LEGACY_JOURNAL_DICT not in doc.rootdict
+
+
+def test_a_journal_written_under_the_old_name_is_still_read(tmp_path):
+    """A drawing saved by an older build must not lose its undo history."""
+    import ezdxf
+    from ezdxf.lldxf.tags import Tags
+    from ezdxf.lldxf.types import DXFTag
+
+    payload = json.dumps(
+        {
+            "version": 1,
+            "steps": [
+                {
+                    "index": 1,
+                    "op": "room",
+                    "label": "",
+                    "params": {},
+                    "primitives": [],
+                    "handles": [],
+                    "state": "applied",
+                }
+            ],
+        },
+        ensure_ascii=True,
+    )
+    doc = ezdxf.new("R2010")
+    record = doc.rootdict.get_required_dict(DxfBackend.LEGACY_JOURNAL_DICT).add_xrecord(
+        DxfBackend.JOURNAL_KEY
+    )
+    record.tags = Tags([DXFTag(1, payload)])
+    target = str(tmp_path / "legacy.dxf")
+    doc.saveas(target)
+
+    reopened = make_backend("dxf", path=target)
+    assert [s.op for s in reopened.journal.steps] == ["room"]
+    assert reopened.journal_unreadable == ""
+
+
+def test_migrating_a_legacy_record_leaves_a_shared_dictionary_standing(tmp_path):
+    """Only our own record moves. Another application's use of `ACADMCP` is its own."""
+    import ezdxf
+    from ezdxf.lldxf.tags import Tags
+    from ezdxf.lldxf.types import DXFTag
+
+    doc = ezdxf.new("R2010")
+    shared = doc.rootdict.get_required_dict(DxfBackend.LEGACY_JOURNAL_DICT)
+    shared.add_xrecord(DxfBackend.JOURNAL_KEY).tags = Tags(
+        [DXFTag(1, '{"version": 1, "steps": []}')]
+    )
+    shared.add_xrecord("SOMEONE_ELSE").tags = Tags([DXFTag(1, "theirs")])
+    target = str(tmp_path / "shared.dxf")
+    doc.saveas(target)
+
+    be = make_backend("dxf", path=target)
+    with be.step("room"):
+        ops.draw_wall_run(be, [(0, 0), (5000, 0)], 200)
+    be.save()
+
+    doc = ezdxf.readfile(target)
+    assert DxfBackend.LEGACY_JOURNAL_DICT in doc.rootdict, "their record must survive"
+    assert "SOMEONE_ELSE" in doc.rootdict[DxfBackend.LEGACY_JOURNAL_DICT]
+    assert be.JOURNAL_KEY not in doc.rootdict[DxfBackend.LEGACY_JOURNAL_DICT]

@@ -7,6 +7,12 @@
     The fixture is evaluations/fixtures/floor_plan.dxf — the checked-in output
     of examples/floor_plan_demo.py, so the numbers below are stable. All answers
     were verified by driving the tools directly (see evaluations/README.md).
+
+    Every answer below is re-derived from this tree by scripts/check_doc_numbers.py,
+    which runs as a gate in tests/test_doc_numbers.py. The structure count had gone
+    stale once — a fifth structure element was added and this file was not touched,
+    so it answered 4 for as long as nobody read it — which is why the numbers are
+    derived rather than trusted.
   -->
   <qa_pair>
     <question>Open the drawing at evaluations/fixtures/floor_plan.dxf with the acadmcp server. How many entities does drawing_status report in total? Answer with the number only.</question>
@@ -30,7 +36,7 @@
   </qa_pair>
   <qa_pair>
     <question>Using the acadmcp element catalogue (check_library=False), how many element types are offered in the "structure" category? Answer with the number only.</question>
-    <answer>4</answer>
+    <answer>5</answer>
   </qa_pair>
   <qa_pair>
     <question>Using the acadmcp element catalogue, what is the default variant of the light-gauge steel stud (the 钢立柱 element)? Quote the variant name exactly.</question>

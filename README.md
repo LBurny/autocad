@@ -177,7 +177,7 @@ drawing_screenshot()
 
 ```
 src/acadmcp/
-  geom.py        pure 2D geometry (no CAD deps)     server.py     the 46-tool MCP surface
+  geom.py        pure 2D geometry (no CAD deps)     server.py     the 47-tool MCP surface
   ops.py         backend-agnostic operations        journal.py    step bookkeeping
   backends/      dxf / com / plugin drivers         catalog.py    the element catalogue
   catalog_ops.py the parametric twins               summary.py    design summary from the journal

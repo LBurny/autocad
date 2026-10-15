@@ -22,7 +22,7 @@ def _tools() -> dict:
 
 def test_every_tool_carries_annotations():
     tools = _tools()
-    assert len(tools) == 46
+    assert len(tools) == 47
     missing = [name for name, t in tools.items() if t.annotations is None]
     assert not missing
 
@@ -44,6 +44,7 @@ def test_annotations_match_behaviour():
         "drawing_status",
         "drawing_history",
         "drawing_summary",
+        "drawing_verify",
         "listing_entities",
         "plugin_status",
         "step_list",
@@ -125,10 +126,29 @@ def test_listing_entities_reports_has_more(fresh_dxf):
 
     cut = server.listing_entities(limit=2)
     assert cut["count"] == 2 and cut["has_more"] is True
+    assert cut["next_offset"] == 2 and cut["total_count"] == 3
     assert len(cut["entities"]) == 2
+
+    rest = server.listing_entities(limit=2, offset=2)
+    assert rest["count"] == 1 and rest["has_more"] is False
+    assert rest["next_offset"] is None and rest["total_count"] == 3
 
     whole = server.listing_entities(limit=50)
     assert whole["count"] == 3 and whole["has_more"] is False
+    assert whole["total_count"] == 3
+
+
+def test_listing_entities_validates_pagination(fresh_dxf):
+    with pytest.raises(ValueError, match="limit"):
+        server.listing_entities(limit=0)
+    with pytest.raises(ValueError, match="offset"):
+        server.listing_entities(offset=-1)
+
+    # An offset past the end is an empty page, and the exhausted walk still
+    # knows the true total — it must not report the offset as the count.
+    beyond = server.listing_entities(offset=50)
+    assert beyond["count"] == 0 and beyond["has_more"] is False
+    assert beyond["total_count"] == 0
 
 
 def test_listing_entities_tells_an_unknown_layer_from_an_empty_one(fresh_dxf):
@@ -157,7 +177,13 @@ def test_library_list_reports_has_more(monkeypatch):
 
     cut = server.library_list(limit=3)
     assert cut["ok"] and cut["count"] == 3 and cut["has_more"] is True
+    assert cut["next_offset"] == 3 and cut["total_count"] is None
     assert len(cut["blocks"]) == 3
+
+    rest = server.library_list(limit=3, offset=3)
+    assert rest["count"] == 1 and rest["has_more"] is False
+    assert rest["next_offset"] is None and rest["total_count"] == 4
 
     whole = server.library_list(limit=10)
     assert whole["count"] == 4 and whole["has_more"] is False
+    assert whole["total_count"] == 4

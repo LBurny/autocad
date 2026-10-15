@@ -39,7 +39,7 @@ Handling rules, which are decisions rather than incidentals:
 * ``structure`` counts ``draw_stair``/``draw_lift``/``draw_shaft``/``draw_equipment`` (whose
   ``kind="shaft"`` makes it a shaft, as it draws one) and placed catalogue elements whose key
   names one of those, confirmed against the catalogue's ``category`` when one was handed in.
-* ``annotation`` counts ``add_dimension``/``add_text``/``add_leader_note``/``add_axis_grid``/
+* ``annotation`` counts ``add_dimension``/``add_text``/``add_leader_note``/``draw_axis_grid``/
   ``add_hatch``: **one per step**, not one per entity drawn, because a step is the unit the
   journal records. A dimension chain is one annotation in this count.
 * ``catalog`` echoes the identity the caller handed in — which entries, which library root,
@@ -243,12 +243,13 @@ def _draw_lift(out: dict[str, Any], step: _Step, by_key: dict[str, str]) -> None
     _structure(out, "lifts")
 
 
-def _draw_shaft(out: dict[str, Any], step: _Step, by_key: dict[str, str]) -> None:
-    _structure(out, "shafts")
-
-
 def _draw_equipment(out: dict[str, Any], step: _Step, by_key: dict[str, str]) -> None:
-    """Equipment — or a service riser, which is what `kind="shaft"` draws."""
+    """Equipment — or a service riser, which is what `kind="shaft"` draws.
+
+    There is no `draw_shaft` tool: `draw_equipment(kind="shaft")` records the op
+    `draw_equipment`, so this one handler covers both and a `"draw_shaft"` key here
+    would be a line nothing ever reaches.
+    """
     _structure(out, "shafts" if step.params.get("kind") == "shaft" else "equipment")
 
 
@@ -264,7 +265,7 @@ def _add_leader_note(out: dict[str, Any], step: _Step, by_key: dict[str, str]) -
     out["annotation"]["leaders"] += 1
 
 
-def _add_axis_grid(out: dict[str, Any], step: _Step, by_key: dict[str, str]) -> None:
+def _draw_axis_grid(out: dict[str, Any], step: _Step, by_key: dict[str, str]) -> None:
     out["annotation"]["axis_grids"] += 1
 
 
@@ -361,12 +362,11 @@ HANDLERS = {
     "draw_column": _draw_column,
     "draw_stair": _draw_stair,
     "draw_lift": _draw_lift,
-    "draw_shaft": _draw_shaft,
     "draw_equipment": _draw_equipment,
     "add_dimension": _add_dimension,
     "add_text": _add_text,
     "add_leader_note": _add_leader_note,
-    "add_axis_grid": _add_axis_grid,
+    "draw_axis_grid": _draw_axis_grid,
     "add_hatch": _add_hatch,
     "place_element": _place_element,
     "place_along": _place_element,

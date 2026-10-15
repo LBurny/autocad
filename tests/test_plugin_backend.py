@@ -127,3 +127,37 @@ def test_history_lists_the_plugin_steps():
 
     assert "draw_room" in rendered and "draw_line" in rendered
     assert len(rendered.splitlines()) == 2
+
+
+# --- the row shape the Backend protocol promises ----------------------------
+
+
+def test_step_rows_carry_the_entity_count_the_contract_puts_there():
+    """The plugin sends handles; `Backend.step_rows` promises a count, so it is derived.
+
+    `drawing_verify` compares that number against the drawing, and a missing key would
+    otherwise read as "this step drew nothing" — a correct drawing reported as wrong.
+    """
+    be, client = _backend()
+    client.steps = [
+        {"index": 1, "state": "applied", "op": "draw_room", "handles": ["1F", "20", "21"]}
+    ]
+
+    assert be.step_rows()[0]["entities"] == 3
+
+
+def test_a_row_with_no_handles_says_it_cannot_count_rather_than_counting_zero():
+    """An unknown count is unknown, not nought, and the reader is told so."""
+    be, client = _backend()
+    client.steps = [{"index": 1, "state": "applied", "op": "draw-room"}]
+
+    assert be.step_rows()[0]["entities"] is None
+
+
+def test_a_row_that_already_counts_is_left_alone():
+    be, client = _backend()
+    client.steps = [
+        {"index": 1, "state": "applied", "op": "draw_room", "handles": [], "entities": 7}
+    ]
+
+    assert be.step_rows()[0]["entities"] == 7
