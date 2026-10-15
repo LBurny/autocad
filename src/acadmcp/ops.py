@@ -13,7 +13,7 @@ import math
 from collections.abc import Sequence
 from typing import Any
 
-from . import catalog, geom, layers, settings, sheet
+from . import catalog, geom, layers, settings, sheet, standards
 from .backends.base import Backend
 from .catalog import Element
 from .geom import Point, Vec
@@ -35,16 +35,37 @@ _MAX_COLUMN_MM = 3000.0
 # ---------------------------------------------------------------------------
 
 
-def setup_layers(be: Backend) -> list[str]:
-    """Create the standard architectural layers. Safe to call repeatedly.
+def setup_layers(be: Backend, standard: str = "") -> list[str]:
+    """Create the drawing's layers: the standard in force, then the project's own overlays.
 
-    A project's own layers are laid over the standard ones: its scheme is the one that
-    applies to its drawings, and the standard set is only a starting point for a drawing
-    that has no project behind it.
+    Safe to call repeatedly. Three sources, in order of how specific they are:
+
+    * the **standard in force** (`standards.in_force`) supplies each layer's colour, linetype
+      and lineweight. A project's standards file merges over the package's row by row, so by
+      the time it arrives here the table is already the project's own wherever the two
+      disagreed — and a project cannot lose a layer by naming one;
+    * the project's **`layers`** entries in ``acadmcp.json`` are laid over that: its colour and
+      linetype win, while the standard's lineweight stands, because that file has nowhere to
+      state a width and dropping it would quietly undo half the standard;
+    * with **no standard at all** — no project file and the package's own file unreadable —
+      the built-in `layers.LAYERS` scheme is used, which is what this package drew before any
+      of it was data.
+
+    `standard` names the standard to draw under, for a caller building a template that declares
+    one. Empty means the standard in force.
     """
-    scheme = {**layers.LAYERS, **settings.current().layers}
-    for name, (color, linetype) in scheme.items():
-        be.ensure_layer(name, color=color, linetype=linetype)
+    definition = standards.in_force(standard)
+    if definition is None:
+        scheme: dict[str, tuple[int, str, float | None]] = {
+            name: (color, linetype, None) for name, (color, linetype) in layers.LAYERS.items()
+        }
+    else:
+        scheme = dict(definition.layers)
+    for name, (color, linetype) in settings.current().layers.items():
+        overlaid = scheme.get(name)
+        scheme[name] = (color, linetype, overlaid[2] if overlaid else None)
+    for name, (color, linetype, lineweight) in scheme.items():
+        be.ensure_layer(name, color=color, linetype=linetype, lineweight=lineweight)
     return sorted(scheme)
 
 

@@ -1,0 +1,79 @@
+{
+  "_comment": [
+    "The drafting standards this package knows, as data. A drawing office's own standard is a",
+    "project file named in acadmcp.json's `standards` list; its rows merge over these ones, so",
+    "it restates only what it disagrees with.",
+    "",
+    "Two rules govern every row here, and they are the point of the file:",
+    "  * a transcribed number carries `source` — the standard and the table it was read from;",
+    "  * a table nobody has transcribed ships EMPTY, and a lookup in it refuses by name",
+    "    ('not transcribed') instead of interpolating a neighbouring value. Nothing in this",
+    "    file was recalled from memory, and no value here is guessable from the others.",
+    "",
+    "Tables: layers, text_heights, line_width_groups (empty, pending transcription), scales (a",
+    "pointer at sheet.SCALES, never a second copy), title_block."
+  ],
+  "standards": [
+    {
+      "name": "gbt50001",
+      "label": "GB/T 50001 房屋建筑制图统一标准",
+      "tables": {
+        "layers": {
+          "_source": "layers.LAYERS — the colour and linetype every layer is drawn with, read off the reference drawing's scheme and mirrored here so a project file can restate one row instead of all of them.",
+          "_note": "The lineweight column is pending transcription. No line width in this repository has been read off GB/T 50001, so every row states `null` — a layer with no width set draws ByLayer, which is what this package drew before the standard became data. A drawing office transcribes its own b-series into its project standards file; a lookup in a table nobody has transcribed refuses by name rather than being interpolated.",
+          "A-WALL": { "color": 2, "linetype": "CONTINUOUS", "lineweight": null, "source": "layers.LAYERS" },
+          "A-WALL-PATT": { "color": 8, "linetype": "CONTINUOUS", "lineweight": null, "source": "layers.LAYERS" },
+          "A-DOOR": { "color": 4, "linetype": "CONTINUOUS", "lineweight": null, "source": "layers.LAYERS" },
+          "A-WINDOW": { "color": 4, "linetype": "CONTINUOUS", "lineweight": null, "source": "layers.LAYERS" },
+          "A-COLUMN": { "color": 7, "linetype": "CONTINUOUS", "lineweight": null, "source": "layers.LAYERS" },
+          "S-COLUMN": { "color": 7, "linetype": "CONTINUOUS", "lineweight": null, "source": "layers.LAYERS" },
+          "S-BEAM": { "color": 7, "linetype": "CONTINUOUS", "lineweight": null, "source": "layers.LAYERS" },
+          "A-STAIR": { "color": 2, "linetype": "CONTINUOUS", "lineweight": null, "source": "layers.LAYERS" },
+          "A-LIFT": { "color": 6, "linetype": "CONTINUOUS", "lineweight": null, "source": "layers.LAYERS" },
+          "A-SHAFT": { "color": 30, "linetype": "CONTINUOUS", "lineweight": null, "source": "layers.LAYERS" },
+          "A-ROOM-BOUND": { "color": 8, "linetype": "CONTINUOUS", "lineweight": null, "source": "layers.LAYERS" },
+          "A-ROOM-NAME": { "color": 7, "linetype": "CONTINUOUS", "lineweight": null, "source": "layers.LAYERS" },
+          "A-ROOM-AREA": { "color": 7, "linetype": "CONTINUOUS", "lineweight": null, "source": "layers.LAYERS" },
+          "A-DIM": { "color": 3, "linetype": "CONTINUOUS", "lineweight": null, "source": "layers.LAYERS" },
+          "A-AXIS": { "color": 1, "linetype": "CENTER", "lineweight": null, "source": "layers.LAYERS" },
+          "A-AXIS-TEXT": { "color": 1, "linetype": "CONTINUOUS", "lineweight": null, "source": "layers.LAYERS" },
+          "A-EQUIP": { "color": 6, "linetype": "CONTINUOUS", "lineweight": null, "source": "layers.LAYERS" },
+          "A-ANNO": { "color": 7, "linetype": "CONTINUOUS", "lineweight": null, "source": "layers.LAYERS" },
+          "A-HATCH": { "color": 9, "linetype": "CONTINUOUS", "lineweight": null, "source": "layers.LAYERS" },
+          "A-SHEET": { "color": 7, "linetype": "CONTINUOUS", "lineweight": null, "source": "layers.LAYERS" },
+          "A-SHEET-TEXT": { "color": 7, "linetype": "CONTINUOUS", "lineweight": null, "source": "layers.LAYERS" }
+        },
+        "text_heights": {
+          "_source": "GB/T 50001 图纸字高名义系列 — heights on the sheet, in millimetres, not heights in the model.",
+          "_note": "A model height is a paper height times the plot scale's denominator: 3.5 mm on a 1:100 sheet is 350 mm in the model. That conversion is the checker's and is deliberately not written here, because a table of model heights per scale would be a second place for one fact to live.",
+          "2.5": { "height": 2.5, "source": "GB/T 50001 图纸字高名义系列" },
+          "3.5": { "height": 3.5, "source": "GB/T 50001 图纸字高名义系列" },
+          "5": { "height": 5.0, "source": "GB/T 50001 图纸字高名义系列" },
+          "7": { "height": 7.0, "source": "GB/T 50001 图纸字高名义系列" },
+          "10": { "height": 10.0, "source": "GB/T 50001 图纸字高名义系列" },
+          "14": { "height": 14.0, "source": "GB/T 50001 图纸字高名义系列" },
+          "20": { "height": 20.0, "source": "GB/T 50001 图纸字高名义系列" }
+        },
+        "line_width_groups": {
+          "_source": "GB/T 50001 线宽组 — b, 0.7b, 0.5b, 0.35b",
+          "_note": "Deliberately empty. No line width here has been read off the standard, and a table nobody has transcribed must refuse by name ('not transcribed') rather than be interpolated or recalled. Transcribe the office's own b-series into its project standards file and these rows are overridden; until then every lookup in this table fails by name, on purpose."
+        },
+        "scales": {
+          "_see": "sheet.SCALES",
+          "_source": "GB/T 50001 比例系列",
+          "_note": "A pointer, not a copy. sheet.SCALES is the one list of ratios this package plots from, and a second copy here would be a second thing to keep in step — so Standard.scales returns that list rather than this table."
+        },
+        "title_block": {
+          "_source": "GB/T 10609.1 标题栏. These are this package's defaults for a Chinese architectural sheet; a drawing office has its own, the same way it has its own layers.",
+          "title_block": {
+            "width": 180.0,
+            "height": 56.0,
+            "rows": 4,
+            "text_height": 5.0,
+            "source": "GB/T 10609.1; mirrors sheet.TITLE_BLOCK_WIDTH / _HEIGHT / _ROWS / _TEXT"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -24,6 +24,7 @@ from typing import Any
 from ..acad_plugin_client import PluginClient
 from ..geom import Point
 from ..journal import StepRecord
+from ..standards import lineweight_centimm
 from .base import BackendError
 from .recording import RecordingBackend
 
@@ -94,14 +95,27 @@ class PluginBackend(RecordingBackend):
     # --- document ----------------------------------------------------------
 
     def ensure_layer(
-        self, name: str, color: int | None = None, linetype: str | None = None
+        self,
+        name: str,
+        color: int | None = None,
+        linetype: str | None = None,
+        lineweight: float | None = None,
     ) -> dict[str, Any]:
         # Cached on this side as well: ops call this once per layer per op, and the
         # answer cannot change within one drawing session. Call forget_layers()
         # when the active drawing changes, or the cache describes the wrong file.
         if name in self._layers_seen:
             return {"layer": name, "created": False}
-        result = self.client.call("ensure_layer", layer=name, color=color, linetype=linetype)
+        # The width crosses in millimetres — the unit every caller here speaks — and the plugin
+        # writes it in AutoCAD's own 1/100 mm. `lineweight_centimm` runs on this side so a width
+        # outside AutoCAD's list is refused here, with a readable message, rather than by a cast
+        # inside AutoCAD; and the value that crosses is exactly a hundredth, so the plugin's own
+        # rounding cannot land on a different one. A field an older plugin does not know is
+        # ignored, so this needs no version dance.
+        width = None if lineweight is None else lineweight_centimm(lineweight) / 100.0
+        result = self.client.call(
+            "ensure_layer", layer=name, color=color, linetype=linetype, lineweight=width
+        )
         self._layers_seen.add(name)
         return result
 

@@ -31,7 +31,18 @@ internal static class DrawingApi
         return new JsonObject { ["document"] = document.Name };
     }
 
-    public static JsonObject EnsureLayer(Document document, string name, int? color, string? linetype)
+    /// <summary>Create the named layer, or leave the existing one as it is.</summary>
+    /// <param name="lineweight">
+    /// A line weight in millimetres, or null to leave the layer's own alone. Millimetres
+    /// because that is the unit the drawing's standard is written in; the layer record
+    /// takes AutoCAD's own 1/100 mm, so the conversion happens here.
+    /// </param>
+    /// <remarks>
+    /// A width and not a number of hundredths: a caller that meant 0.7 mm and was taken to
+    /// mean 0.7 hundredths would get a hairline, and nothing downstream could tell.
+    /// </remarks>
+    public static JsonObject EnsureLayer(
+        Document document, string name, int? color, string? linetype, double? lineweight = null)
     {
         var wantsLinetype = !string.IsNullOrWhiteSpace(linetype) && linetype != "CONTINUOUS";
 
@@ -73,6 +84,13 @@ internal static class DrawingApi
                 var record = (LayerTableRecord)tr.GetObject(table[name], OpenMode.ForWrite);
                 record.LinetypeObjectId = linetypes[linetype];
             }
+        }
+        if (lineweight is { } mm)
+        {
+            var record = (LayerTableRecord)tr.GetObject(table[name], OpenMode.ForWrite);
+            // Rounded, not cast: 0.35 mm is 34.999999999999996 as an IEEE double, and a cast
+            // would make it 34 — a line a hundredth off the one the standard asked for.
+            record.LineWeight = (LineWeight)(int)Math.Round(mm * 100.0);
         }
 
         tr.Commit();

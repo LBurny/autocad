@@ -23,6 +23,7 @@ from typing import Any
 
 from ..geom import Point, left_normal, sub, unit, xy
 from ..journal import Journal
+from ..standards import lineweight_centimm
 from .base import BackendError
 from .recording import RecordingBackend, unflatten_points
 
@@ -373,7 +374,13 @@ class ComBackend(RecordingBackend):
         return journal is not None
 
     # --- document ----------------------------------------------------------
-    def ensure_layer(self, name: str, color: int | None = None, linetype: str | None = None) -> Any:
+    def ensure_layer(
+        self,
+        name: str,
+        color: int | None = None,
+        linetype: str | None = None,
+        lineweight: float | None = None,
+    ) -> Any:
         try:
             layer = _call(lambda: self.doc.Layers.Item(name))
         except Exception:  # noqa: BLE001 - a missing layer raises a bare COM error
@@ -387,6 +394,13 @@ class ComBackend(RecordingBackend):
                 _call(lambda: self.doc.Linetypes.Load(linetype, "acad.lin"))
             with contextlib.suppress(Exception):
                 _call(setattr, layer, "Linetype", linetype)
+        if lineweight is not None:
+            # Converted before the suppression, so a caller handing over a bad width hears
+            # about it instead of losing the layer to a swallowed ValueError. The property
+            # takes the same 1/100 mm DXF group 370 does.
+            centimm = lineweight_centimm(lineweight)
+            with contextlib.suppress(Exception):
+                _call(setattr, layer, "Lineweight", centimm)
         return layer
 
     def set_units_mm(self) -> None:

@@ -292,7 +292,8 @@ public sealed class RpcServer : IDisposable
 
             case "ensure_layer":
                 return DrawingApi.EnsureLayer(
-                    document, Str(p, "layer", "0"), NullableInt(p, "color"), Str(p, "linetype"));
+                    document, Str(p, "layer", "0"), NullableInt(p, "color"), Str(p, "linetype"),
+                    NullableDouble(p, "lineweight"));
 
             case "blocks":
             {
@@ -472,6 +473,9 @@ public sealed class RpcServer : IDisposable
         p[key] is JsonValue v && v.TryGetValue<double>(out var d) && !double.IsNaN(d)
             ? (int)d
             : null;
+
+    private static double? NullableDouble(JsonObject p, string key) =>
+        p[key] is JsonValue v && v.TryGetValue<double>(out var d) && !double.IsNaN(d) ? d : null;
 
     private static bool Bool(JsonObject p, string key, bool fallback = false) =>
         p[key] is JsonValue v && v.TryGetValue<bool>(out var b) ? b : fallback;

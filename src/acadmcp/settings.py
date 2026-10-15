@@ -9,6 +9,10 @@ Settings are found by walking up from the working directory, so a project's file
 to every drawing inside it. Loading never raises, for the same reason the catalogue's does
 not: a broken settings file must not be the end of the drawing session, it must be a line
 in the report.
+
+Alongside the layer overrides it names the project's own standards files — GB/T tables with
+sources, merged row by row over the package's standard — because a drawing office's standard
+is no more this package's to decide than its blocks are.
 """
 
 from __future__ import annotations
@@ -34,12 +38,17 @@ class Settings:
         library: str = "",
         catalogs: list[str] | None = None,
         layers: dict[str, tuple[int, str]] | None = None,
+        standards: list[str] | None = None,
         source: Path | None = None,
         skipped: list[str] | None = None,
     ) -> None:
         self.library = library
         self.catalogs = list(catalogs or [])
         self.layers = dict(layers or {})
+        #: The project's own standards files, merged over the package's standard row by row —
+        #: the same precedence the catalogue files get, because a drawing office's standard is
+        #: no more this package's to decide than its blocks are.
+        self.standards = list(standards or [])
         self.source = source
         self.skipped = list(skipped or [])
 
@@ -53,6 +62,7 @@ class Settings:
             "library": self.library,
             "catalogs": list(self.catalogs),
             "layers": {name: list(spec) for name, spec in self.layers.items()},
+            "standards": list(self.standards),
             "skipped": list(self.skipped),
         }
 
@@ -98,6 +108,12 @@ def load(path: Path | None = None) -> Settings:
     if isinstance(catalogs, str):
         catalogs = [catalogs]
 
+    # The project's own standards, read exactly like its catalogue files: relative to the file
+    # that named them, because that is the one path nobody wants to commit an absolute form of.
+    standards = payload.get("standards") or payload.get("standard") or []
+    if isinstance(standards, str):
+        standards = [standards]
+
     layers: dict[str, tuple[int, str]] = {}
     raw_layers = payload.get("layers") or {}
     if isinstance(raw_layers, dict):
@@ -121,6 +137,10 @@ def load(path: Path | None = None) -> Settings:
             for name in catalogs
         ],
         layers=layers,
+        standards=[
+            str(Path(str(path)).parent / name) if not Path(name).is_absolute() else name
+            for name in standards
+        ],
         source=Path(path),
         skipped=skipped,
     )
@@ -135,12 +155,18 @@ def current() -> Settings:
 
 
 def reset() -> None:
-    """Forget the loaded settings, and the catalogue that was built from them."""
+    """Forget the loaded settings, and what was built from them.
+
+    The standards cache is dropped as well as the catalogue's, and for the same reason: both
+    are resolved through this file, so a settings change that left them standing would report
+    the previous project's standard.
+    """
     global _current
     _current = None
-    from . import catalog
+    from . import catalog, standards
 
     catalog.reset()
+    standards.reset()
 
 
 _current: Settings | None = None

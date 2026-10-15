@@ -23,6 +23,7 @@ from .. import layers, sheet
 from ..catalog import Catalog
 from ..geom import Point, xy
 from ..journal import Journal
+from ..standards import lineweight_centimm
 from .base import BackendError
 from .recording import RecordingBackend, flatten_points, unflatten_points
 
@@ -356,7 +357,13 @@ class DxfBackend(RecordingBackend):
             d["linetype"] = linetype
         return d
 
-    def ensure_layer(self, name: str, color: int | None = None, linetype: str | None = None) -> Any:
+    def ensure_layer(
+        self,
+        name: str,
+        color: int | None = None,
+        linetype: str | None = None,
+        lineweight: float | None = None,
+    ) -> Any:
         layer = self.doc.layers.get(name) if name in self.doc.layers else self.doc.layers.add(name)
         if color is not None:
             layer.color = int(color)
@@ -364,6 +371,10 @@ class DxfBackend(RecordingBackend):
             if linetype not in self.doc.linetypes:
                 self.doc.linetypes.add(linetype, pattern=[0.5, 0.25, -0.25])
             layer.dxf.linetype = linetype
+        if lineweight is not None:
+            # DXF group 370 counts 1/100 mm, and so does AutoCAD's own line-weight list. The
+            # conversion lives in one place so this driver and the live one cannot differ.
+            layer.dxf.lineweight = lineweight_centimm(lineweight)
         return layer
 
     def set_units_mm(self) -> None:

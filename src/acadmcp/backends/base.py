@@ -53,8 +53,22 @@ class Backend(Protocol):
 
     # --- layers & document -------------------------------------------------
     def ensure_layer(
-        self, name: str, color: int | None = None, linetype: str | None = None
-    ) -> Any: ...
+        self,
+        name: str,
+        color: int | None = None,
+        linetype: str | None = None,
+        lineweight: float | None = None,
+    ) -> Any:
+        """Create the named layer, or leave the existing one alone — safe to repeat.
+
+        `lineweight` is a width in **millimetres** — the GB/T line-width groups a layer
+        standard is half made of — and it is optional, because a layer with no width set draws
+        ByLayer, which is what every layer this package drew before the standard became data.
+        It goes on the wire and into the file in AutoCAD's own 1/100 mm unit, through
+        :func:`acadmcp.standards.lineweight_centimm`, so the three drivers cannot disagree
+        about what 0.7 mm is.
+        """
+        ...
 
     def set_units_mm(self) -> None: ...
 
