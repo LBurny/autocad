@@ -42,21 +42,49 @@ running. See [docs/plugin.md](docs/plugin.md).
 uv sync --extra preview      # matplotlib, needed for any PNG output
 ```
 
-Register the server with your MCP client. In ZCode's `config.json`:
+Register the server with your MCP client. The entry is the same stdio command
+everywhere, `uv --directory /path/to/AutoCAD-MCP run acadmcp`, so only the file
+and the key it goes under differ.
+
+Claude Code, in the project's `.mcp.json` (or through `claude mcp add`):
 
 ```json
 {
-  "mcp": {
-    "servers": {
-      "acadmcp": {
-        "type": "stdio",
-        "command": "uv",
-        "args": ["--directory", "/path/to/AutoCAD-MCP", "run", "acadmcp"]
-      }
+  "mcpServers": {
+    "acadmcp": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["--directory", "/path/to/AutoCAD-MCP", "run", "acadmcp"]
     }
   }
 }
 ```
+
+Codex, in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.acadmcp]
+type = "stdio"
+command = "uv"
+args = ["--directory", "/path/to/AutoCAD-MCP", "run", "acadmcp"]
+```
+
+OpenCode, in `opencode.json`:
+
+```json
+{
+  "mcp": {
+    "acadmcp": {
+      "type": "local",
+      "command": ["uv", "--directory", "/path/to/AutoCAD-MCP", "run", "acadmcp"],
+      "enabled": true
+    }
+  }
+}
+```
+
+ZCode and every other client that speaks stdio MCP take the same entry under
+their own key.
 
 ## Try it without an AI client
 
