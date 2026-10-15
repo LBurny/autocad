@@ -29,7 +29,7 @@ except ImportError:  # pragma: no cover - mcp 1.x
 
 from mcp.types import ToolAnnotations
 
-from . import catalog, geom, layers, ops, settings
+from . import catalog, geom, layers, ops, settings, summary
 from .acad_plugin_client import PluginClient, PluginError, PluginUnavailable
 from .backends import make_backend
 from .backends.base import Backend, BackendError
@@ -81,6 +81,7 @@ class _Session:
             self.backend = make_backend("dxf")
             self.kind = "dxf"
             ops.setup_layers(self.backend)
+            _stamp_catalog(self.backend)
         return self.backend
 
     def reset(self, backend: Backend, kind: str) -> None:
@@ -89,6 +90,86 @@ class _Session:
 
 
 _state = _Session()
+
+
+# ---------------------------------------------------------------------------
+# the catalogue a drawing remembers
+# ---------------------------------------------------------------------------
+#
+# The catalogue is ambient — a package file plus whichever project acadmcp.json is found
+# by walking up from the working directory — so the same drawing reopened elsewhere would
+# resolve its doors against something else. The identity (entries and all) is stamped into
+# the journal where a drawing begins, so the drawing says what drew it, and reported back.
+
+
+def _stamp_catalog(be: Backend, loaded: Any = None) -> None:
+    """Record which catalogue this drawing is being drawn with.
+
+    A backend without `note_catalog` is left alone rather than made to grow one, and a
+    backend that journals elsewhere (the plugin keeps its journal in the DWG) accepts the
+    stamp on its local Journal without harm.
+    """
+    note = getattr(be, "note_catalog", None)
+    if note is None:
+        return
+    note(loaded if loaded is not None else catalog.current())
+
+
+def _recorded_catalog(be: Backend) -> dict[str, Any] | None:
+    """The catalogue identity a drawing recorded, read straight off its journal, or None.
+
+    Read off the journal rather than through `drawing_catalog()` because this is called on
+    every drawing call (to see whether a stamp is still needed) and must not hash the
+    loaded catalogue to answer a yes/no question.
+    """
+    meta = getattr(getattr(be, "journal", None), "meta", None)
+    if not isinstance(meta, dict):
+        return None
+    recorded = meta.get("catalog")
+    return recorded if isinstance(recorded, dict) else None
+
+
+def _ensure_catalog_stamp(be: Backend) -> None:
+    """Stamp the catalogue the first time a drawing is touched, and not again per call."""
+    if _recorded_catalog(be) is None:
+        _stamp_catalog(be)
+
+
+def _adopt_catalog(be: Backend) -> tuple[Any, bool, dict[str, Any]]:
+    """Choose the catalogue a drawing about to be edited resolves its elements against.
+
+    Precedence is the plan's and it is a decision, not an accident: a project's own files
+    win, then the copy embedded in the drawing, then the package's starter. The local
+    standard is the authority — a drawing from another office must not silently redraw its
+    doors with this office's blocks — but any difference is *reported*, never hidden.
+
+    Returns the chosen catalogue, whether it still needs stamping, and the report keys.
+    """
+    project = list(settings.current().catalogs or [])
+    getter = getattr(be, "embedded_catalog", None)
+    embedded = getter() if getter is not None else None
+    if project:
+        chosen, source, stamp = catalog.current(), "project", True
+    elif embedded is not None and embedded.elements:
+        # No local standard, so the copy the drawing carries beats the package starter —
+        # and it is already recorded in the drawing verbatim, so it needs no re-stamp.
+        chosen, source, stamp = catalog.use(embedded), "drawing", False
+    else:
+        chosen, source, stamp = catalog.current(), "package", True
+
+    out: dict[str, Any] = {"catalog_source": source}
+    recorded = _recorded_catalog(be)
+    if (
+        isinstance(recorded, dict)
+        and recorded.get("digest")
+        and recorded["digest"] != chosen.digest()
+    ):
+        out["catalog_warning"] = (
+            "this drawing was drawn with a different catalogue "
+            f"({recorded.get('count')} elements, {recorded.get('library') or 'no library'}); "
+            f"the {source} catalogue wins, but the elements may not be the ones it was drawn with"
+        )
+    return chosen, stamp, out
 
 
 @contextlib.contextmanager
@@ -104,6 +185,7 @@ def _auto_step(op: str, params: dict[str, Any], label: str | None = None) -> Ite
     in the params.
     """
     be = _state.require()
+    _ensure_catalog_stamp(be)
     stepper = getattr(be, "step", None)
     if stepper is None or getattr(be, "open_step", ""):
         yield be
@@ -174,11 +256,32 @@ def drawing_help() -> dict[str, Any]:
             "prefix for each element; a project adds its own via acadmcp.json",
             "tags": "numbered from the tags already in the drawing, never from a stored counter",
         },
+        "choosing_a_tool": {
+            "catalogue_or_parametric": (
+                "A catalogue element is a specific named artefact — a model number, a "
+                "schedule row, a standard section — and it is placed with place_element. "
+                "Everything whose identity is just numbers you already have (a wall, a "
+                "room, a column by size, a lift shaft by its corners) is drawn by its own "
+                "tool. place_element also draws parametric twins where the library cannot "
+                "be inserted, so one element name works on every backend."
+            ),
+            "checking_your_work": (
+                "drawing_summary first — rooms, areas, openings and counts as data. "
+                "drawing_history is what was drawn, one line per step. "
+                "drawing_screenshot last, and pass `window` to frame a detail."
+            ),
+            "recovering": (
+                "Every tool call is one journal step: drawing_undo(count) or "
+                "drawing_rollback_to(index) takes back exactly what was drawn, and "
+                "drawing_history gives the indices to aim at."
+            ),
+        },
         "conventions": {
             "layers": sorted(settings.current().layers or layers.LAYERS),
             "room_area": "computed from the wall centreline ring minus half a wall thickness",
             "angles": "degrees, counter-clockwise from +X",
             "door_swing": "'left' or 'right' relative to the wall direction",
+            "units": "millimetres everywhere — a metres-valued call is refused, not drawn",
         },
     }
 
@@ -190,9 +293,24 @@ def drawing_status() -> dict[str, Any]:
     `entities` is what is in the drawing now; `ops` is a cumulative count of
     draw calls since connect and does not go down on undo, so ops > entities
     just means steps were taken back.
+
+    `catalog` is the catalogue in force now, `drawing_catalog` is what the drawing itself
+    recorded (and whether the two disagree), and on the com backend `sidecar` names the
+    file a session's journal was written to beside the drawing.
     """
     be = _state.require()
-    return _state.backend.info() if _state.backend else be.info()
+    out = dict(be.info())
+    loaded = catalog.current()
+    out["catalog"] = {
+        "count": len(loaded.elements),
+        "digest": loaded.digest(),
+        "library": settings.current().library,
+        "skipped": list(loaded.skipped),
+    }
+    recorder = getattr(be, "drawing_catalog", None)
+    if recorder is not None:
+        out["drawing_catalog"] = recorder()
+    return out
 
 
 @mcp.tool(annotations=_DESTRUCTIVE)
@@ -226,6 +344,7 @@ def drawing_new(backend: str = "dxf", path: str | None = None) -> dict[str, Any]
         raise BackendError(f"unknown backend {backend!r}; expected 'dxf', 'com' or 'plugin'")
     _state.reset(be, kind)
     ops.setup_layers(be)
+    _stamp_catalog(be)
     return {"ok": True, **be.info(), **_switch_note(dropped)}
 
 
@@ -235,11 +354,19 @@ def drawing_open(path: str) -> dict[str, Any]:
 
     Opening replaces the session's current drawing; when that one had content,
     the reply carries a `note` saying so.
+
+    The catalogue to draw with is chosen in order: the project's own catalogue files, then
+    the copy embedded in the drawing, then the package's starter. A difference between the
+    two is reported (`catalog_warning`), not hidden — the local standard wins, but the
+    elements may not be the ones the drawing was drawn with.
     """
     dropped = _session_drawing()
     be = make_backend("dxf", path=path)
     _state.reset(be, "dxf")
-    return {"ok": True, **be.info(), **_switch_note(dropped)}
+    chosen, stamp, provenance = _adopt_catalog(be)
+    if stamp:
+        _stamp_catalog(be, chosen)
+    return {"ok": True, **be.info(), **provenance, **_switch_note(dropped)}
 
 
 @mcp.tool(annotations=_DESTRUCTIVE_IDEMPOTENT)
@@ -334,9 +461,25 @@ def drawing_save(path: str | None = None) -> dict[str, Any]:
 
     On the com backend this saves through AutoCAD, and saving a live drawing to
     .dwg renames that document — pass a .dxf path for a non-destructive copy.
+
+    A save stamps the catalogue that drew the drawing into the journal. On the com backend
+    AutoCAD cannot store the journal inside the .dwg, so it is written to a sidecar file
+    beside the drawing — the reply names it, because a file appearing next to somebody's
+    drawing unannounced is not acceptable.
     """
     be = _state.require()
-    return {"ok": True, "path": be.save(path)}
+    _stamp_catalog(be)
+    saved = be.save(path)
+    out: dict[str, Any] = {"ok": True, "path": saved}
+    sidecar = getattr(be, "sidecar_path", None)
+    if sidecar:
+        out["sidecar"] = str(sidecar)
+        out["note"] = (
+            "the step journal and the catalogue identity were also written to "
+            f"{sidecar} — AutoCAD cannot store them inside the .dwg, so a com session's "
+            "undo history lives in that sidecar file beside the drawing"
+        )
+    return out
 
 
 @mcp.tool(annotations=_DESTRUCTIVE)
@@ -370,12 +513,53 @@ def drawing_history() -> dict[str, Any]:
 
     Read this to know the drawing's state before deciding what to undo or add;
     reach for drawing_screenshot only when the geometry itself needs eyeballing.
+
+    `rendered` is the text a person reads; `steps` is the same history as machine-readable
+    rows (index, op, label, params, state), so an agent can pick an index to aim
+    drawing_rollback_to at without counting.
     """
     be = _state.require()
     history = getattr(be, "history", None)
     if history is None:
         raise BackendError(f"backend {be.name!r} keeps no journal")
-    return {"ok": True, "backend": be.name, "rendered": history()}
+    rows = getattr(be, "step_rows", None)
+    return {
+        "ok": True,
+        "backend": be.name,
+        "rendered": history(),
+        "steps": rows() if rows is not None else [],
+    }
+
+
+@mcp.tool(annotations=_READONLY)
+def drawing_summary() -> dict[str, Any]:
+    """What the drawing contains, as data: rooms with areas, openings, elements, layers.
+
+    Derived from the journal, which records each step's op and arguments, so it needs no
+    screen and survives a reopen on the headless backend. Read this before a screenshot:
+    it answers "how many doors, what sizes, what is the floor area" exactly, and a
+    screenshot cannot answer it at all.
+    """
+    be = _state.require()
+    return {"ok": True, **summary.summarise(be.step_rows(), catalog=_recorded_catalog(be))}
+
+
+@mcp.tool(annotations=_DESTRUCTIVE)
+def drawing_rollback_to(index: int) -> dict[str, Any]:
+    """Erase everything drawn after step `index`, newest first.
+
+    Aim the undo at a step instead of counting: `drawing_history` lists the steps, so you
+    can name the one you want standing. Index 0 is before the first step, which empties the
+    drawing. On the plugin backend the DWG's own journal performs the rollback, so the
+    palette and this call never disagree — but an *accepted* step blocks a rollback, and
+    that refusal is reported rather than swallowed; override it explicitly with
+    step_control(action='rollback_to', index=..., force=True).
+    """
+    be = _state.require()
+    rollback = getattr(be, "rollback_to", None)
+    if rollback is None:
+        raise BackendError(f"backend {be.name!r} keeps no journal; nothing can be rolled back")
+    return {"ok": True, **rollback(int(index))}
 
 
 @mcp.tool(annotations=_DESTRUCTIVE)
@@ -1102,19 +1286,65 @@ def _entry(key: str) -> Element:
     return element
 
 
-def _placed(be: PluginBackend, op: str, label: str, params: dict[str, Any], work: Any) -> dict:
-    """Run one placement call as a single step, the way drawing through the plugin works."""
-    be.begin_step(op, label=label, params=params)
+def _placement_backend() -> Backend:
+    """The drawing a placement acts on, refused rather than assumed when there is none.
+
+    The primitive tools start a scratch DXF when nothing is open, because a stray line has
+    nowhere else to go. A placement is a different question: which half of the catalogue
+    entry reaches the paper — the library block or its parametric twin — and what the
+    reply's step and journal look like both depend on the backend, so the backend is the
+    caller's to name rather than one to invent on its behalf.
+    """
+    be = _state.backend
+    if be is None:
+        raise BackendError(
+            "no drawing is open, so there is nowhere to place this element; start one with "
+            "drawing_new(backend='dxf') to write a plan headless, or call "
+            "acad_connect(mode='plugin') to place it into AutoCAD"
+        )
+    return be
+
+
+def _placed(be: Backend, op: str, label: str, params: dict[str, Any], work: Any) -> dict:
+    """Run one placement call as a single step, on whichever backend is active.
+
+    The two journal owners answer differently and that is deliberate: the plugin's commit
+    replies with its own record of the step (the DWG journal is the source of truth there),
+    while a local journal commits to a `StepRecord`. Both are flattened to the same keys, so
+    a caller does not have to know which backend it is talking to — which is what lets one
+    element name be placed headless and replayed into AutoCAD.
+
+    An explicit step (step_begin) is not this call's to close, so when one is open the work
+    is recorded into it and nothing commits; the same rule `_auto_step` follows.
+    """
+    begin = getattr(be, "begin_step", None)
+    if begin is None or getattr(be, "open_step", ""):
+        summary = work()
+        return {"ok": True, **(summary if isinstance(summary, dict) else {})}
+    _ensure_catalog_stamp(be)
+    begin(op, label=label, params=params)
     try:
         summary = work()
     except BaseException:
         be.abort_step()
         raise
-    outcome = _outcome(be.commit_step(), "apply")
-    return {**outcome, **summary} if isinstance(summary, dict) else outcome
+    committed = be.commit_step()
+    if isinstance(committed, dict):
+        outcome = _outcome(committed, "apply")
+    else:
+        outcome = {
+            "ok": True,
+            "action": "commit",
+            "message": "",
+            "touched": [],
+            "step": {"index": committed.index, "op": committed.op, "label": committed.label},
+            "refusal": None,
+            "journal": dict(be.info().get("journal", {})),
+        }
+    return {**outcome, **(summary if isinstance(summary, dict) else {})}
 
 
-def _placement(be: PluginBackend, op: str, label: str, params: dict[str, Any], work: Any) -> dict:
+def _placement(be: Backend, op: str, label: str, params: dict[str, Any], work: Any) -> dict:
     """Like `_placed`, but a bad catalogue argument comes back as a refusal to the caller.
 
     A variant name that does not exist is a caller's mistake, not a drawing failure, and the
@@ -1345,6 +1575,14 @@ def element_types(category: str | None = None, check_library: bool = True) -> di
         problems = _check_catalog(loaded)
         out["problems"] = problems
         out["matches_library"] = not problems
+        if any("not reachable" in problem for problem in problems):
+            # "could not check" is not "fine", and `placement` is not what the check was
+            # about: it says how each entry can be drawn, which is a fact about the entry,
+            # not about the backend this session happens to be on.
+            out["placement_note"] = (
+                "the library could not be checked, but `placement` is a property of each "
+                "catalogue entry, not of the active backend"
+            )
     return out
 
 
@@ -1379,20 +1617,24 @@ def place_element(
     tag: bool = True,
     tag_offset: float | None = None,
 ) -> dict[str, Any]:
-    """Place one catalogue element from the library, as a single step.
+    """Place one catalogue element, as a single step, on whatever backend is active.
 
-    The block's definition is imported into the drawing if it is not there yet, and the
-    reference is placed at `at`. `variant` picks a size from the catalogue ("900" for a
-    900 mm door) and `params` overrides individual dynamic properties on top. With
-    tag=True the next free tag number is derived from the tags already in the drawing —
-    numbers are never stored, so a tag added by hand cannot desynchronise them.
+    Where the backend can insert library blocks — the plugin — the block's definition is
+    imported into the drawing if it is not there yet and the reference is placed at `at`.
+    Everywhere else the entry's parametric twin is drawn instead, so the same element name
+    works headless: a plan can be written in DXF with no AutoCAD, then replayed into it.
+
+    `variant` picks a size from the catalogue ("900" for a 900 mm door) and `params`
+    overrides individual properties on top. With tag=True the next free tag number is
+    derived from the tags already in the drawing — numbers are never stored, so a tag
+    added by hand cannot desynchronise them.
     """
-    be = _require_plugin()
+    be = _placement_backend()
     element = _entry(type)
 
-    def work() -> list[Any]:
+    def work() -> dict[str, Any]:
         tags = ops._numbering(be, element, 1) if tag else []
-        return ops.place_element(
+        ops.place_element(
             be,
             element,
             geom.xy(at),
@@ -1403,6 +1645,7 @@ def place_element(
             tag=tags[0] if tags else None,
             tag_offset=tag_offset,
         )
+        return {"placed": 1}
 
     return _placement(
         be,
@@ -1433,7 +1676,7 @@ def place_along(
     a corner. `rotation` defaults to the direction of the run, so a row of doors lies in
     the wall rather than all facing the same way.
     """
-    be = _require_plugin()
+    be = _placement_backend()
     element = _entry(type)
     return _placement(
         be,
@@ -1477,7 +1720,7 @@ def place_grid(
     A frame of columns is dimensioned to its axis positions, so those are what this takes:
     the same `xs` and `ys` the axis grid was drawn to.
     """
-    be = _require_plugin()
+    be = _placement_backend()
     element = _entry(type)
     return _placement(
         be,

@@ -158,3 +158,39 @@ def test_a_comfortable_room_keeps_the_standard_label_height():
         e.dxf.height for e in be.msp if e.dxftype() == "TEXT" and e.dxf.layer == "A-ROOM-NAME"
     ]
     assert heights[0] == layers.H_ROOM_NAME
+
+
+def test_a_room_given_in_metres_is_refused_with_the_reason():
+    """A client that passes metres used to draw a 4 mm room and get `ok: true`, and an
+    AI that cannot see the drawing had no way to tell. The refusal has to name the value
+    and the likely unit, or it cannot correct itself from the message alone."""
+    with pytest.raises(BackendError) as caught:
+        _tool("draw_room")(boundary=[[0, 0], [4, 0], [4, 3], [0, 3]], name="会议室", thickness=0.2)
+    text = str(caught.value)
+    assert "0.2" in text and "millimetre" in text
+
+
+def test_a_metre_ring_with_a_plausible_thickness_is_still_refused():
+    """The thickness is not the only place a unit slip shows: a ring in metres with an
+    ordinary 200 mm wall still measures a few mm across inside, which is the number the
+    area is measured to and the one a metres-valued boundary destroys."""
+    with pytest.raises(BackendError) as caught:
+        _tool("draw_room")(boundary=[[0, 0], [4, 0], [4, 3], [0, 3]], name="会议室")
+    text = str(caught.value)
+    assert "inner width" in text and "millimetre" in text
+
+
+def test_a_millimetre_room_still_draws():
+    out = _tool("draw_room")(boundary=[[0, 0], [4000, 0], [4000, 3000], [0, 3000]], name="会议室")
+    assert out["ok"] and out["area_m2"] > 0
+
+
+def test_a_column_smaller_than_a_stud_is_refused():
+    with pytest.raises(BackendError) as caught:
+        _tool("draw_column")(center=[0, 0], size=0.6)
+    assert "millimetre" in str(caught.value)
+
+
+def test_a_wall_too_thin_to_draw_is_refused():
+    with pytest.raises(BackendError):
+        _tool("draw_wall")(points=[[0, 0], [5000, 0]], thickness=0.2)

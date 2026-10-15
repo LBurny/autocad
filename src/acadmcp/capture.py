@@ -3,11 +3,22 @@
 The live-AutoCAD backend has no way to hand back a rendered image through COM, so
 it photographs the AutoCAD window instead. That has the side benefit of showing
 exactly what the user sees — including the current zoom, view and any UI state.
+
+What a window capture cannot do is photograph a *minimised* window: Windows
+reports a small off-screen stub rect for one, so there is nothing to render. The
+only way to get a picture would be to bring the window back to the front, on top
+of whatever the user is doing — which is what this module used to do, and it made
+the tool unusable for someone driving AutoCAD from a background session while
+working in another application. A caller that can obtain the picture another way
+must do that instead; `ComBackend` asks AutoCAD to export the drawing.
+
+Occlusion is *not* a problem: `PrintWindow` renders the window's own content, so
+a window behind others captures exactly as it does in front (measured: mean pixel
+45.33 in front, 45.34 behind).
 """
 
 from __future__ import annotations
 
-import time
 from pathlib import Path
 
 from .backends.base import BackendError
@@ -16,12 +27,17 @@ from .backends.base import BackendError
 #: through DirectX, and without this flag the capture comes back solid black.
 PW_RENDERFULLCONTENT = 2
 
-#: How long to let a restored window settle before capturing it.
-RESTORE_SETTLE_S = 0.6
-
 #: AutoCAD's main frame window class. Matched instead of the title, which carries
 #: the drawing name and the product year — neither of which this should care about.
 FRAME_CLASS_PREFIX = "AfxMDIFrame"
+
+
+class WindowUnavailable(BackendError):
+    """The window cannot be photographed without disturbing the user.
+
+    Raised rather than worked around, so the caller decides what to do instead:
+    `ComBackend` exports the drawing and renders that.
+    """
 
 
 def find_autocad_window() -> int:
@@ -70,14 +86,14 @@ def find_window_by_title(fragment: str) -> int:
 def capture_window(hwnd: int, path: str) -> str:
     """Save a PNG of the window `hwnd` to `path` and return the path.
 
-    A minimised window is restored first: there is nothing to render while it is
-    down, and a caller asking for a picture of a window cannot act on advice to
-    put it back up itself.
+    Raises `WindowUnavailable` when the window is minimised. Deliberately not
+    restored first: a minimised AutoCAD has nothing to render, and bringing it
+    back would cover whatever the user moved on to — an AI driving AutoCAD in the
+    background must not rearrange the screen to take a picture.
     """
     try:
         from ctypes import windll
 
-        import win32con
         import win32gui
         import win32ui
         from PIL import Image
@@ -87,17 +103,15 @@ def capture_window(hwnd: int, path: str) -> str:
         ) from exc
 
     if win32gui.IsIconic(hwnd):
-        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-        # The window manager needs a moment before the window has a drawable
-        # rect and the application has repainted into it.
-        time.sleep(RESTORE_SETTLE_S)
-        if win32gui.IsIconic(hwnd):
-            raise BackendError(f"window {hwnd} is minimised and would not restore")
+        raise WindowUnavailable(
+            "the AutoCAD window is minimised, so it has no drawable area; "
+            "restore it, or let the backend export the drawing instead"
+        )
 
     left, top, right, bottom = win32gui.GetWindowRect(hwnd)
     width, height = right - left, bottom - top
     if width <= 0 or height <= 0:
-        raise BackendError(f"window {hwnd} has no drawable area ({width}x{height})")
+        raise WindowUnavailable(f"window {hwnd} has no drawable area ({width}x{height})")
 
     window_dc = win32gui.GetWindowDC(hwnd)
     src_dc = win32ui.CreateDCFromHandle(window_dc)

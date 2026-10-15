@@ -154,6 +154,23 @@ def line_intersection(a1: Point, a2: Point, b1: Point, b2: Point) -> Vec | None:
     return (a1[0] + d1[0] * t, a1[1] + d1[1] * t)
 
 
+def plausible(value: float, what: str, low: float, high: float) -> float:
+    """A millimetre dimension, or a refusal that names the likely slip.
+
+    Everything here is millimetres, and a client that passes metres draws a 4 mm room and
+    is told it succeeded. The bounds are deliberately wide: they are here to catch a unit
+    slip, not to police a design, and a guard that refuses a 300 mm partition would be
+    worse than no guard at all.
+    """
+    number = float(value)
+    if low <= number <= high:
+        return number
+    raise ValueError(
+        f"{what} is {number} mm, outside the {low:g}-{high:g} mm this package draws in; "
+        "everything is millimetres — if this was metres, multiply by 1000"
+    )
+
+
 def ring_self_intersects(points: Sequence[Point]) -> bool:
     """True when the closed ring crosses or touches itself.
 

@@ -31,6 +31,12 @@ class BackendError(_ToolError, RuntimeError):
 class Backend(Protocol):
     name: str
 
+    #: Whether this backend can place a library block reference at all. Declared rather than
+    #: probed: inside a step the `dxf` and `com` refusals are deferred to the commit, so a
+    #: caller cannot find out by trying, and which half of a catalogue entry to draw has to
+    #: be decided before anything is drawn.
+    supports_insert: bool
+
     # --- layers & document -------------------------------------------------
     def ensure_layer(
         self, name: str, color: int | None = None, linetype: str | None = None
@@ -55,6 +61,26 @@ class Backend(Protocol):
     def info(self) -> dict[str, Any]: ...
 
     def entities(self, layer: str | None = None, limit: int = 200) -> list[dict]: ...
+
+    def step_rows(self) -> list[dict[str, Any]]:
+        """The journal as rows: ``index``, ``op``, ``label``, ``params``, ``state`` and an
+        entity count.
+
+        The shape the plugin already reports its steps in, so a read-back written once
+        reads every backend. `RecordingBackend` maps its own :class:`StepRecord`\\ s;
+        `PluginBackend` asks the DWG over RPC, because there the DWG is the journal.
+        """
+        ...
+
+    def rollback_to(self, index: int) -> dict[str, Any]:
+        """Erase everything drawn after step ``index``, newest first.
+
+        Index 0 is before the first step, which is what empties a drawing. Backend-neutral
+        even though the two journals are not: `RecordingBackend` marks its own steps undone
+        and erases their handles, while `PluginBackend` delegates to the DWG's own rollback,
+        so the palette and this call cannot disagree about what is drawn.
+        """
+        ...
 
     # --- primitives --------------------------------------------------------
     def line(

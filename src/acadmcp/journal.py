@@ -35,12 +35,30 @@ class StepRecord:
 class Journal:
     """Ordered steps with undo/redo bookkeeping. Holds no CAD objects."""
 
-    def __init__(self) -> None:
+    def __init__(self, meta: dict[str, Any] | None = None) -> None:
         self._steps: list[StepRecord] = []
+        #: Facts about the drawing rather than about a step — which catalogue drew it,
+        #: what units it is in. They describe the whole drawing, so they live beside the
+        #: steps rather than in one, and they travel with the journal wherever it persists.
+        self._meta: dict[str, Any] = dict(meta or {})
 
     @property
     def steps(self) -> list[StepRecord]:
         return list(self._steps)
+
+    @property
+    def meta(self) -> dict[str, Any]:
+        """A copy, the same discipline `steps` follows: a caller cannot mutate the books."""
+        return dict(self._meta)
+
+    def note_meta(self, **kv: Any) -> None:
+        """Record drawing-level facts. A `None` value means "nothing to say".
+
+        Dropped rather than stored as null, because a caller that has nothing to record for
+        one key (no catalogue was loaded, no library is configured) still calls this one way
+        and should not be made to branch on it.
+        """
+        self._meta.update({key: value for key, value in kv.items() if value is not None})
 
     def append(
         self,
@@ -100,14 +118,40 @@ class Journal:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {"version": 1, "steps": [asdict(s) for s in self._steps]}
+        payload: dict[str, Any] = {"version": 1}
+        # Emitted only when there is something to say, so a drawing with no meta keeps the
+        # exact payload it had before meta existed — byte-identical, which is what lets an
+        # older reader keep working on a file this build writes.
+        if self._meta:
+            payload["meta"] = dict(self._meta)
+        payload["steps"] = [asdict(s) for s in self._steps]
+        return payload
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Journal:
+        # Checked first, and refusing a *newer* version is deliberate: every failure here
+        # lands in the dxf reader's `journal_unreadable`, which is reported rather than
+        # raised, so a format this build cannot read would silently become "no journal" —
+        # and a drawing that quietly loses its undo history is worse than one that says so.
+        raw_version = data.get("version", 1) if isinstance(data, dict) else 1
+        try:
+            version = int(raw_version)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"journal payload has an unreadable version {raw_version!r}; "
+                "this build writes version 1"
+            ) from None
+        if version > 1:
+            raise ValueError(
+                f"journal version {version} is newer than this build writes (1); "
+                "reading it could lose steps, so it is reported instead"
+            )
+
         steps = data.get("steps") if isinstance(data, dict) else None
         if not isinstance(steps, list):
             raise ValueError("journal payload has no 'steps' list")
-        journal = cls()
+        meta = data.get("meta")
+        journal = cls(dict(meta) if isinstance(meta, dict) else None)
         for position, row in enumerate(steps):
             try:
                 record = StepRecord(

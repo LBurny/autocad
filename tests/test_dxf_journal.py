@@ -10,6 +10,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from acadmcp import ops  # noqa: E402
 from acadmcp.backends import make_backend  # noqa: E402
+from acadmcp.catalog import Element, Variant  # noqa: E402
+
+
+def _op_element(**over):
+    """An op-only column, the shape `tests/test_catalog_ops.py` builds for one.
+
+    Copied rather than imported: every test module here sets up its own fixtures and path.
+    """
+    base = dict(
+        key="column",
+        label="柱",
+        category="structure",
+        block="",
+        source="",
+        layer="A-COLUMN",
+        op="column",
+        variants={"600": Variant(name="600", params={"size": 600})},
+        tag_prefix="G",
+        default_variant="600",
+    )
+    base.update(over)
+    return Element(**base)
 
 
 @pytest.fixture()
@@ -166,3 +188,33 @@ def test_an_unreadable_journal_is_reported_not_raised(tmp_path):
     reopened = make_backend("dxf", path=target)
     assert reopened.journal.steps == []
     assert "ignored" in reopened.journal_unreadable
+
+
+# --- entities(), which the tag numbering reads ------------------------------
+
+
+def test_entities_reports_text_so_tag_numbering_can_continue(be):
+    """`entities()` returned only `{"type", "layer"}`, so `ops.existing_tags` saw an empty
+    drawing and numbering restarted at 1 on every call — two runs of placed columns shared
+    the tags G-1 and G-2, which is the "an empty entity list restarts numbering at 1"
+    hazard AGENTS.md records for com.py, still live on the headless backend."""
+    first = ops.place_along(be, _op_element(), (0, 0), (6000, 0), count=2)
+    second = ops.place_along(be, _op_element(), (0, 3000), (6000, 3000), count=2)
+
+    assert first["tags"] == ["G-1", "G-2"]
+    assert second["tags"] == ["G-3", "G-4"]
+    assert ops.existing_tags(be) == ["G-1", "G-2", "G-3", "G-4"]
+
+
+def test_entities_reports_a_block_reference_under_both_names(be):
+    """Parity with the plugin's `entities`: a dynamic block can resolve to an anonymous
+    `*U` record, so neither `block` nor `definition` is on its own the name that was asked
+    for. ezdxf resolves both to the reference's own name."""
+    block = be.doc.blocks.new("TEST_BLOCK")
+    block.add_line((0, 0), (1, 0))
+    be.msp.add_blockref("TEST_BLOCK", (0, 0))
+
+    inserts = [row for row in be.entities() if row["type"] == "INSERT"]
+    assert inserts == [
+        {"type": "INSERT", "layer": "0", "block": "TEST_BLOCK", "definition": "TEST_BLOCK"}
+    ]

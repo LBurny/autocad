@@ -43,6 +43,12 @@ class RecordingBackend:
 
     name = "recording"
 
+    #: No backend here draws library blocks unless it says so. `dxf` has no library to copy
+    #: a definition from and `com` refuses, so a catalogue entry with no parametric twin
+    #: cannot reach either of them — which the backend has to be able to say before anything
+    #: is drawn, because inside a step the refusal is deferred to the commit.
+    supports_insert = False
+
     def __init__(self) -> None:
         self.journal = Journal()
         self._op = ""
@@ -157,8 +163,92 @@ class RecordingBackend:
             "redrawn": redrawn,
         }
 
+    def rollback_to(self, index: int) -> dict[str, Any]:
+        """Erase everything drawn after step `index`, newest first.
+
+        `drawing_undo(count)` makes a caller count steps; this lets it name the step it
+        wants standing instead. Index 0 is before the first step, which is what empties a
+        drawing. The handles are the step's own, so this erases exactly what each step
+        drew — no more.
+        """
+        doomed = self.journal.rollback_to(int(index))
+        erased = missing = 0
+        for step in doomed:
+            e, m = self._erase(step.handles)
+            erased += e
+            missing += m
+        return {
+            "undone": [{"index": s.index, "op": s.op, "label": s.label} for s in doomed],
+            "erased": erased,
+            "missing": missing,
+        }
+
     def history(self) -> str:
         return self.journal.describe()
+
+    def step_rows(self) -> list[dict[str, Any]]:
+        """The journal as rows, the shape the plugin reports its steps in.
+
+        A row carries what a read-back needs and nothing it cannot know: the step's own
+        number, the op and arguments that produced it, whether it is applied, and how many
+        entities it drew. `summary.py` reads exactly this shape from any backend.
+        """
+        return [
+            {
+                "index": s.index,
+                "op": s.op,
+                "label": s.label,
+                "params": s.params,
+                "state": s.state,
+                "entities": len(s.handles),
+            }
+            for s in self.journal.steps
+        ]
+
+    # --- the catalogue that drew it ----------------------------------------
+
+    def note_catalog(self, loaded: Any) -> None:
+        """Record which catalogue this drawing is being drawn with.
+
+        Stamped when the drawing starts and again on save, so the drawing says what drew it
+        even if the catalogue file is edited afterwards. The identity carries the *entries*,
+        not just a path: a drawing reopened on another machine has to be able to resolve an
+        element the same way, which a file path cannot promise. The library root rides along
+        as a plain path in the payload — not as a `{library}` token — because the copy in
+        the drawing has to be usable as it stands where it is opened.
+        """
+        # Imported here rather than at module scope: `catalog` and `settings` reach back into
+        # the package, and a module-level import would make importing a backend pull the whole
+        # catalogue chain in.
+        from .. import catalog as _catalog
+        from .. import settings as _settings
+
+        loaded = loaded if loaded is not None else _catalog.current()
+        self.journal.note_meta(catalog=loaded.identity(_settings.current().library))
+
+    def drawing_catalog(self) -> dict[str, Any]:
+        """What the drawing recorded, and whether the catalogue loaded now agrees.
+
+        A disagreement is *reported*, never acted on: the local standard is the authority,
+        and silently redrawing somebody else's doors with this office's blocks is the failure
+        this whole mechanism exists to prevent. The `warning` key is what turns a silent
+        wrong answer into a question.
+        """
+        from .. import catalog as _catalog
+
+        recorded = self.journal.meta.get("catalog")
+        loaded = _catalog.current()
+        out: dict[str, Any] = {
+            "catalog": recorded,
+            "loaded": {"count": len(loaded.elements), "digest": loaded.digest()},
+        }
+        if isinstance(recorded, dict) and recorded.get("digest") != out["loaded"]["digest"]:
+            out["warning"] = (
+                "this drawing was drawn with a different catalogue ("
+                f"{recorded.get('count')} elements, {recorded.get('library') or 'no library'}); "
+                "the one loaded now wins, but the elements may not be the ones it was drawn with"
+            )
+        return out
 
     # --- subclass contract -------------------------------------------------
 

@@ -18,6 +18,7 @@ AI client  ──MCP──▶  acadmcp  ──┬── COM (pywin32) ──▶ 
 | Needs AutoCAD | no | yes | yes + plugin installed |
 | Entities appear | on file open | live, as the AI works | live, one step at a time |
 | Undo | per step, journaled in the .dxf | per step, in memory | per step, journaled in the .dwg + palette |
+| Catalogue element | parametric twin | parametric twin | library block, inserted |
 | Good for | batch generation, CI | editing an existing drawing | reviewing a plan as it is drawn |
 
 Geometry is computed once in `geom.py`, so every backend produces identical
@@ -26,6 +27,12 @@ coordinates. Every tool call is one journal step, so a mistake costs
 with one `drawing_replay()`. The plugin backend is for reviewing as you draw:
 its journal lives in the DWG and rolls back from a docked palette, with or
 without this server running. See [docs/plugin.md](docs/plugin.md).
+
+The catalogue places on all three backends: `place_element` inserts the library
+block wherever the backend can insert one (the plugin), and draws a parametric
+twin where it cannot (`dxf`, `com`) — so one element name works headless and in
+AutoCAD. The drawing keeps the catalogue that drew it, so reopening it elsewhere
+resolves the same elements rather than silently different ones.
 
 ## Install
 
@@ -63,7 +70,8 @@ uv run python examples/floor_plan_demo.py --com      # draw into running AutoCAD
 (.dwg or .dxf), `drawing_screenshot` (`inline=False` for just a PNG path),
 `listing_entities`
 
-**Journal** — `drawing_undo`, `drawing_redo`, `drawing_history`, `drawing_replay`
+**Journal** — `drawing_undo`, `drawing_redo`, `drawing_history`, `drawing_rollback_to`,
+`drawing_replay`, `drawing_summary`
 
 **Layers and text** — `layer_create` (no name = the standard set), `set_text_style`
 
@@ -111,7 +119,10 @@ place_along("window", start=[0, 0], end=[12000, 0], spacing=3000, variant="1200"
 
 The block behind each element is a plain JSON catalogue (`element_types` shows
 it and flags entries whose block your library lacks); a project points it at
-its own library and layers with `acadmcp.json`.
+its own library and layers with `acadmcp.json`. An entry may also name a
+parametric twin, so an element that has no block to insert — or a backend that
+cannot insert one — still draws it, and one element name means the same thing on
+all three backends.
 
 `draw_room` walls a ring in and reports the area to the *inner* face of the
 walls, so the number is usable in a room schedule:
@@ -166,9 +177,10 @@ drawing_screenshot()
 
 ```
 src/acadmcp/
-  geom.py        pure 2D geometry (no CAD deps)     server.py     the 44-tool MCP surface
+  geom.py        pure 2D geometry (no CAD deps)     server.py     the 46-tool MCP surface
   ops.py         backend-agnostic operations        journal.py    step bookkeeping
   backends/      dxf / com / plugin drivers         catalog.py    the element catalogue
+  catalog_ops.py the parametric twins               summary.py    design summary from the journal
   steps.py       journal control actions            acad_plugin_client.py
 plugin/          the in-AutoCAD step plugin (docs/plugin.md)
 examples/        floor_plan_demo.py                 evaluations/  read-only QA harness

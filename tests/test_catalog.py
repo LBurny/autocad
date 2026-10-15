@@ -19,6 +19,22 @@ from acadmcp import catalog, geom, ops, settings  # noqa: E402
 from acadmcp.backends import make_backend  # noqa: E402
 from acadmcp.catalog import Catalog, Element, Variant  # noqa: E402
 
+#: What the package ships. Named once, so a test that counts entries says what it is
+#: counting instead of carrying a number to keep in step by hand.
+SHIPPED_KEYS = [
+    "beam_i",
+    "beam_wf",
+    "channel",
+    "column",
+    "door",
+    "light",
+    "stud",
+    "weld_symbol",
+    "window",
+    "window_elevation",
+]
+SHIPPED = len(SHIPPED_KEYS)
+
 
 @pytest.fixture(autouse=True)
 def _fresh_catalogue():
@@ -45,34 +61,32 @@ def test_the_shipped_catalogue_loads_with_nothing_skipped():
     loaded = Catalog.load()
 
     assert loaded.skipped == []
-    assert loaded.keys() == [
-        "beam_i",
-        "beam_wf",
-        "channel",
-        "door",
-        "light",
-        "stud",
-        "weld_symbol",
-        "window",
-        "window_elevation",
-    ]
+    assert loaded.keys() == SHIPPED_KEYS
 
 
-def test_every_entry_names_a_library_and_a_block():
+def test_every_shipped_entry_can_be_placed_by_something():
+    """Every entry reaches the paper one way or another: a library block, or an op where no
+    library block stands for the thing. An entry with neither cannot be drawn at all."""
     loaded = Catalog.load()
 
     for key, element in loaded.elements.items():
-        assert element.source.endswith(".dwg"), key
-        assert element.block, key
-        assert "{library}" not in element.source, key
+        assert element.kind in ("block", "op", "both"), key
         assert element.layer, key
+        if element.block:
+            assert element.source.endswith(".dwg"), key
+            assert "{library}" not in element.source, key
+        else:
+            # An op-only entry has no library to name, and saying it does would send a
+            # reader looking for a block that does not exist.
+            assert element.op, key
 
 
 def test_a_library_path_can_be_pointed_somewhere_else(tmp_path, monkeypatch):
     monkeypatch.setenv("ACADMCP_LIBRARY", r"D:\院标\块库")
     loaded = Catalog.load()
 
-    assert all(e.source.startswith(r"D:\院标\块库") for e in loaded.elements.values())
+    from_library = [e for e in loaded.elements.values() if e.block]
+    assert from_library and all(e.source.startswith(r"D:\院标\块库") for e in from_library)
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +97,7 @@ def test_a_library_path_can_be_pointed_somewhere_else(tmp_path, monkeypatch):
 def test_a_missing_file_is_reported_rather_than_raised():
     loaded = Catalog.load(["Z:/nowhere/elements.json"])
 
-    assert len(loaded.elements) == 9
+    assert len(loaded.elements) == SHIPPED
     assert any("no such catalogue file" in note for note in loaded.skipped)
 
 
@@ -93,14 +107,14 @@ def test_a_file_that_is_not_json_is_reported(tmp_path):
 
     loaded = Catalog.load([path])
 
-    assert len(loaded.elements) == 9
+    assert len(loaded.elements) == SHIPPED
     assert any("broken.json" in note for note in loaded.skipped)
 
 
 def test_a_payload_that_is_not_a_list_is_reported(tmp_path):
     loaded = Catalog.load([_write(tmp_path, {"elements": "nope"})])
 
-    assert len(loaded.elements) == 9
+    assert len(loaded.elements) == SHIPPED
     assert any("expected a list" in note for note in loaded.skipped)
 
 
@@ -113,7 +127,7 @@ def test_a_bad_entry_is_skipped_and_the_good_ones_survive(tmp_path):
                 {"key": "good", "block": "B", "source": "{library}\\a.dwg"},
                 "not an object",
                 {"block": "B"},  # no key
-                {"key": "noblock"},  # nothing to place
+                {"key": "noblock"},  # neither a block nor an op, so nothing to place
                 {"key": "novariants", "block": "B", "variants": "nope"},
             ],
         },
@@ -125,7 +139,7 @@ def test_a_bad_entry_is_skipped_and_the_good_ones_survive(tmp_path):
     assert loaded.elements["good"].source == r"D:\lib\a.dwg"
     assert "novariants" in loaded.elements and loaded.elements["novariants"].variants == {}
     assert len(loaded.skipped) == 4
-    assert any("no block to place" in note for note in loaded.skipped)
+    assert any("neither a block nor an op" in note for note in loaded.skipped)
 
 
 def test_a_later_file_replaces_an_entry_of_the_same_key(tmp_path):
@@ -137,7 +151,7 @@ def test_a_later_file_replaces_an_entry_of_the_same_key(tmp_path):
     loaded = Catalog.load([path])
 
     assert loaded.elements["door"].block == "我们的门"
-    assert len(loaded.elements) == 9
+    assert len(loaded.elements) == SHIPPED
 
 
 def test_a_bare_variant_value_becomes_its_parameter(tmp_path):
@@ -334,6 +348,9 @@ class Recording:
     """A backend that keeps what it was asked for, so the ops can be read back."""
 
     name = "recording"
+    #: It records `insert` calls, so it is one of the backends a catalogue entry reaches as
+    #: its library block rather than as its parametric twin.
+    supports_insert = True
 
     def __init__(self, texts: list[str] | None = None) -> None:
         self.inserts: list[dict] = []
@@ -510,7 +527,7 @@ def test_a_projects_catalogue_and_layers_are_merged_over_the_standard(tmp_path, 
 
     merged = catalog.current()
     assert merged.elements["door"].block == "我们的门"  # the project's, not the package's
-    assert len(merged.elements) == 9  # and everything else inherited
+    assert len(merged.elements) == SHIPPED  # and everything else inherited
 
 
 def test_a_bad_layer_entry_is_reported(tmp_path):
@@ -533,3 +550,108 @@ def test_a_project_layer_reaches_the_drawing(tmp_path, monkeypatch):
     # The project's layer, and the standard set it did not replace.
     assert "我们的柱" in created and "A-WALL" in created
     assert "我们的柱" in be.info()["layers"]
+
+
+# ---------------------------------------------------------------------------
+# an entry may be drawn by an op where library blocks cannot go
+# ---------------------------------------------------------------------------
+
+_BOTH = {
+    "key": "door",
+    "label": "门",
+    "block": "门 - 公制",
+    "source": "lib.dwg",
+    "layer": "A-DOOR",
+    "width_param": "门尺寸",
+    "op": "door_symbol",
+    "params": {"墙厚": 150},
+    "variants": {"900": {"params": {"门尺寸": 900}}},
+}
+
+_OP_ONLY = {
+    "key": "column",
+    "label": "柱",
+    "layer": "A-COLUMN",
+    "op": "column",
+    "variants": {"600": {"params": {"size": 600}}},
+}
+
+
+def _catalog(tmp_path: Path, entries: list) -> Catalog:
+    """A catalogue holding only these entries, so what a test sees is what it wrote."""
+    path = tmp_path / "elements.json"
+    path.write_text(json.dumps({"elements": entries}), encoding="utf-8")
+    loaded = Catalog()
+    loaded.add_file(path)
+    return loaded
+
+
+def test_an_entry_may_name_an_op_instead_of_a_block(tmp_path):
+    loaded = _catalog(tmp_path, [_OP_ONLY])
+
+    assert loaded.skipped == []
+    element = loaded.get("column")
+    assert element.op == "column" and element.block == "" and element.kind == "op"
+
+
+def test_an_entry_with_neither_block_nor_op_is_skipped_and_counted(tmp_path):
+    loaded = _catalog(tmp_path, [{"key": "ghost", "label": "?"}])
+
+    assert loaded.get("ghost") is None
+    assert len(loaded.skipped) == 1 and "neither a block nor an op" in loaded.skipped[0]
+
+
+def test_kind_reports_block_op_or_both(tmp_path):
+    assert _catalog(tmp_path, [_BOTH]).get("door").kind == "both"
+    assert _catalog(tmp_path, [_OP_ONLY]).get("column").kind == "op"
+    assert _catalog(tmp_path, [_OP_ONLY]).get("column").placement == "parametric"
+    assert _catalog(tmp_path, [_BOTH]).get("door").placement == "both"
+
+
+def test_placement_prefers_the_block_when_the_backend_can_insert(tmp_path):
+    door = _catalog(tmp_path, [_BOTH]).get("door")
+
+    assert door.placement_for(can_insert=True) == "block"
+    assert door.placement_for(can_insert=False) == "op"
+
+
+def test_placement_falls_back_to_the_op_for_an_op_only_entry(tmp_path):
+    column = _catalog(tmp_path, [_OP_ONLY]).get("column")
+
+    assert column.placement_for(can_insert=True) == "op"
+
+
+def test_placement_refuses_a_block_only_entry_on_a_backend_without_insert(tmp_path):
+    """The message has to say how to recover: this is the whole failure of the catalogue
+    having been plugin-only."""
+    block_only = {"key": "door", "block": "B", "source": "lib.dwg"}
+    door = _catalog(tmp_path, [block_only]).get("door")
+
+    with pytest.raises(ValueError) as caught:
+        door.placement_for(can_insert=False)
+
+    assert "op" in str(caught.value) and "plugin" in str(caught.value)
+
+
+def test_the_width_key_is_the_entrys_own_or_width_for_an_op(tmp_path):
+    # An op adapter is written to take `width`, so an op entry need only say which
+    # parameter carries one when it disagrees; a block entry must say, because only the
+    # catalogue knows that this block calls it 门尺寸.
+    assert _catalog(tmp_path, [_BOTH]).get("door").width_key == "门尺寸"
+
+
+def test_an_op_entry_defaults_the_width_key_to_width(tmp_path):
+    assert _catalog(tmp_path, [_OP_ONLY]).get("column").width_key == "width"
+
+
+def test_an_entry_that_cannot_express_a_width_reports_no_key(tmp_path):
+    block_only = {"key": "door", "block": "B", "source": "lib.dwg"}
+    assert _catalog(tmp_path, [block_only]).get("door").width_key == ""
+
+
+def test_check_against_does_not_report_op_only_entries(tmp_path):
+    """Nothing in a library stands for an entry drawn parametrically, so there is nothing
+    to compare — and reporting it as 'unchecked' would be noise in every project."""
+    loaded = _catalog(tmp_path, [_OP_ONLY, _BOTH])
+
+    assert loaded.check_against({"lib.dwg": ["门 - 公制"]}) == []

@@ -20,13 +20,16 @@
       "tag_prefix": "M",
       "default_variant": "900",
       "params": { "墙厚": 150 },
-      "notes": "The block's wall thicknesses are 100, 150 and 450 only, so it does not suit the 200 mm wall this package draws by default. Set 墙厚 to one of the three, or point this entry at your own door block.",
+      "op": "door_symbol",
+      "width_param": "门尺寸",
+      "op_params": { "wall_thickness": 200 },
+      "notes": "The block's wall thicknesses are 100, 150 and 450 only, so it does not suit the 200 mm wall this package draws by default. The parametric twin is drawn against 200 instead, which is what a headless plan gets; a measured wall opening's width reaches either half, under width_param for the block and width for the twin.",
       "variants": {
-        "600": { "params": { "门尺寸": 600 }, "notes": "M0618" },
-        "700": { "params": { "门尺寸": 700 }, "notes": "M0718" },
-        "800": { "params": { "门尺寸": 800 }, "notes": "M0818" },
-        "900": { "params": { "门尺寸": 900 }, "notes": "M0921" },
-        "1000": { "params": { "门尺寸": 1000 }, "notes": "M1021" }
+        "600": { "params": { "门尺寸": 600 }, "op_params": { "width": 600 }, "notes": "M0618" },
+        "700": { "params": { "门尺寸": 700 }, "op_params": { "width": 700 }, "notes": "M0718" },
+        "800": { "params": { "门尺寸": 800 }, "op_params": { "width": 800 }, "notes": "M0818" },
+        "900": { "params": { "门尺寸": 900 }, "op_params": { "width": 900 }, "notes": "M0921" },
+        "1000": { "params": { "门尺寸": 1000 }, "op_params": { "width": 1000 }, "notes": "M1021" }
       }
     },
     {
@@ -39,12 +42,33 @@
       "tag_prefix": "C",
       "default_variant": "1500",
       "params": { "Wall": 150 },
-      "notes": "The block's width parameter is named DoorWidth, which is its own typo to live with. Wall takes 100, 150 or 450.",
+      "op": "window_symbol",
+      "width_param": "DoorWidth",
+      "op_params": { "wall_thickness": 200 },
+      "notes": "The block's width parameter is named DoorWidth, which is its own typo to live with — width_param is where that is written down, so a measured wall opening still reaches it. Wall takes 100, 150 or 450; the twin is drawn against 200.",
       "variants": {
-        "600": { "params": { "DoorWidth": 600 }, "notes": "C0609" },
-        "900": { "params": { "DoorWidth": 900 }, "notes": "C0915" },
-        "1200": { "params": { "DoorWidth": 1200 }, "notes": "C1218" },
-        "1500": { "params": { "DoorWidth": 1500 }, "notes": "C1521" }
+        "600": { "params": { "DoorWidth": 600 }, "op_params": { "width": 600 }, "notes": "C0609" },
+        "900": { "params": { "DoorWidth": 900 }, "op_params": { "width": 900 }, "notes": "C0915" },
+        "1200": { "params": { "DoorWidth": 1200 }, "op_params": { "width": 1200 }, "notes": "C1218" },
+        "1500": { "params": { "DoorWidth": 1500 }, "op_params": { "width": 1500 }, "notes": "C1521" }
+      }
+    },
+    {
+      "key": "column",
+      "label": "承力柱 (column, plan)",
+      "category": "structure",
+      "op": "column",
+      "layer": "A-COLUMN",
+      "tag_prefix": "KZ",
+      "default_variant": "400",
+      "notes": "A load-bearing concrete or steel column has no block in any AutoCAD sample library: the sample's 立柱 block is a light-gauge stud, which is the separate 'stud' entry. A column in plan is a filled rectangle whose size is the whole of its identity, so it is drawn parametrically — it works on every backend and needs no library at all. A rectangular or rotated column takes depth and rotation through params, which no library variant could express.",
+      "variants": {
+        "300": { "params": { "size": 300 } },
+        "400": { "params": { "size": 400 } },
+        "500": { "params": { "size": 500 } },
+        "600": { "params": { "size": 600 } },
+        "700": { "params": { "size": 700 } },
+        "800": { "params": { "size": 800 } }
       }
     },
     {

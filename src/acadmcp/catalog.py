@@ -22,6 +22,7 @@ Two rules from the plugin's journal apply here as well:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import dataclass, field
@@ -38,10 +39,17 @@ class Variant:
 
     name: str
     params: dict[str, Any] = field(default_factory=dict)
+    #: The same variant in the parametric twin's vocabulary, for an entry that also names a
+    #: library block. None means "not stated" and is refused where it would matter; {} means
+    #: "the twin needs nothing of its own", which is a deliberate answer.
+    op_params: dict[str, Any] | None = None
     notes: str = ""
 
     def describe(self) -> dict[str, Any]:
-        return {"name": self.name, "params": dict(self.params), "notes": self.notes}
+        out: dict[str, Any] = {"name": self.name, "params": dict(self.params), "notes": self.notes}
+        if self.op_params is not None:
+            out["op_params"] = dict(self.op_params)
+        return out
 
 
 @dataclass(frozen=True)
@@ -60,6 +68,73 @@ class Element:
     #: Parameters every variant of this element carries, e.g. a wall thickness.
     params: dict[str, Any] = field(default_factory=dict)
     notes: str = ""
+    #: The name of a parametric builder in :mod:`acadmcp.catalog_ops` — the twin this
+    #: element is drawn by where a library block cannot be inserted. An entry may carry
+    #: both, and then which one is used is the backend's capability's to decide.
+    op: str = ""
+    #: Which parameter carries a *measured* width — a wall opening's width, as opposed to a
+    #: nominal size. Only the catalogue knows that one block calls it 门尺寸 and another
+    #: calls it Wall. An `op` entry need not state it: the adapters all take `width`.
+    width_param: str = ""
+    #: Parameters every variant of the twin carries, e.g. the wall thickness a symbol is
+    #: drawn against. Only meaningful for an entry that names a library block as well: an
+    #: op-only entry's `params` are already the twin's vocabulary.
+    op_params: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def kind(self) -> str:
+        """How this entry reaches the paper: a library block, an op, or either."""
+        if self.block and self.op:
+            return "both"
+        return "block" if self.block else "op"
+
+    @property
+    def placement(self) -> str:
+        """The same fact as `kind`, in the words a caller reads.
+
+        `kind` describes the entry to the code, where an op and a block are two different
+        mechanisms; `placement` describes it to whoever is choosing an element, where "it
+        is drawn parametrically" is the useful thing to know. One field for the tool
+        surface, so a client does not have to be told that "op" means parametric.
+        """
+        return {"block": "block", "op": "parametric", "both": "both"}[self.kind]
+
+    @property
+    def width_key(self) -> str:
+        """The parameter a measured width goes under, or "" when there is none.
+
+        An op adapter is written to take `width`; a library block calls it whatever its
+        author called it. Defaulting the op case means a catalogue only has to state
+        `width_param` for an entry that names a block — and an entry that names a block and
+        does not state one will be refused a width rather than putting it somewhere
+        arbitrary.
+        """
+        return self.width_param or ("width" if self.op else "")
+
+    def placement_for(self, can_insert: bool) -> str:
+        """Which half of this entry a backend should draw: ``"block"`` or ``"op"``.
+
+        A backend that can insert takes the library block, and that is the point of the
+        catalogue: a block carries the model number a schedule counts, and a colleague's
+        AutoCAD can explode and measure it. A backend that cannot — the `dxf` one has no
+        library to read, the `com` one refuses — falls back to the parametric twin, so one
+        element name draws on every backend and a plan can be written headless and replayed
+        into AutoCAD.
+
+        Decided here rather than probed by trying `insert`: inside a step the `dxf` and
+        `com` refusals are deferred to the commit, so a caller cannot find out by trying.
+        """
+        if self.block and can_insert:
+            return "block"
+        if self.op:
+            return "op"
+        if self.block:
+            raise ValueError(
+                f"'{self.key}' names a library block and no parametric twin ('op'), so it "
+                "can only be placed where library blocks can be inserted — connect with "
+                "acad_connect(mode='plugin'), or add an 'op' to its catalogue entry"
+            )
+        raise ValueError(f"'{self.key}' has neither a block nor an op to place")
 
     def variant(self, name: str | None = None) -> Variant | None:
         """The named variant, or the default one, or None if there is no such variant.
@@ -102,12 +177,66 @@ class Element:
             params.update(overrides)
         return params
 
+    def twin_settings(
+        self,
+        name: str | None = None,
+        overrides: dict[str, Any] | None = None,
+        width: float | None = None,
+    ) -> dict[str, Any]:
+        """The parameters the parametric twin is called with.
+
+        Same precedence as :meth:`settings` — the element's own, then the variant's, then the
+        caller's — but in the twin's vocabulary rather than the block's, because the two are
+        not the same words: the door block calls its width 门尺寸 while `door_symbol` takes
+        `width`. An op-only entry needs no second vocabulary, so its `params` are used
+        directly.
+
+        A variant that states nothing for the twin is **refused**, not defaulted, where it
+        has stated something for the block: `place_element("door", variant="900")` reaching
+        `door_symbol` as its own default of 900 would be a right-looking door of the wrong
+        size for a catalogue that meant a 1100 one. `"op_params": {}` is how an author says
+        the twin deliberately needs nothing.
+        """
+        from_block = bool(self.block)
+        params = dict(self.op_params) if from_block else dict(self.params)
+
+        if name:
+            chosen = self.variants.get(name.strip().lower())
+            if chosen is None:
+                raise ValueError(
+                    f"'{self.key}' has no variant '{name}'; it has: "
+                    + (", ".join(v.name for v in self.variants.values()) or "none")
+                )
+        else:
+            chosen = self.variant()
+
+        if chosen is not None:
+            if from_block and chosen.op_params is None and chosen.params:
+                raise ValueError(
+                    f"'{self.key}' variant '{chosen.name}' cannot be placed parametrically: "
+                    f"its parameters ({', '.join(sorted(chosen.params))}) are the block's and "
+                    "the twin does not understand them; state the twin's own under "
+                    '"op_params" (use {} if it needs none)'
+                )
+            params.update((chosen.op_params or {}) if from_block else chosen.params)
+
+        if overrides:
+            params.update(overrides)
+        if width is not None:
+            params["width"] = float(width)
+        return params
+
     def describe(self) -> dict[str, Any]:
         return {
             "key": self.key,
             "label": self.label,
             "category": self.category,
             "block": self.block,
+            "op": self.op,
+            "kind": self.kind,
+            "placement": self.placement,
+            "width_param": self.width_param,
+            "op_params": dict(self.op_params),
             "source": self.source,
             "layer": self.layer,
             "tag_prefix": self.tag_prefix,
@@ -140,6 +269,30 @@ class Catalog:
             catalog.add_file(Path(path))
         return catalog
 
+    @classmethod
+    def adopt(cls, payload: dict[str, Any] | None) -> Catalog:
+        """Rebuild a catalogue from an identity embedded in a drawing.
+
+        Tolerant, for the same reason loading is: a drawing whose embedded catalogue is
+        damaged must still open, and what could not be read is counted in `skipped` and
+        reported rather than raised. Entries come flat, under `elements`, and a payload
+        grouped under `categories` (the report's own shape) is accepted too, so a reader
+        never has to know which of the two it was handed.
+        """
+        catalog = cls()
+        if not isinstance(payload, dict):
+            return catalog
+        entries = payload.get("elements")
+        if not isinstance(entries, list):
+            entries = [
+                item
+                for items in (payload.get("categories") or {}).values()
+                if isinstance(items, list)
+                for item in items
+            ]
+        catalog.add_entries(entries, library=str(payload.get("library", "")), where="<drawing>")
+        return catalog
+
     def add_file(self, path: Path) -> None:
         """Merge one catalogue file in. A file that cannot be read is reported, not fatal."""
         try:
@@ -164,9 +317,18 @@ class Catalog:
         if library:
             self.libraries[path] = library
 
+        self.add_entries(entries, library=library, where=str(path))
+
+    def add_entries(self, entries: list[Any], library: str = "", where: str = "") -> None:
+        """Read a list of raw entries through the one reader, later entries winning.
+
+        Shared by :meth:`add_file` and :meth:`adopt` deliberately: an entry adopted from a
+        drawing and an entry read from a project file must not be able to mean different
+        things, and a second reader would eventually drift from the first.
+        """
         for index, entry in enumerate(entries):
             element = _read_element(
-                entry, where=f"{path}[{index}]", skipped=self.skipped, library=library
+                entry, where=f"{where}[{index}]", skipped=self.skipped, library=library
             )
             if element is not None:
                 self.elements[element.key] = element
@@ -203,7 +365,10 @@ class Catalog:
         problems: list[str] = []
         for key in self.keys():
             element = self.elements[key]
-            if not element.source:
+            # Nothing in a library stands for an entry that is drawn parametrically, so
+            # there is nothing to compare and it is not "unchecked" — it is not a library
+            # element at all. An entry with both halves still gets its block checked.
+            if not element.source or not element.block:
                 continue
             if element.source not in blocks:
                 problems.append(
@@ -222,6 +387,37 @@ class Catalog:
             },
         }
 
+    # --- what a drawing remembers ------------------------------------------
+
+    def identity(self, library: str = "") -> dict[str, Any]:
+        """The catalogue as the drawing will remember it.
+
+        The whole thing, not a reference to it: a catalogue is a few kilobytes, and a drawing
+        that records only a file path resolves to something else the moment it is opened on
+        another machine — which is the failure this exists to prevent. `elements` is each
+        entry's own ``describe()``, so :meth:`adopt` rebuilds through the same reader that
+        built it and an adopted entry cannot mean something a file entry does not.
+        """
+        return {
+            "library": library
+            or (next(iter(self.libraries.values()), "") if self.libraries else ""),
+            "count": len(self.elements),
+            "skipped": list(self.skipped),
+            "elements": [self.elements[key].describe() for key in self.keys()],
+            "digest": self.digest(),
+        }
+
+    def digest(self) -> str:
+        """A hash of the entries, so a difference is detectable without a diff.
+
+        Over `describe()`, sorted and ASCII-escaped, so it is stable across machines and
+        across a JSON round trip — the same catalogue embedded in a drawing and loaded from
+        a file must hash the same, or every reopen reports a spurious mismatch.
+        """
+        rows = [self.elements[key].describe() for key in self.keys()]
+        blob = json.dumps(rows, sort_keys=True, ensure_ascii=True, default=str)
+        return "sha256:" + hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
 
 def _read_element(
     entry: Any, *, where: str, skipped: list[str], library: str = ""
@@ -229,8 +425,8 @@ def _read_element(
     """One entry, or None with the reason appended to `skipped`.
 
     Tolerant about what is absent and strict about what is wrong: a missing category is a
-    default, a missing block is not, because an element with no block cannot be placed and
-    the person reading the report needs to know which line to fix.
+    default, while an entry with neither a block nor an `op` cannot be placed by anything,
+    and the person reading the report needs to know which line to fix.
     """
     if not isinstance(entry, dict):
         skipped.append(f"{where}: not an object")
@@ -238,11 +434,14 @@ def _read_element(
 
     key = str(entry.get("key", "")).strip().lower()
     block = str(entry.get("block", "")).strip()
+    op = str(entry.get("op", "")).strip().lower()
     if not key:
         skipped.append(f"{where}: no key")
         return None
-    if not block:
-        skipped.append(f"{key}: no block to place")
+    if not block and not op:
+        # An entry with neither half cannot be drawn at all, and the person reading the
+        # report needs to know which line to fix.
+        skipped.append(f"{key}: neither a block nor an op to place")
         return None
 
     variants: dict[str, Variant] = {}
@@ -250,9 +449,14 @@ def _read_element(
     if isinstance(raw_variants, dict):
         for name, spec in raw_variants.items():
             if isinstance(spec, dict):
+                # `op_params` absent and `op_params: {}` are different answers: the first
+                # says nothing about the twin, the second says it needs nothing. `get`
+                # with an explicit default is what tells them apart.
+                op_params = spec.get("op_params", None)
                 variants[str(name).strip().lower()] = Variant(
                     name=str(name),
                     params=dict(spec.get("params") or {}),
+                    op_params=None if op_params is None else dict(op_params or {}),
                     notes=str(spec.get("notes", "")),
                 )
             else:
@@ -274,6 +478,9 @@ def _read_element(
         default_variant=str(entry.get("default_variant", "")).strip().lower(),
         params=dict(entry.get("params") or {}),
         notes=str(entry.get("notes", "")),
+        op=op,
+        width_param=str(entry.get("width_param", "")).strip(),
+        op_params=dict(entry.get("op_params") or {}),
     )
 
 
@@ -395,6 +602,20 @@ def reset() -> None:
     """Forget the loaded catalogue. For tests, and after a project file changes."""
     global _current
     _current = None
+
+
+def use(loaded: Catalog) -> Catalog:
+    """Install `loaded` as the current catalogue for this process, and return it.
+
+    Needed when a drawing's *embedded* catalogue is the one in force: the project has no
+    catalogue files of its own, so the copy the drawing carries is better than the
+    package's starter and must become what `place_element` resolves names against. The
+    local standard still wins wherever a project supplies one — this is only reached when
+    it does not. `reset()` puts the loaded-chain back.
+    """
+    global _current
+    _current = loaded
+    return loaded
 
 
 _current: Catalog | None = None

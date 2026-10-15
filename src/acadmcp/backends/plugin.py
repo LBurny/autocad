@@ -60,6 +60,11 @@ class PluginBackend(RecordingBackend):
 
     name = "plugin"
 
+    #: The one backend that draws library blocks: the plugin has AutoCAD's own block table
+    #: to copy a definition into, so a catalogue entry with a `block` reaches the paper here
+    #: as the standard's own block rather than as its parametric twin.
+    supports_insert = True
+
     def __init__(
         self,
         client: PluginClient | None = None,
@@ -137,18 +142,27 @@ class PluginBackend(RecordingBackend):
         back a differently framed image than the one asked for is worse than
         saying it cannot be done.
 
-        Zooming to a window is left to AutoCAD for now; a framing API that has not
-        been verified here would be a guess.
+        A minimised window is reported, not restored: bringing AutoCAD to the
+        front would cover whatever the user is working in. Unlike the COM backend
+        this one talks over the plugin's socket and has no way to ask AutoCAD for
+        a rendered drawing yet, so the window has to be up.
         """
         if window:
             raise BackendError(
                 "the plugin backend cannot reframe the view yet; zoom in AutoCAD "
                 "first, or use the dxf backend, which renders any window"
             )
-        from ..capture import capture_window, find_autocad_window
+        from ..capture import WindowUnavailable, capture_window, find_autocad_window
 
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        return capture_window(find_autocad_window(), path)
+        try:
+            return capture_window(find_autocad_window(), path)
+        except WindowUnavailable as exc:
+            raise BackendError(
+                f"{exc}. The plugin backend cannot export the drawing itself; "
+                "restore the AutoCAD window, or use acad_connect(mode='com') or the "
+                "dxf backend, which both take a picture without it"
+            ) from exc
 
     def info(self) -> dict[str, Any]:
         drawing = self.client.call("info")
@@ -427,7 +441,42 @@ class PluginBackend(RecordingBackend):
         """The drawing's steps, one line each, read back from the plugin."""
         from ..steps import describe_steps
 
-        return describe_steps(self.client.call("get_steps", offset=0, limit=10000)["steps"])
+        return describe_steps(self.step_rows())
+
+    def step_rows(self) -> list[dict[str, Any]]:
+        """The DWG's steps as rows, in the shape the local journal reports too.
+
+        The plugin owns this journal, so the rows come over RPC rather than out of the
+        in-memory `Journal` this backend also carries (which the plugin path never uses).
+        """
+        return self.client.call("get_steps", offset=0, limit=10000)["steps"]
+
+    def rollback_to(self, index: int) -> dict[str, Any]:
+        """Roll the DWG journal back to `index`, delegating to the plugin.
+
+        The plugin owns the journal, so this is its rollback rather than a local erase —
+        the palette and this call must never disagree about what is drawn. An *accepted*
+        step standing in the way is refused by the plugin; the response is returned as it
+        came so the refusal is reported rather than swallowed (`step_control(force=True)`
+        overrides it).
+        """
+        from ..steps import StepSession
+
+        steps = self.step_rows()
+        doomed = [
+            s
+            for s in steps
+            if str(s.get("state", "")) == "applied" and int(s.get("index", 0)) > int(index)
+        ]
+        response = StepSession(self.client).rollback_to(int(index))
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        return {
+            "undone": [
+                {"index": s.get("index"), "op": s.get("op"), "label": s.get("label", "")}
+                for s in reversed(doomed)
+            ],
+            "response": result,
+        }
 
     def replay_step(self, record: StepRecord) -> dict[str, Any]:
         """Draw another journal's step here, as a real plugin step.

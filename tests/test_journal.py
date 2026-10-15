@@ -79,3 +79,43 @@ def test_describe_is_one_line_per_step():
     j.undo(1)
     text = j.describe()
     assert "op0" in text and "undone" in text and len(text.splitlines()) == 2
+
+
+# --- meta: facts about the drawing, not about a step ------------------------
+
+
+def test_meta_round_trips():
+    j = Journal()
+    j.note_meta(catalog={"digest": "abc"}, units="mm")
+    clone = Journal.from_dict(j.to_dict())
+    assert clone.meta["catalog"] == {"digest": "abc"} and clone.meta["units"] == "mm"
+
+
+def test_note_meta_drops_nothing_values():
+    j = Journal()
+    j.note_meta(catalog=None, units="mm")
+    assert "catalog" not in j.meta and j.meta["units"] == "mm"
+
+
+def test_a_payload_without_meta_still_loads():
+    """Every drawing saved before this change has no meta section."""
+    j = Journal.from_dict({"version": 1, "steps": []})
+    assert j.meta == {} and j.steps == []
+
+
+def test_a_newer_journal_version_is_refused_by_number():
+    with pytest.raises(ValueError) as caught:
+        Journal.from_dict({"version": 2, "steps": []})
+    assert "2" in str(caught.value) and "1" in str(caught.value)
+
+
+def test_meta_is_a_copy_and_an_empty_one_is_not_written():
+    """Two rules with one reason: the payload of a drawing with no meta must be exactly
+    what it was before meta existed, and the books must not be writable through the
+    accessor."""
+    j = Journal()
+    assert j.to_dict() == {"version": 1, "steps": []}
+    j.note_meta(catalog={"digest": "abc"})
+    j.meta["catalog"] = "tampered"
+    assert j.meta["catalog"] == {"digest": "abc"}
+    assert j.to_dict()["meta"] == {"catalog": {"digest": "abc"}}

@@ -11,8 +11,12 @@ src/acadmcp/
   geom.py               pure 2D geometry: offsets, mitre joins, areas. No CAD imports.
   layers.py             drafting standard: layer names, ACI colours, text heights, mm sizes
   ops.py                architectural operations (walls, doors, rooms, cores, annotation)
+  catalog.py            the element catalogue: entries, variants, identity
+  catalog_ops.py        the parametric twins a catalogue entry draws where blocks cannot insert
+  summary.py            derives a design summary (rooms, openings, elements) from the journal.
+                        No CAD imports — it may import geom and layers and nothing else.
   capture.py            Win32 window capture, and finding the AutoCAD frame
-  server.py             the MCP tool surface (44 tools, each annotated by behaviour class)
+  server.py             the MCP tool surface (46 tools, each annotated by behaviour class)
   journal.py            the backend-neutral step journal (undo/redo bookkeeping). No CAD imports.
   acad_plugin_client.py the socket client for the in-AutoCAD plugin
   steps.py              step-journal control, and the step_control action table
@@ -26,10 +30,13 @@ examples/floor_plan_demo.py
 evaluations/            read-only QA pairs + fixture DXF + harness, per the mcp-builder guide
 tests/                  test_geom.py, test_backends.py, test_journal.py, test_recording.py,
                         test_dxf_journal.py, test_plugin_backend.py, test_server_journal.py,
-                        test_plugin_client.py, test_catalog.py, test_element_tools.py,
+                        test_server_summary.py, test_plugin_client.py, test_com_backend.py,
+                        test_catalog.py, test_catalog_ops.py, test_catalog_identity.py,
+                        test_summary.py, test_element_tools.py,
                         test_tool_surface.py (annotations, naming, pagination),
                         test_dxf_create_render.py (drawing_new create, theme colours, glyphs),
                         test_input_validation.py (caller mistakes surface as readable errors),
+                        test_live_screenshot.py (no restore, no rename on export),
                         sandbox_driver.py (fresh-server sandbox for live drawing exercises),
                         live_rpc_check.py (needs AutoCAD, so pytest never runs it)
 ```
@@ -37,7 +44,7 @@ tests/                  test_geom.py, test_backends.py, test_journal.py, test_re
 ## Commands
 
 ```bash
-uv run pytest -q                      # 207 tests, ~8s, no AutoCAD required
+uv run pytest -q                      # 312 tests, ~10s, no AutoCAD required
 uv run ruff check . --output-format concise
 uv run ruff format .
 uv run python examples/floor_plan_demo.py           # DXF + PNG into examples/output/
@@ -132,6 +139,26 @@ The split is deliberate; keep it when editing.
   geometry through `geom`. Ops never touch an AutoCAD or ezdxf object directly.
 - **Backends only render.** If you are computing architecture inside a backend,
   it belongs in `ops.py` instead.
+- **A catalogue entry may name a parametric twin as well as a library block.**
+  `Element.op` names an adapter in `catalog_ops.CATALOG_OPS`, `width_param` names
+  the block parameter a *measured* width goes under, and `op_params` states the
+  twin's own vocabulary where it differs from the block's (the two vocabularies do
+  differ). Which half is drawn is the backend's capability's to decide, through
+  `Element.placement_for` — never by trying `insert` and catching the refusal.
+- **`catalog_ops.py` normalises; it computes no geometry.** Every adapter calls the
+  op in `ops.py` that already draws the thing, so a catalogue element drawn by an
+  adapter lands exactly where the matching tool draws it. The signature is uniform —
+  `adapter(be, at, *, width=None, rotation=0.0, layer="", **params)` — and
+  `tests/test_catalog_ops.py` pins it by introspection, because a catalogue entry
+  names any of them and is called one way. `at` is the element's *own* reference
+  point (a column's centre, a door's hinge, a lift's corner), which each adapter
+  documents; the four rectangle adapters refuse a non-zero rotation rather than draw
+  an upright rectangle where a rotated one was asked for.
+- **`summary.py` derives, it never remembers, and imports nothing CAD-related.** It
+  may import `geom` and `layers` and nothing else — never a backend, and the
+  catalogue reaches it as a plain dict rather than the catalogue module. A room's
+  area is recomputed with the same `geom.inner_boundary` call `draw_room` makes, so
+  a summary that disagrees with `draw_room`'s own reply is the summary's bug.
 - **`server.py` is thin.** Each tool parses JSON-ish input, calls one op or one
   backend method, and returns a dict. No logic lives here. Every drawing tool
   body runs inside `_auto_step`, so one tool call is one journal step — that is
@@ -222,10 +249,58 @@ take effect without reinstalling — run
 stopped. A running server holds the old code in memory, so new tools need a
 client restart.
 
+This bites the *client config* too, which is how it was finally diagnosed: a
+server entry of `uv run acadmcp` makes uv reinstall the editable package on every
+launch (`Uninstalled 1 package / Installed 1 package`), rewriting `acadmcp.exe`
+each time — so while an old server is still alive, the client's attempt to start
+a new one dies with `failed to remove file ... acadmcp.exe` and the server shows
+as errored, permanently until that process is killed. Measured 2026-10-15 after
+an orphaned 10:32 server blocked every restart for hours. The entry therefore
+launches the module instead of the console script:
+
+```json
+"acadmcp": {"type": "stdio", "command": "uv",
+  "args": ["run", "--no-sync", "--directory", "H:/My_Software/AutoCAD-MCP",
+           "python", "-m", "acadmcp.server"]}
+```
+
+`python -m` never touches the generated `acadmcp.exe`, so no launch can lock it —
+verified by starting a server this way and then moving `acadmcp.exe` aside, which
+succeeded. Use `--no-sync` as well, or uv re-syncs on every launch and the same
+lock returns. The same shape is already used by the `symkit` entry.
+
 **Screenshotting the live AutoCAD window** needs `PrintWindow` with
 `PW_RENDERFULLCONTENT`; AutoCAD renders through DirectX and a plain capture comes
-back black. A minimised window is restored first. This only works in an
+back black. Occlusion is fine — `PrintWindow` renders the window's own content, so
+one behind other windows captures identically (measured: mean pixel 45.33 in
+front, 45.34 behind). A **minimised** window is the one case that cannot be
+photographed: Windows gives it a 160×28 off-screen stub rect, so there is nothing
+to render. The capture used to restore it, which yanked AutoCAD in front of
+whatever the user had moved on to — for an AI drawing in the background while
+somebody works elsewhere, that is unusable. `capture_window` now raises
+`WindowUnavailable` instead of touching the screen, and `ComBackend` answers it by
+asking AutoCAD to **export** the drawing and rendering that; the plugin backend
+cannot export yet and says the window has to be up. This only works in an
 interactive desktop session.
+
+**`Document.Export` copies; `SaveAs` and `DXFOUT` do not.** Measured 2026-10-15 on
+AutoCAD 2026, chasing why a background screenshot was hard to take:
+
+- `SaveAs("x.dxf")` writes **`x.dxf.dwg`** — AutoCAD keeps its own output format
+  and appends the extension it knows, so the `.dxf` in the name is a lie — and it
+  **renames the open document** to the target either way. Pass a format constant
+  (`SaveAs(path, 25)` = ac2018_dxf) to get a real DXF; 17 and 21 were refused as
+  invalid here, 13 and 25 worked.
+- `DXFOUT` on a *never-saved* drawing also renamed it (empty `Drawing1.dwg` became
+  the exported name). Do not use it to take a copy.
+- `Document.Export(stem, kind, selection)` writes `stem`.`KIND` — upper-cased —
+  and leaves the document alone. `kind` may be `DXF`, `BMP`, `WMF`, `EPS`; `SVG`
+  is refused. It needs a selection set (`SelectionSets.Add` + `Select(5)` for
+  acSelectionSetAll). The BMP is a full raster of the view, which is what the
+  minimised-window screenshot falls back to.
+
+So `com.save()` routes a `.dxf` target through `Export` — it is a copy, which is
+what the tool's docstring always promised — and only `.dwg` goes through `SaveAs`.
 
 **PNG canvas sizing.** ezdxf's `finalize()` resets the figure to its own 6.3×4.8
 default, so `fig.set_size_inches` must run *after* `draw_layout`. The canvas is
@@ -354,7 +429,13 @@ reported, not silently skipped.
 each `draw_*` tool; an explicit `step_begin` overrides it (while one is open, drawing
 records into it and nothing commits). Undo/redo are backend-neutral
 (`drawing_undo`/`drawing_redo`/`drawing_history`); on the plugin backend they delegate
-to the DWG journal so the palette never disagrees. The dxf journal persists inside the
+to the DWG journal so the palette never disagrees. `drawing_rollback_to(index)` aims the
+same undo at a named step rather than making a caller count — `Journal.rollback_to`
+existed with no tool in front of it — and `drawing_history` now returns machine-readable
+`steps` rows beside its rendered text, so an index can be picked without counting. On the
+plugin an *accepted* step blocks a rollback and the refusal is reported, not swallowed;
+`step_control(action='rollback_to', index=..., force=True)` overrides it. The dxf journal
+persists inside the
 file (root dictionary `ACADMCP`, one XRecord, JSON `ensure_ascii`-escaped and chunked
 at 1900 chars because a group-code-1 string tops out at 2049) and survives
 `drawing_open` — handles are stable across ezdxf save/load, so an old session's steps
@@ -426,6 +507,80 @@ property the block has not got. Tags are numbered from the tags already in the d
 never from a stored counter. Layer names, model numbers and wall thicknesses come from
 `acadmcp.json` and the catalogue file, never from `layers.py` — a standard is the drawing
 office's, not this package's.
+
+**A catalogue entry has two ways to reach the paper, and the backend picks — declared, not
+probed.** `Element.placement_for(can_insert)` takes the library block when the backend can
+insert one (the plugin does; `dxf` and `com` do not) and the parametric twin otherwise.
+`Backend.supports_insert` is a **class attribute** — `False` on `RecordingBackend`, `True` on
+`PluginBackend` — and not a probe, because inside a step the `dxf` and `com` refusals are
+deferred to the commit, so a caller cannot find out by trying, and which half to draw has to
+be decided before anything is drawn. This is what made `place_element`/`place_along`/
+`place_grid` work headless: before it, all three began with `_require_plugin()` and an AI
+writing a plan in DXF could not place a single door. The shipped catalogue's `door` and
+`window` therefore carry twins, and `column` is **op-only** — a 承力柱 is a filled rectangle
+whose size is its whole identity, so it needs no library and works on every backend.
+
+**An entry that names both keeps the two vocabularies apart, and a measured width is the
+opening's.** Where an entry names a block *and* a twin, the block's parameter names stay in
+`params` and the twin's go under `op_params` (element-level and per-variant), because the two
+differ — the door block calls its width 门尺寸 while `door_symbol` takes `width`.
+`Element.twin_settings()` is the accessor, and it **refuses, not defaults**, a variant that
+states something for the block and nothing for the twin: reaching an adapter as its own
+defaults is a right-looking element of the wrong size. `"op_params": {}` means "the twin
+deliberately needs nothing", which is a different answer from absent, and `Variant.op_params`
+is `None` when absent so the reader can tell them apart. In `draw_wall_with_openings` an
+opening may name an `element`, and the opening's measured `width` is authoritative — passed
+to the element as an override, so a nominal 900 block cannot be placed into a measured 1500
+hole. A failure is collected in the result's `element_openings.skipped`, never raised, so the
+opening still gets cut — the same trade `clamped_openings` makes.
+
+**The drawing records the catalogue that drew it.** The catalogue is otherwise ambient — a
+package file plus whichever `acadmcp.json` is found by walking up from the working directory —
+so reopening a drawing elsewhere silently resolved its doors against something else.
+`Journal.meta["catalog"]` now carries the identity **and the entries** (`Catalog.identity()`
+produces it, `Catalog.adopt()` consumes it), because a drawing that records only a file path
+resolves to something else on the next machine. Persistence: the DXF keeps it in the same
+`ACADMCP` XRecord as the journal; the COM backend writes a `<drawing>.<ext>.acadmcp.json`
+**sidecar** beside a save, because ActiveX exposes no way to write an XRecord (that is the
+plugin's route) — `drawing_save`/`drawing_status` name the sidecar, so a file appearing next
+to the drawing is never unannounced. The plugin backend is the exception: its journal lives
+in the DWG, which does not yet carry the catalogue, so its stamp sits in the local journal
+only. Precedence on open: the project's own files, then the
+copy embedded in the drawing, then the package's starter; a difference is reported as a
+`catalog_warning`, never a silent redraw. `Journal.from_dict` refuses a payload version newer
+than it writes (1), and the reason is specific: every `from_dict` failure lands in the dxf
+reader's `journal_unreadable`, which is *reported rather than raised*, so without the guard a
+future format would silently degrade to "no journal".
+
+**`summary.py` derives, it never remembers.** A room's area is recomputed from the recorded
+boundary with the same `geom.inner_boundary` call `draw_room` makes, so a summary that
+disagrees with `draw_room`'s own reply is the summary's bug, not the drawing's. It reads the
+journal's recorded intent, so it works after a reopen and on every backend, and it is what the
+read-only `drawing_summary` tool wraps. A row it cannot read — no `op`, no readable `params`,
+an undone step — is counted and warned about, never raised, the rule the catalogue loader and
+the journal reader already follow. `annotation` counts one per *step*, not per entity: a
+dimension chain is one annotation here.
+
+**A client that passes metres used to draw a 4 mm room and be told it succeeded.**
+`geom.plausible(value, what, low, high)` now refuses a dimension outside a deliberately wide
+range with a message naming the metre/millimetre slip: wall thickness 20–2000 mm, a room's
+inner width 500–200000 mm (measured on the *inner* span after `ring_self_intersects`, because
+that is the number a unit slip destroys), a column 50–3000 mm. The bounds catch a unit slip,
+not a design — a guard that refuses a legitimate 300 mm partition would be worse than no
+guard, so widen a bound rather than adjust a caller if a real design trips it.
+
+**`evaluations/fixtures/floor_plan.dxf` is not byte-reproducible, so `git status` is not a
+backwards-compatibility check.** The file embeds a timestamp, random GUIDs, and occasionally a
+`BLOCK_RECORD` ordering that hash randomisation swaps, so it is dirty after every regeneration
+even when nothing moved. The check that works is a geometry fingerprint —
+`(dxftype, layer, text, height, insert/points)` per entity, as a `Counter` — compared between
+the demo's output on a pristine `git archive HEAD` tree and on the working tree; the two must
+be equal. That check found the committed fixture differed from HEAD's own output in exactly two
+`A-ROOM-AREA` text heights (250.0 → 240.0), a staleness rather than a regression: the fixture
+was last written in `e3d76f1`, while `layers.fit_text_height` landed in `7da48c5`, one commit
+later. The fixture has been refreshed, and the entity count is unchanged at 247 — so the
+answers in `evaluation.xml`, which reference entity counts and never a text height or an area
+value, still hold.
 
 **A queued zoom is useless before a screenshot.** `ZOOM` cannot be run from the plugin's idle
 handler (`Editor.Command` throws `eInvalidInput` outside a command context) and queueing it

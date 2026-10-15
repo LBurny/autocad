@@ -18,10 +18,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import acadmcp.server as server  # noqa: E402
+from acadmcp import catalog  # noqa: E402
 from acadmcp.acad_plugin_client import PluginUnavailable  # noqa: E402
 from acadmcp.backends.base import BackendError  # noqa: E402
 from acadmcp.backends.plugin import PluginBackend  # noqa: E402
-from acadmcp.catalog import Catalog  # noqa: E402
+from acadmcp.catalog import Catalog, Element, Variant  # noqa: E402
 
 
 class FakePlugin:
@@ -59,6 +60,35 @@ def plugin():
     server._state.reset(be, "plugin")
     yield catalog_client
     server._state.reset(None, None)
+
+
+@pytest.fixture()
+def fresh_dxf():
+    """A headless session, with no AutoCAD anywhere near it."""
+    server._state.reset(server.make_backend("dxf"), "dxf")
+    yield
+    server._state.backend = None
+
+
+def _op_element() -> Element:
+    """An op-only column, the shape a project's catalogue carries for one.
+
+    No library block at all, so the headless backends can draw it, and a tag prefix to
+    number from — the numbering is derived from the drawing's own tags, never stored.
+    """
+    return Element(
+        key="column",
+        label="柱",
+        category="structure",
+        block="",
+        source="",
+        layer="A-COLUMN",
+        op="column",
+        width_param="",
+        variants={"600": Variant(name="600", params={"size": 600})},
+        tag_prefix="G",
+        default_variant="600",
+    )
 
 
 def _inserts(client: FakePlugin) -> list[dict[str, Any]]:
@@ -187,3 +217,60 @@ def test_a_placement_without_the_plugin_is_refused_rather_than_drawn_elsewhere()
 
     with pytest.raises(BackendError, match="acad_connect"):
         server.place_element("door", at=[0, 0])
+
+
+# --------------------------------------------------------------------------- #
+# the same three tools, headless
+# --------------------------------------------------------------------------- #
+
+
+def test_place_element_works_on_the_headless_backend(fresh_dxf, monkeypatch):
+    """Was `_require_plugin()`: an AI writing a plan headless could not place a single
+    door from the catalogue, which is the fastest path there is — no AutoCAD, previewable."""
+    monkeypatch.setattr(
+        catalog, "current", lambda paths=None: catalog.Catalog({"column": _op_element()})
+    )
+
+    out = server.place_element("column", at=[0, 0], variant="600")
+
+    assert out["ok"] and out["placed"] == 1
+    assert server._state.backend.info()["entities"] > 0
+
+
+def test_place_element_is_one_undoable_step_on_dxf(fresh_dxf, monkeypatch):
+    """One tool call is one journal step on every backend, which is what makes a wrong
+    coordinate cost one drawing_undo instead of a redraw."""
+    monkeypatch.setattr(
+        catalog, "current", lambda paths=None: catalog.Catalog({"column": _op_element()})
+    )
+
+    server.place_element("column", at=[0, 0])
+
+    assert [s.op for s in server._state.backend.journal.steps] == ["place_element"]
+    report = server.drawing_undo()
+    assert report["erased"] > 0 and server._state.backend.info()["entities"] == 0
+
+
+def test_place_along_on_dxf_lays_several_and_numbers_them(fresh_dxf, monkeypatch):
+    monkeypatch.setattr(
+        catalog, "current", lambda paths=None: catalog.Catalog({"column": _op_element()})
+    )
+
+    out = server.place_along("column", start=[0, 0], end=[6000, 0], count=3)
+
+    assert out["ok"] and out["placed"] == 3
+    assert out["tags"] == ["G-1", "G-2", "G-3"]
+
+
+def test_a_second_placement_continues_the_numbering(fresh_dxf, monkeypatch):
+    """Numbering is derived from the drawing's own tags, and on dxf it was derived from
+    nothing: `entities()` reported no text, so every call restarted at 1 and two runs of
+    doors shared the tags G-1 and G-2."""
+    monkeypatch.setattr(
+        catalog, "current", lambda paths=None: catalog.Catalog({"column": _op_element()})
+    )
+
+    server.place_along("column", start=[0, 0], end=[6000, 0], count=2)
+    second = server.place_along("column", start=[0, 3000], end=[6000, 3000], count=2)
+
+    assert second["tags"] == ["G-3", "G-4"]

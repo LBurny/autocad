@@ -18,6 +18,18 @@ from .backends.base import Backend
 from .catalog import Element
 from .geom import Point, Vec
 
+# Magnitude guards, applied where an op takes a dimension straight from the caller.
+# Deliberately wide: they catch a unit slip — a client passing metres into a millimetre
+# API draws a 4 mm room and is told it worked — and nothing else, so a legitimate 300 mm
+# partition or a 300x300 column must pass. A bound that a real caller trips is too tight;
+# widen it rather than move the caller.
+_MIN_WALL_MM = 20.0
+_MAX_WALL_MM = 2000.0
+_MIN_SPAN_MM = 500.0
+_MAX_SPAN_MM = 200_000.0
+_MIN_COLUMN_MM = 50.0
+_MAX_COLUMN_MM = 3000.0
+
 # ---------------------------------------------------------------------------
 # setup
 # ---------------------------------------------------------------------------
@@ -55,6 +67,7 @@ def draw_wall_run(
     cap_ends: bool = True,
 ) -> list[Any]:
     """Draw a wall as two offset faces along a centreline (plus optional poché)."""
+    thickness = geom.plausible(thickness, "wall thickness", _MIN_WALL_MM, _MAX_WALL_MM)
     left, right = geom.offset_pair(points, thickness, closed=closed)
     made = [
         be.polyline(left, closed=closed, layer=layer),
@@ -117,11 +130,20 @@ def draw_wall_with_openings(
     ("left"/"right"), ``open_angle``, ``rotation_delta``, ``tag`` and
     ``tag_offset`` (moves the tag across the wall).
 
+    An opening may name a catalogue element in ``element`` (with ``variant`` and
+    ``params``), which draws that element as the opening's symbol — the library block
+    where one can be inserted, its parametric twin anywhere else — instead of the
+    built-in line-and-arc door. The opening's own measured ``width`` cuts the wall and is
+    handed to the element as an override, so a nominal 900 block cannot land in a measured
+    1500 hole. An element that cannot be drawn leaves the gap a gap and is reported in
+    ``element_openings``; it never takes the wall run down.
+
     ``closed=True`` reads `points` as a ring — the way a building envelope is drawn —
     and mitres the corners into one another. Openings are then measured along the
     ring from its first vertex.
     """
     ring = [geom.xy(p) for p in points]
+    thickness = geom.plausible(thickness, "wall thickness", _MIN_WALL_MM, _MAX_WALL_MM)
     if closed and geom.is_closed(ring):
         ring = ring[:-1]
     if closed and len(ring) < 3:
@@ -166,6 +188,8 @@ def draw_wall_with_openings(
     symbols: list[Any] = []
     cursor = 0.0
     clamped = 0
+    placed = 0
+    failures: list[str] = []
     previous: str | None = None
 
     for op in ops:
@@ -188,6 +212,23 @@ def draw_wall_with_openings(
         angle += float(op.get("rotation_delta", 0.0))
         tag = op.get("tag")
         tag_offset = op.get("tag_offset")
+
+        element_key = op.get("element")
+        if element_key:
+            symbol = _opening_element_symbol(
+                be, element_key, op, pts, start, width, angle, door_layer, window_layer
+            )
+            if symbol is None:
+                # A catalogue that cannot supply this opening leaves a hole a door could
+                # still be hung in, and says why: a wall run lost to one bad entry would be
+                # worse than the gap, the same trade `clamped_openings` makes.
+                failures.append(_opening_element_refusal(be, element_key, start))
+            else:
+                placed += 1
+                symbols += symbol
+            cursor = max(cursor, end)
+            previous = kind
+            continue
 
         if kind == "door":
             symbols += draw_door(
@@ -241,6 +282,7 @@ def draw_wall_with_openings(
         "clamped_openings": clamped,
         "total_length": round(total, 3),
         "symbols": len(symbols),
+        "element_openings": {"placed": placed, "skipped": failures},
         "closed": closed,
     }
 
@@ -281,6 +323,82 @@ def _rebase_ring(
     moved.sort(key=lambda o: float(o["start"]))
     moved[0] = {**moved[0], "start": 0.0}
     return started, moved
+
+
+def _opening_element_symbol(
+    be: Backend,
+    key: str,
+    op: dict,
+    pts: Sequence[Point],
+    start: float,
+    width: float,
+    angle: float,
+    door_layer: str,
+    window_layer: str,
+) -> list[Any] | None:
+    """The symbol a named element draws in this opening, or None to report a refusal.
+
+    Which point the element is placed at differs by path and that is not an accident: a
+    door *block*'s insertion point is its centre, while `draw_door` hinges on a jamb — so
+    the block path takes the opening's midpoint and the parametric path its first jamb.
+    The adapter's own docstring says which its `at` means.
+
+    An entry that cannot be used is refused here rather than handed to `place_element` to
+    raise on, because this runs mid-run: one bad catalogue entry must cost its own opening
+    and not the wall.
+    """
+    element = catalog.current().get(key)
+    if element is None or not element.width_key:
+        # No entry at all, or one with nowhere to put a measured width. Both are facts
+        # about the catalogue, both are checked before the backend's capability is, and
+        # `place_element` refuses both — the same two refusals, collected here instead.
+        return None
+    try:
+        where = element.placement_for(bool(getattr(be, "supports_insert", False)))
+    except ValueError:
+        return None
+
+    # The element's own layer wins, because that is the layer a door schedule counts it on
+    # and the entry is the only thing that knows it. The opening's kind decides only for an
+    # entry that states no layer at all.
+    layer = element.layer or (door_layer if op.get("kind", "door") == "door" else window_layer)
+    at = (
+        geom.point_along(pts, start + width / 2.0)
+        if where == "block"
+        else geom.point_along(pts, start)
+    )
+    return place_element(
+        be,
+        element,
+        at,
+        variant=op.get("variant"),
+        params=op.get("params"),
+        rotation=angle,
+        layer=layer,
+        width=width,
+        tag=op.get("tag"),
+        tag_offset=op.get("tag_offset"),
+    )
+
+
+def _opening_element_refusal(be: Backend, key: str, start: float) -> str:
+    """Why the named element could not be drawn, naming the element and the opening.
+
+    A missing entry and an entry that cannot reach this backend are different mistakes with
+    different fixes, so they read differently; both leave the opening a hole in a wall and
+    let the run continue, the way a clamped opening does.
+    """
+    element = catalog.current().get(key)
+    at = f"opening at {round(start, 1)}"
+    if element is None:
+        return f"{at}: no element '{key}' in the catalogue"
+    if not element.width_key:
+        return f"{at}: " + _measured_width_refusal(element.key)
+    try:
+        element.placement_for(bool(getattr(be, "supports_insert", False)))
+    except ValueError as exc:
+        return f"{at}: {exc}"
+    return f"{at}: '{key}' could not be drawn here"
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +511,7 @@ def draw_column(
     hatch: bool = True,
 ) -> list[Any]:
     """A structural column, drawn as a rotated rectangle (optionally filled)."""
+    size = geom.plausible(size, "column size", _MIN_COLUMN_MM, _MAX_COLUMN_MM)
     d = size if depth is None else depth
     half_w, half_d = size / 2.0, d / 2.0
     c = geom.xy(center)
@@ -426,6 +545,19 @@ def _check_room_ring(boundary: Sequence[Point]) -> None:
         raise ValueError("the room boundary crosses itself — the label could land outside the room")
 
 
+def _check_room_span(inner: Sequence[Point]) -> None:
+    """A room's inner span must be a room, not a unit slip.
+
+    The span the area is measured to is what the room actually has to contain, and it is
+    the number a unit slip destroys: a ring given in metres with an otherwise plausible
+    wall thickness still measures a few mm across inside. `_check_room_ring` already
+    refuses a ring with no meaningful inside; this is a different check on a different
+    failure, run after that one so a bowtie still reads as a bowtie.
+    """
+    x_lo, _, x_hi, _ = geom.bbox(inner)
+    geom.plausible(x_hi - x_lo, "the room's inner width", _MIN_SPAN_MM, _MAX_SPAN_MM)
+
+
 def draw_room(
     be: Backend,
     boundary: Sequence[Point],
@@ -449,6 +581,9 @@ def draw_room(
     walls themselves.
     """
     _check_room_ring(boundary)
+    thickness = geom.plausible(thickness, "room wall thickness", _MIN_WALL_MM, _MAX_WALL_MM)
+    inner = geom.inner_boundary(boundary, thickness)
+    _check_room_span(inner)
     draw_wall_run(
         be,
         boundary,
@@ -461,7 +596,6 @@ def draw_room(
         hatch_scale=hatch_scale,
     )
 
-    inner = geom.inner_boundary(boundary, thickness)
     area_m2 = geom.area(inner) / 1_000_000.0
     c = geom.centroid(inner)
     if label_offset:
@@ -526,7 +660,9 @@ def add_room_label(
 ) -> dict[str, Any]:
     """Label an existing room ring without redrawing its walls."""
     _check_room_ring(boundary)
+    thickness = geom.plausible(thickness, "room wall thickness", _MIN_WALL_MM, _MAX_WALL_MM)
     inner = geom.inner_boundary(boundary, thickness)
+    _check_room_span(inner)
     c = geom.centroid(inner)
     area_m2 = geom.area(inner) / 1_000_000.0
     if bound_layer:
@@ -855,6 +991,15 @@ def leader_note(
 # ---------------------------------------------------------------------------
 
 
+def _measured_width_refusal(key: str) -> str:
+    """Why an entry cannot take a measured width. One wording, two callers: `place_element`
+    raises it and a wall opening reports it as a skipped symbol."""
+    return (
+        f"'{key}' has no parameter to put a measured width in; add "
+        '"width_param" to its catalogue entry, or place it without a width'
+    )
+
+
 def place_element(
     be: Backend,
     element: Element,
@@ -869,25 +1014,66 @@ def place_element(
     tag_offset: float | None = None,
     tag_layer: str = "A-ANNO",
     tag_height: float = layers.H_TAG,
+    width: float | None = None,
 ) -> list[Any]:
-    """Place one catalogue element: a library block reference, plus its tag.
+    """Place one catalogue element, as a library block or as its parametric twin.
 
-    The block is inserted, not redrawn, so the drawing gets the definition the standard
-    library actually holds — one that a colleague's AutoCAD can explode, edit and measure
-    exactly as if they had inserted it by hand. `variant` picks a size from the catalogue
-    and `params` overrides individual dynamic properties on top of it.
+    Which of the two is the backend's capability's to decide, not the caller's
+    (:meth:`Element.placement_for`). A backend that can insert gets the real block — the
+    definition the standard actually holds, one a colleague's AutoCAD can explode, edit and
+    measure exactly as if they had inserted it by hand, and one a door schedule can count.
+    A backend that cannot gets the same element drawn out of primitives, so a plan can be
+    written headless (fast, previewable, no AutoCAD) and replayed into AutoCAD without the
+    element names meaning anything different on the way.
+
+    ``variant`` picks a size from the catalogue and ``params`` overrides individual
+    properties on top of it. ``width`` is a *measured* width — a wall opening's — and lands
+    under the parameter the entry says carries one; an entry that has no such parameter is
+    refused rather than given a nominal size to draw into a measured hole.
+
+    ``scale`` applies to the block path only: an op builds at real size, and scaling a door
+    symbol would produce a door of no standard size at all.
     """
-    made: list[Any] = [
-        be.insert(
-            element.block,
-            at,
-            source=element.source or None,
-            rotation=rotation,
-            scale=scale,
-            properties=element.settings(variant, params),
-            layer=layer or element.layer,
+    if width is not None and not element.width_key:
+        # Checked before the placement decision, because whether this entry can express a
+        # measured width is a fact about the entry alone. Reporting "this backend cannot
+        # insert blocks" instead would send a reader to connect AutoCAD when the entry is
+        # what needs the fix.
+        raise ValueError(_measured_width_refusal(element.key))
+
+    which = element.placement_for(bool(getattr(be, "supports_insert", False)))
+    made: list[Any]
+    if which == "block":
+        settings = element.settings(variant, params)
+        if width is not None:
+            settings[element.width_key] = float(width)
+        made = [
+            be.insert(
+                element.block,
+                at,
+                source=element.source or None,
+                rotation=rotation,
+                scale=scale,
+                properties=settings,
+                layer=layer or element.layer,
+            )
+        ]
+    else:
+        from . import catalog_ops
+
+        # The twin is called in its own vocabulary: a block's parameters are not its, and
+        # handing it the block's names would leave it at its own defaults — a right-looking
+        # element at the wrong size. `twin_settings` refuses that where it matters.
+        made = list(
+            catalog_ops.get(element.op)(
+                be,
+                geom.xy(at),
+                rotation=rotation,
+                layer=layer or element.layer,
+                **element.twin_settings(variant, params, width),
+            )
         )
-    ]
+
     if tag:
         made.append(_element_tag(be, tag, at, tag_offset, tag_layer, tag_height))
     return made

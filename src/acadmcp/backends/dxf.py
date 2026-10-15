@@ -20,6 +20,7 @@ from ezdxf.lldxf.tags import Tags
 from ezdxf.lldxf.types import DXFTag
 
 from .. import layers
+from ..catalog import Catalog
 from ..geom import Point, xy
 from ..journal import Journal
 from .base import BackendError
@@ -436,14 +437,58 @@ class DxfBackend(RecordingBackend):
                 "applied": sum(s.state == "applied" for s in self.journal.steps),
             },
             "journal_unreadable": self.journal_unreadable,
+            "catalog": self.recorded_catalog(),
         }
+
+    def recorded_catalog(self) -> dict[str, Any] | None:
+        """The catalogue identity this drawing carries, as a summary, or None.
+
+        A summary rather than the whole payload: `info()` is what a caller reads to see the
+        state of a drawing, and the entries themselves are already reachable through
+        :meth:`embedded_catalog`. The digest is what makes "is this the same catalogue?" a
+        one-line question.
+        """
+        payload = self.journal.meta.get("catalog")
+        if not isinstance(payload, dict):
+            return None
+        return {
+            "library": str(payload.get("library", "")),
+            "count": payload.get("count"),
+            "digest": str(payload.get("digest", "")),
+        }
+
+    def embedded_catalog(self) -> Catalog | None:
+        """The catalogue that drew this file, rebuilt from the journal, or None.
+
+        None when the drawing carries none — a file saved before the catalogue was recorded,
+        or one drawn with no catalogue loaded at all. Adopting is tolerant, so a damaged
+        embedded copy yields a partly-read catalogue with its `skipped` lines rather than an
+        exception, the same rule the journal and the loader follow.
+        """
+        payload = self.journal.meta.get("catalog")
+        if not isinstance(payload, dict) or not payload:
+            return None
+        return Catalog.adopt(payload)
 
     def entities(self, layer: str | None = None, limit: int = 200) -> list[dict]:
         out: list[dict] = []
         for e in self.msp:
             if layer and e.dxf.get("layer", "0") != layer:
                 continue
-            out.append({"type": e.dxftype(), "layer": e.dxf.get("layer", "0")})
+            row: dict[str, Any] = {"type": e.dxftype(), "layer": e.dxf.get("layer", "0")}
+            # Text has to come back, or `ops.existing_tags` sees an empty drawing and
+            # restarts tag numbering at 1 on every call — so two runs of placed elements
+            # would share tags M-1, M-2. Both TEXT and MTEXT carry their content in group
+            # code 1.
+            if e.dxftype() in ("TEXT", "MTEXT"):
+                row["text"] = e.dxf.get("text", "")
+            if e.dxftype() == "INSERT":
+                # Reported under both names for parity with the plugin's `entities`: a
+                # dynamic block can resolve to an anonymous `*U` record, so neither name
+                # is on its own the one that was asked for. ezdxf resolves both to the
+                # reference's own name here.
+                row["block"] = row["definition"] = e.dxf.get("name", "")
+            out.append(row)
             if len(out) >= limit:
                 break
         return out

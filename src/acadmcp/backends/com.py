@@ -9,8 +9,11 @@ hand. It needs AutoCAD running and a document open; call :func:`connect` (or the
 from __future__ import annotations
 
 import contextlib
+import json
 import math
 import queue
+import shutil
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -19,8 +22,12 @@ from pathlib import Path
 from typing import Any
 
 from ..geom import Point, left_normal, sub, unit, xy
+from ..journal import Journal
 from .base import BackendError
 from .recording import RecordingBackend, unflatten_points
+
+#: acSelectionSetAll — every entity in the drawing, for a whole-drawing export.
+SELECT_ALL = 5
 
 try:  # pragma: no cover - platform dependent
     import pythoncom
@@ -79,6 +86,54 @@ INSERT_REFUSED = (
     "the 'com' backend cannot insert blocks yet; the plugin backend can, and it is "
     "the one that keeps the drawing's step journal"
 )
+
+
+# ---------------------------------------------------------------------------
+# the sidecar: where a COM session's journal actually lives
+# ---------------------------------------------------------------------------
+
+#: The suffix of the file written beside a saved drawing. ActiveX exposes no way to
+#: write an XRecord into the DWG — that is the plugin's route and COM has none — so a
+#: COM session's steps and catalogue identity go in a file next to the drawing instead.
+SIDECAR_SUFFIX = ".acadmcp.json"
+
+
+def sidecar_path(drawing: str | Path) -> Path:
+    """Where the sidecar for a saved drawing lives: `<drawing>.<ext>.acadmcp.json`."""
+    target = Path(drawing)
+    return target.with_suffix(target.suffix + SIDECAR_SUFFIX)
+
+
+def write_sidecar(drawing: str | Path, journal: Journal) -> Path | None:
+    """Write the journal beside a saved drawing, or None when there is nothing to write.
+
+    A session with no steps and no meta writes nothing, so an ordinary save leaves the
+    user's folder exactly as it was: a file appearing next to somebody's drawing is not
+    acceptable unless it is announced, and an empty one would be announced for nothing.
+    """
+    if not journal.steps and not journal.meta:
+        return None
+    path = sidecar_path(drawing)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(journal.to_dict(), ensure_ascii=True, indent=2), encoding="utf-8")
+    return path
+
+
+def read_sidecar(drawing: str | Path) -> tuple[Journal | None, str]:
+    """(journal, problem) from the sidecar beside a drawing.
+
+    An absent file is not a problem — most drawings have none. An unreadable one is
+    reported rather than raised, the rule the journal follows everywhere: losing a
+    session's undo history is a line in the report, not the end of the session.
+    """
+    path = sidecar_path(drawing)
+    if not path.is_file():
+        return None, ""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return Journal.from_dict(payload), ""
+    except (OSError, ValueError) as exc:
+        return None, f"sidecar {str(path)!r} ignored: {exc}"
 
 
 class _Box:
@@ -253,6 +308,9 @@ class ComBackend(RecordingBackend):
     #: tests/test_com_backend.py builds a fake link that way (no `__init__`, so no
     #: AutoCAD), and every primitive reads `open_step` before it decides to draw.
     _op = ""
+    #: Same reason as `_op`: `info()` reads these, and the fake link has no `__init__`.
+    sidecar_path: Path | None = None
+    sidecar_unreadable = ""
 
     def __init__(
         self,
@@ -264,6 +322,7 @@ class ComBackend(RecordingBackend):
         text_style: str = CJK_STYLE,
         cjk_font: str = CJK_FONT,
         cjk_big_font: str = CJK_BIG_FONT,
+        path: str | None = None,
         **_: Any,
     ) -> None:
         super().__init__()
@@ -283,10 +342,35 @@ class ComBackend(RecordingBackend):
                     "AutoCAD has no open drawing; open one or pass new_document=True"
                 ) from exc
         self.msp = _call(lambda: self.doc.ModelSpace)
-        self.path: str | None = None
+        self.path: str | None = str(path) if path else None
+        self.sidecar_path = None
+        self.sidecar_unreadable = ""
         self._ops = 0
         with contextlib.suppress(Exception):
             _call(lambda: self.doc.SetVariable("INSUNITS", 4))  # millimetres
+        # A path given means "this drawing is on disk"; its sidecar is where the journal
+        # from the session that drew it lives, since it is not in the DWG.
+        if self.path:
+            self.load_sidecar(self.path)
+
+    # --- the sidecar -------------------------------------------------------
+    def load_sidecar(self, path: str | None = None) -> bool:
+        """Adopt the sidecar journal beside `path`, if one is there.
+
+        Returns whether a journal was read. Called on `__init__` when a path is given and
+        public so a reopen can point a live session at a different drawing's history; an
+        absent sidecar is the ordinary case and an unreadable one is reported through
+        `sidecar_unreadable` rather than raised.
+        """
+        target = path or self.path
+        if not target:
+            return False
+        self.path = str(target)
+        journal, problem = read_sidecar(target)
+        self.sidecar_unreadable = problem
+        if journal is not None:
+            self.journal = journal
+        return journal is not None
 
     # --- document ----------------------------------------------------------
     def ensure_layer(self, name: str, color: int | None = None, linetype: str | None = None) -> Any:
@@ -349,18 +433,72 @@ class ComBackend(RecordingBackend):
         return self.text_style
 
     def save(self, path: str | None = None) -> str:
+        """Save the drawing, or write a copy of it.
+
+        A `.dxf` target is a **copy** and goes through `Document.Export`, which
+        leaves the open drawing alone. `SaveAs` is wrong for it twice over: it
+        ignores the extension AutoCAD was not told about — asking for `x.dxf`
+        wrote `x.dxf.dwg`, a DWG wearing a DXF's name — and it renames the open
+        document to the copy's name either way. Measured 2026-10-15 on 2026.
+
+        The journal and the catalogue identity go into a `<drawing>.acadmcp.json`
+        **sidecar** beside the target, because ActiveX offers no way to write an
+        XRecord into the DWG. `sidecar_path` says whether one was written, and the
+        tool result has to report it: a file appearing next to somebody's drawing
+        unannounced is not acceptable.
+        """
         if not path:
             raise BackendError(
                 "the COM backend saves through AutoCAD; pass an absolute .dwg or .dxf path"
             )
-        target = str(Path(path).with_suffix(Path(path).suffix or ".dwg"))
-        Path(target).parent.mkdir(parents=True, exist_ok=True)
+        target = Path(path)
+        if target.suffix.lower() == ".dxf":
+            with tempfile.TemporaryDirectory() as tmp:
+                written = self._export_to(str(Path(tmp) / "copy"), "DXF")
+                if written is None:
+                    raise BackendError(f"AutoCAD would not export a DXF copy to {str(target)!r}")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(written, target)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                _call(lambda: self.doc.SaveAs(str(target)))
+            except Exception as exc:  # noqa: BLE001
+                raise BackendError(f"AutoCAD could not save {str(target)!r}: {exc}") from exc
+        self.path = str(target)
+        # `getattr` because a `__new__`-built instance (the fake link the COM tests use,
+        # with no `__init__`) has no journal — and a save with nothing to record should
+        # write no sidecar rather than fail.
+        journal = getattr(self, "journal", None)
+        self.sidecar_path = write_sidecar(target, journal) if journal is not None else None
+        return str(target)
+
+    def _export_to(self, stem: str, kind: str) -> Path | None:
+        """Export the whole drawing to `stem`.`kind`, or None if AutoCAD refused.
+
+        `Document.Export` writes a *copy* — unlike `SaveAs` it does not rename the
+        drawing, and unlike `DXFOUT` it does not rename an unsaved one either (both
+        were measured doing exactly that here). It needs a selection set, which is
+        the whole drawing.
+        """
+        name = f"ACADMCP_EXPORT_{kind}"
+        with contextlib.suppress(Exception):
+            _call(lambda: self.doc.SelectionSets.Item(name).Delete())
         try:
-            _call(lambda: self.doc.SaveAs(target))
-        except Exception as exc:  # noqa: BLE001
-            raise BackendError(f"AutoCAD could not save {target!r}: {exc}") from exc
-        self.path = target
-        return target
+            selection = _call(lambda: self.doc.SelectionSets.Add(name))
+            try:
+                _call(lambda: selection.Select(SELECT_ALL))
+                _call(lambda: self.doc.Export(stem, kind, selection))
+            finally:
+                with contextlib.suppress(Exception):
+                    _call(lambda: selection.Delete())
+        except Exception:  # noqa: BLE001 - the caller decides what to fall back to
+            return None
+        # AutoCAD upper-cases the extension it appends.
+        for candidate in (Path(f"{stem}.{kind}"), Path(f"{stem}.{kind.lower()}")):
+            if candidate.is_file() and candidate.stat().st_size:
+                return candidate
+        return None
 
     def preview(self, path: str, theme: str = "dark") -> str | None:
         return self.screenshot(path, theme=theme)
@@ -379,14 +517,50 @@ class ComBackend(RecordingBackend):
         AutoCAD cannot hand back a rendered bitmap over COM, so the window itself
         is captured. That shows the true current view, but it also drags in the
         ribbon; prefer the dxf backend when you want a clean drawing-only image.
+
+        When the window cannot be photographed — AutoCAD minimised, which is the
+        normal state for someone working in another application — the drawing is
+        exported and rendered instead. The window is never restored to take the
+        picture: that would put AutoCAD in front of whatever the user moved on to.
         """
+        from ..capture import WindowUnavailable, capture_window
+
         if window:
             self.zoom_window(
                 (float(window[0]), float(window[1])), (float(window[2]), float(window[3]))
             )
-        from ..capture import capture_window
+        try:
+            return capture_window(int(_call(lambda: self.app.HWND)), path)
+        except WindowUnavailable:
+            return self._exported_screenshot(path, width=width, height=height, theme=theme)
 
-        return capture_window(int(_call(lambda: self.app.HWND)), path)
+    def _exported_screenshot(self, path: str, *, width: int, height: int, theme: str) -> str:
+        """Picture of the drawing from AutoCAD's own export.
+
+        Preferred over re-rendering the DXF because AutoCAD draws it: the layer
+        colours and hatch patterns are the real ones, and it reflects the current
+        view (so `window=` framing still means something). It carries no ribbon,
+        which for reviewing a plan is an improvement.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            stem = str(Path(tmp) / "view")
+            bitmap = self._export_to(stem, "BMP")
+            if bitmap is not None:
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(bitmap, path)
+                return path
+
+            drawing = self._export_to(stem, "DXF")
+            if drawing is None:
+                raise BackendError(
+                    "AutoCAD is minimised and would not export the drawing, so there "
+                    "is no picture to take; restore it, or use the dxf backend"
+                )
+            from .dxf import DxfBackend
+
+            return DxfBackend(path=str(drawing)).screenshot(
+                path, width=width, height=height, theme=theme
+            )
 
     def zoom_window(self, corner1: Point, corner2: Point) -> None:
         """Zoom the AutoCAD view to the rectangle spanned by two corners."""
@@ -415,14 +589,19 @@ class ComBackend(RecordingBackend):
             return out
         out["document"] = name
         out["entities"] = count
-        # The journal is this process's own bookkeeping, so it can be reported even
-        # though the drawing it describes is AutoCAD's. Kept out of the failure branch
-        # above: on a lost link the drawing state is the question, and a step count
-        # next to `entities: None` reads as if it described the same thing.
+        # The journal is this process's own bookkeeping, so it can be reported even though
+        # the drawing it describes is AutoCAD's. Kept out of the failure branch above: on a
+        # lost link the drawing state is the question, and a step count next to
+        # `entities: None` reads as if it described the same thing.
         out["journal"] = {
             "steps": len(self.journal.steps),
             "applied": sum(s.state == "applied" for s in self.journal.steps),
         }
+        # The sidecar is bookkeeping too, and it is the only place a COM session's journal
+        # is durable — so whether one was written, and whether an old one could not be read,
+        # belongs in the same report.
+        out["sidecar"] = str(self.sidecar_path) if self.sidecar_path else None
+        out["sidecar_unreadable"] = self.sidecar_unreadable
         return out
 
     def entities(self, layer: str | None = None, limit: int = 200) -> list[dict]:
