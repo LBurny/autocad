@@ -10,8 +10,8 @@ riser shafts, grids and dimensions — into a **live AutoCAD session** or a
 through COM (pywin32), or writes a .dxf file with a PNG preview through
 ezdxf](docs/flow.png)
 
-The diagram is a drawing like any other — [docs/flow.dxf](docs/flow.dxf), drawn
-with this server, so it opens in AutoCAD and can be edited.
+The diagram is itself a drawing made with this server: [docs/flow.dxf](docs/flow.dxf)
+opens in AutoCAD if it needs changing.
 
 ## Why three backends
 
