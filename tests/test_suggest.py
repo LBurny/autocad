@@ -13,7 +13,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from acadmcp import suggest  # noqa: E402
+from acadmcp import server, suggest  # noqa: E402
+from acadmcp.backends import make_backend  # noqa: E402
 
 
 def _step(index, op, params, state="applied", label=""):
@@ -266,3 +267,38 @@ def test_the_suggest_module_stays_cad_free():
                 absolute.add((node.module or "").split(".")[0])
     assert absolute <= {"__future__", "json", "re", "collections", "typing"}, absolute
     assert relative == set(), relative
+
+
+# --- the tool --------------------------------------------------------------
+
+
+@pytest.fixture
+def _tool_session():
+    """A fresh dxf drawing behind the tool surface, dropped again afterwards."""
+    server._state.reset(make_backend("dxf"), "dxf")
+    yield
+    server._state.backend = None
+
+
+def test_catalog_suggest_reports_repetition_through_the_tool(_tool_session):
+    """Tool level: three identical door steps are one suggestion, not three.
+
+    Identical means identical *including position* — the module's own rule — so this draws
+    the same door three times rather than three doors along a wall, which would be three
+    different things and rightly suggest nothing.
+    """
+    for _ in range(3):
+        server.draw_door(hinge=[1000, 0], width=900)
+
+    out = server.catalog_suggest(min_count=3)
+
+    assert out["ok"] is True
+    assert len(out["suggestions"]) == 1
+    suggestion = out["suggestions"][0]
+    assert suggestion["op"] == "draw_door" and suggestion["count"] == 3
+    assert suggestion["steps"] == [1, 2, 3]
+
+
+def test_catalog_suggest_validates_min_count(_tool_session):
+    with pytest.raises(ValueError, match="at least 2"):
+        server.catalog_suggest(min_count=1)

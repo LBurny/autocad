@@ -21,8 +21,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from acadmcp import capture_ops, catalog, ops, settings  # noqa: E402
+from acadmcp import capture_ops, catalog, ops, server, settings  # noqa: E402
 from acadmcp.backends import make_backend  # noqa: E402
+from acadmcp.backends.base import BackendError  # noqa: E402
 from acadmcp.catalog import Catalog, Element  # noqa: E402
 
 KEY = "rollup_door"
@@ -283,3 +284,64 @@ def test_the_whole_loop_places_a_published_element_in_a_fresh_drawing(tmp_path):
     )
     _, primitives, _ = capture_ops.import_fragment(report["fragment"])
     assert capture_ops.fingerprint_primitives(primitives) == fingerprint
+
+
+# ---------------------------------------------------------------------------
+# the tool surface
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _tool_session():
+    """A fresh dxf drawing behind the tool surface, dropped again afterwards."""
+    server._state.reset(make_backend("dxf"), "dxf")
+    yield
+    server._state.backend = None
+
+
+def test_element_publish_closes_the_loop_over_the_tool_surface():
+    """Tool level: capture, publish, then a fresh drawing places the element by key.
+
+    This is the whole point of publishing — the accumulation is only real if the tools carry
+    it, not just the module underneath. `catalog.reset()` stands in for the fresh process a
+    project file is written for: the next load reads `./elements.json` publish created, the
+    entry arrives with its geometry fragment, and `place_element` imports the definition.
+    """
+    server.draw_wall(points=[[0, 0], [6000, 0]], thickness=200)
+    server.draw_door(hinge=[1000, 0], width=900)
+    server.element_capture(steps=[1, 2], key="loop_door", layer="A-DOOR")
+
+    report = server.element_publish(key="loop_door")
+
+    assert report["ok"] is True
+    assert Path(report["file"]).is_file()
+    assert Path(report["fragment"]).is_file()
+
+    catalog.reset()  # a new process, reading the project file publish just wrote
+    server.drawing_new(backend="dxf")
+    placed = server.place_element(type="loop_door", at=[1000, 1000], tag=False)
+
+    assert placed["ok"] is True
+    be = server._state.backend
+    assert [e.dxf.name for e in be.msp if e.dxftype() == "INSERT"] == ["ACADMCP_LOOP_DOOR"]
+    assert server.drawing_verify()["verdict"] == "matches"
+
+
+def test_element_publish_refuses_a_key_that_is_not_in_the_catalogue(_tool_session):
+    with pytest.raises(BackendError, match="no element"):
+        server.element_publish(key="never_captured")
+
+
+def test_element_publish_refuses_a_key_this_drawing_never_captured(_tool_session):
+    """The entry exists but the definition does not live here: refused, naming what is missing."""
+    catalog.current().register(
+        {
+            "key": "elsewhere",
+            "label": "elsewhere",
+            "op": "insert_captured",
+            "params": {"block": "ACADMCP_ELSEWHERE"},
+        }
+    )
+
+    with pytest.raises(ValueError, match="lives in the drawing that captured it"):
+        server.element_publish(key="elsewhere")

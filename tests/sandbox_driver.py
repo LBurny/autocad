@@ -13,6 +13,10 @@ process from the *current working tree*, so the code under test is the code as
 it stands right now — never a server started before the last edit — and
 concurrent drivers never share drawing state. The driver prints the git HEAD
 it launched from so a report can prove that freshness.
+
+Set ``ACADMCP_SANDBOX_CWD`` to run the server with a project directory as its
+working directory (see :func:`_server_cwd`); the default is this repository,
+which is where the sandbox has always run.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -28,6 +33,19 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _server_cwd() -> Path:
+    """The server subprocess's working directory — the repository root unless overridden.
+
+    The default keeps every existing exercise exactly as it was. A drawing exercise that
+    needs a *project* sets ``ACADMCP_SANDBOX_CWD``: the project catalogue is discovered by
+    walking up from the server's working directory (``acadmcp.json``), so a publish has to
+    be run with the project directory as the server's cwd for the file it writes to be the
+    one the next call finds — which is what a real client sitting in that project sees.
+    """
+    override = os.environ.get("ACADMCP_SANDBOX_CWD", "").strip()
+    return Path(override).resolve() if override else ROOT
 
 
 class ToolFailed(RuntimeError):
@@ -72,7 +90,7 @@ async def _run(script: Path) -> None:
     server = StdioServerParameters(
         command=str(ROOT / ".venv" / "Scripts" / "python.exe"),
         args=["-m", "acadmcp.server"],
-        cwd=str(ROOT),
+        cwd=str(_server_cwd()),
     )
     async with stdio_client(server) as (read, write), ClientSession(read, write) as session:
         await session.initialize()

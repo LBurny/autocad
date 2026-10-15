@@ -29,7 +29,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from acadmcp import sheet, templates  # noqa: E402
+from acadmcp import server, sheet, templates  # noqa: E402
 from acadmcp.backends import make_backend  # noqa: E402
 
 SCRIPT = ROOT / "scripts" / "build_templates.py"
@@ -224,3 +224,41 @@ def test_artefacts_rebuild_identically():
     )
 
     assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+
+
+# ---------------------------------------------------------------------------
+# the tool surface
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _tool_session():
+    """A fresh dxf drawing behind the tool surface, dropped again afterwards."""
+    server._state.reset(make_backend("dxf"), "dxf")
+    yield
+    server._state.backend = None
+
+
+def test_template_list_returns_the_shipped_templates():
+    rows = server.template_list()["templates"]
+
+    assert {row["key"] for row in rows} == {"gb_a3_arch", "gb_a4_arch"}
+    assert all(row["paper"] and row["scale"] and row["standard"] for row in rows)
+
+
+def test_drawing_new_from_a_template_carries_the_sheet(_tool_session):
+    """Tool level: the template's sheet is drawn as a real step and reported in info()."""
+    out = server.drawing_new(backend="dxf", template="gb_a3_arch")
+
+    assert out["ok"] is True
+    assert out["template"]["key"] == "gb_a3_arch"
+    assert out["sheet"]["paper"] == "A3"
+    assert out["sheet"]["scale"] == "1:100"
+
+    be = server._state.backend
+    assert be.entities(layer="A-SHEET"), "the frame is drawn content on the sheet's own layer"
+
+
+def test_drawing_new_refuses_an_unknown_template_by_name(_tool_session):
+    with pytest.raises(ValueError, match="unknown template"):
+        server.drawing_new(backend="dxf", template="gb_a2_arch")

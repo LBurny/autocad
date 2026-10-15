@@ -5,7 +5,7 @@ tools were not ranked badly — they were unsearchable. The fix is data: one rec
 naming the AutoCAD commands it stands for, and the phrases — Chinese among them — that
 somebody would actually type.
 
-This module is deliberately not a search engine. At 52 tools the whole surface fits in a
+This module is deliberately not a search engine. At 56 tools the whole surface fits in a
 client's context, so nothing needs ranking; what is needed is a way from the word a person
 used to the tool that does it, which is `lookup` and the `term` argument of `drawing_help`.
 `tests/test_terms.py` refuses to let a tool exist without a record here — the same rule the
@@ -38,9 +38,13 @@ class Term:
 
 #: Commands two tools genuinely drive, each for its own half of the job. Deliberately tiny:
 #: a duplicated command is usually a copy-paste mistake, and the gate in `tests/test_terms.py`
-#: fails on one rather than letting it pass quietly. Only two things belong here — the wall
-#: run that an opening is cut into, and the one undo stack that both undo and rollback walk.
-SHARED_CAD: tuple[str, ...] = ("MLINE", "UNDO")
+#: fails on one rather than letting it pass quietly. Each entry here is a command that two
+#: tools legitimately stand for — MLINE for the wall run and the run an opening is cut into,
+#: UNDO for the one undo stack `drawing_undo` and `drawing_rollback_to` both walk,
+#: CHECKSTANDARDS for `drawing_critique` (component checks) and `drawing_check_standard` (the
+#: standard's own rules), NEW for `drawing_new` and the `template_list` of what NEW starts
+#: from, and WBLOCK for the capture and the publish of what it captured.
+SHARED_CAD: tuple[str, ...] = ("MLINE", "UNDO", "CHECKSTANDARDS", "NEW", "WBLOCK")
 
 
 #: Keyed by tool name, in the order the tools appear in `server.py`.
@@ -61,6 +65,10 @@ TOOL_TERMS: dict[str, Term] = {
     "drawing_open": Term(
         cad=("OPEN",),
         phrases=("open drawing", "打开图纸", "载入 dxf", "读取已有图纸"),
+    ),
+    "template_list": Term(
+        cad=("NEW",),
+        phrases=("模板", "样板", "图框模板"),
     ),
     "drawing_save": Term(
         cad=("SAVEAS", "QSAVE"),
@@ -113,7 +121,11 @@ TOOL_TERMS: dict[str, Term] = {
     ),
     "drawing_critique": Term(
         cad=("CHECKSTANDARDS",),
-        phrases=("critique", "构件核查", "组件检查", "门画对了吗", "标准检查"),
+        phrases=("critique", "构件核查", "组件检查", "门画对了吗"),
+    ),
+    "drawing_check_standard": Term(
+        cad=("CHECKSTANDARDS", "STANDARDS"),
+        phrases=("标准检查", "图层规范", "制图标准"),
     ),
     "drawing_finalize": Term(
         cad=(),
@@ -272,6 +284,14 @@ TOOL_TERMS: dict[str, Term] = {
     "element_capture": Term(
         cad=("BLOCK", "WBLOCK"),
         phrases=("capture element", "收编构件", "做成块", "创建块", "沉淀构件", "画一次以后用"),
+    ),
+    "element_publish": Term(
+        cad=("WBLOCK",),
+        phrases=("发布元件", "入库", "存进组件库"),
+    ),
+    "catalog_suggest": Term(
+        cad=(),
+        phrases=("沉淀建议", "重复", "建议入库"),
     ),
     "place_along": Term(
         cad=("DIVIDE", "MEASURE"),

@@ -28,8 +28,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from acadmcp import layers, ops, settings, sheet, standards  # noqa: E402
+from acadmcp import layers, ops, server, settings, sheet, standards  # noqa: E402
 from acadmcp.backends import make_backend  # noqa: E402
+from acadmcp.backends.base import BackendError  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -818,3 +819,33 @@ def test_the_shipped_standard_flags_a_known_bad_height():
     )
 
     assert issue["detail"]["nearest_nominal_mm"] == 2.5
+
+
+# --- the tool ---------------------------------------------------------------
+
+
+@pytest.fixture
+def _tool_session():
+    """A fresh dxf drawing behind the tool surface, dropped again afterwards."""
+    server._state.reset(make_backend("dxf"), "dxf")
+    yield
+    server._state.backend = None
+
+
+def test_drawing_check_standard_reports_an_off_series_text(_tool_session):
+    """Tool level: a sheet plus a 260 mm text, whose 2.6 mm paper height is off the series."""
+    server.drawing_sheet(paper="A3", scale="1:100")
+    server.add_text([0, 0], "注", height=260)
+
+    report = server.drawing_check_standard()
+
+    assert report["ok"] is True
+    assert report["standard"] == "gbt50001"
+    errors = [i for i in report["issues"] if i["severity"] == "error"]
+    assert any(i["rule"] == "text_height_off_series" for i in errors)
+    assert report["counts"]["error"] == len(errors) >= 1
+
+
+def test_drawing_check_standard_refuses_an_unknown_standard_by_name(_tool_session):
+    with pytest.raises(BackendError, match="no standard"):
+        server.drawing_check_standard(standard="nope")

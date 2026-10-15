@@ -21,6 +21,15 @@ src/acadmcp/
                         masquerading text, sheet fit). Pure — geom, layers and sheet only.
   capture_ops.py        element capture: journal steps become a block definition plus a
                         catalogue entry, so a verified component is never re-derived.
+  standards.py          the drafting standard as data: GB/T tables with sources, a lookup
+                        that refuses by name, and check() over a drawing's snapshot. Pure —
+                        layers and sheet only, no CAD.
+  templates.py          the shipped templates: the standard, paper, scale and title-block
+                        fields a drawing starts from. Pure, no CAD.
+  suggest.py            repetition mining over the step rows: what was drawn the same way
+                        twice is a library element waiting to be captured. Pure, no CAD.
+  data/                 the shipped data: elements.json (the catalogue), standards.json
+                        (GB/T tables) and templates.json (the two template specifications)
   terms.py              the tool vocabulary: the AutoCAD command and the Chinese phrase for
                         each tool. Data plus lookup; no CAD imports.
   prompts.py            the MCP prompt templates (floor_plan, headless_to_live,
@@ -29,7 +38,7 @@ src/acadmcp/
                         and the PDF paper-size read-back. Pure — it imports layers for the
                         measured character width and nothing else, and no CAD library.
   capture.py            Win32 window capture, and finding the AutoCAD frame
-  server.py             the MCP tool surface (52 tools, each annotated by behaviour class),
+  server.py             the MCP tool surface (56 tools, each annotated by behaviour class),
                         the audit middleware and the server instructions
   journal.py            the backend-neutral step journal (undo/redo bookkeeping). No CAD imports.
   acad_plugin_client.py the socket client for the in-AutoCAD plugin
@@ -41,7 +50,10 @@ src/acadmcp/
     com.py              ActiveX driver — draws into a running AutoCAD; journals in memory
     plugin.py           records primitives per step and hands them to the plugin
 examples/floor_plan_demo.py
+templates/              the committed template artefacts (gb_a3_arch.dxf, gb_a4_arch.dxf),
+                        built by scripts/build_templates.py, never hand-drawn
 scripts/check_doc_numbers.py   every quotable number, derived from the tree; non-zero on drift
+scripts/build_templates.py     builds and gates the template artefacts (fingerprint, standard)
 evaluations/            read-only QA pairs + fixture DXF + harness, per the mcp-builder guide
 tests/                  test_geom.py, test_backends.py, test_journal.py, test_recording.py,
                         test_dxf_journal.py, test_plugin_backend.py, test_server_journal.py,
@@ -56,6 +68,10 @@ tests/                  test_geom.py, test_backends.py, test_journal.py, test_re
                         test_critique.py (component checks against the journal),
                         test_capture.py (element capture: block, catalogue, reopen),
                         test_finalize_gate.py (the three check/capture tools, wired),
+                        test_standards.py (GB/T tables as data, and the conformance check),
+                        test_templates.py (the template registry and the artefact gate),
+                        test_publish.py (capture → publish → place in a fresh drawing),
+                        test_suggest.py (repetition mined from the journal),
                         test_doc_numbers.py (the docs and the evaluation answers),
                         test_sheet.py (paper, scale, frame, title block, PDF read-back),
                         test_sheet_backend.py (the page setup and paperspace, read back),
@@ -64,6 +80,8 @@ tests/                  test_geom.py, test_backends.py, test_journal.py, test_re
                         test_input_validation.py (caller mistakes surface as readable errors),
                         test_live_screenshot.py (no restore, no rename on export),
                         sandbox_driver.py (fresh-server sandbox for live drawing exercises),
+                        sandbox_library_check.py (draw → check → suggest → capture → publish
+                        → place in a fresh drawing, over the wire),
                         sandbox_prompts_check.py / sandbox_audit_check.py /
                         sandbox_correctness_check.py (what it drives: the prompts and
                         instructions over the wire, the audit log, and critique → finalize
@@ -74,7 +92,7 @@ tests/                  test_geom.py, test_backends.py, test_journal.py, test_re
 ## Commands
 
 ```bash
-uv run pytest -q                      # 586 tests, ~12s, no AutoCAD required
+uv run pytest -q                      # 611 tests, ~12s, no AutoCAD required
 uv run pytest tests/test_terms.py -q  # adding a tool without a vocabulary entry fails here
 uv run pytest tests/test_prompts.py -q  # a prompt naming a tool that does not exist fails here
 uv run python scripts/check_doc_numbers.py   # docs and evaluation answers vs the tree

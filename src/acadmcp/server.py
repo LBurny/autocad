@@ -42,7 +42,10 @@ from . import (
     prompts,
     settings,
     sheet,
+    standards,
+    suggest,
     summary,
+    templates,
     terms,
     verify,
 )
@@ -352,7 +355,7 @@ def drawing_help(term: str | None = None) -> dict[str, Any]:
             "hint": ""
             if matches
             else (
-                "no tool matched. This index covers the vocabulary of the 52 tools — an "
+                "no tool matched. This index covers the vocabulary of the 56 tools — an "
                 "AutoCAD command name, an English phrase or a Chinese one. It does not cover "
                 "the element catalogue: for those, call element_types() (钢立柱, 焊接符号, "
                 "钢梁 and the rest live there), and call drawing_help() with no term for the "
@@ -443,6 +446,10 @@ def drawing_status() -> dict[str, Any]:
     file a session's journal was written to beside the drawing.
 
     `sheet` is the paper this drawing is set up on — empty until `drawing_sheet` is called.
+
+    `standard` is the drafting standard in force: how many are loaded, which one is in
+    force, and every file or row the loader had to skip — so a project's own GB/T file is
+    visible here rather than only in how the layers came out.
     """
     be = _state.require()
     out = dict(be.info())
@@ -454,6 +461,7 @@ def drawing_status() -> dict[str, Any]:
         "skipped": list(loaded.skipped),
     }
     out["sheet"] = dict(getattr(be, "sheet", {}) or {})
+    out["standard"] = standards.describe()
     recorder = getattr(be, "drawing_catalog", None)
     if recorder is not None:
         out["drawing_catalog"] = recorder()
@@ -461,16 +469,31 @@ def drawing_status() -> dict[str, Any]:
 
 
 @mcp.tool(annotations=_DESTRUCTIVE)
-def drawing_new(backend: str = "dxf", path: str | None = None) -> dict[str, Any]:
-    """Start a new drawing on the chosen backend.
+def drawing_new(
+    backend: str = "dxf", path: str | None = None, template: str = ""
+) -> dict[str, Any]:
+    """Start a new drawing on the chosen backend, optionally from a template.
 
     backend="dxf" builds a headless document (optionally at `path` — the file is
     written on drawing_save, not read now); backend="com" asks the running
     AutoCAD for a new drawing.
 
+    `template` is a key from `template_list` (`gb_a3_arch` is the A3 architectural sheet).
+    A non-empty template starts the drawing from a specification: the standard it names
+    drives the layer table, the paper, orientation and scale become the page setup, and the
+    frame and title block are drawn as one `drawing_sheet` step — so a plan begins on the
+    right paper at the right scale instead of gaining a sheet later. An unknown key is
+    refused, naming the templates that exist. Empty (the default) is the bare new drawing
+    this tool has always made. A template draws paperspace, so it is `dxf`-only: the com
+    and plugin backends have no paperspace path and refuse by name.
+
     Starting a new drawing replaces the session's current one; when that one
     had content, the reply carries a `note` saying so.
     """
+    # Resolved before the backend is built: a misspelt key is the caller's mistake and must
+    # not drop the drawing they were working on (the refusal travels as a ValueError, which
+    # the tool surface re-raises with its message intact).
+    spec = templates.resolve_template(template) if template.strip() else None
     dropped = _session_drawing()
     kind = backend.strip().lower()
     if kind == "com":
@@ -492,7 +515,53 @@ def drawing_new(backend: str = "dxf", path: str | None = None) -> dict[str, Any]
     _state.reset(be, kind)
     ops.setup_layers(be)
     _stamp_catalog(be)
-    return {"ok": True, **be.info(), **_switch_note(dropped)}
+    sheet_report = _start_from_template(be, spec) if spec is not None else {}
+    return {"ok": True, **be.info(), **sheet_report, **_switch_note(dropped)}
+
+
+def _start_from_template(be: Backend, spec: templates.TemplateSpec) -> dict[str, Any]:
+    """Apply a template's specification to a freshly started drawing, as one sheet step.
+
+    The order is the one ``scripts/build_templates.py`` builds its artefacts in — the
+    standard's layers, then the page setup, then the frame and title block — so a drawing
+    started from a template and the committed artefact for that template carry the same
+    sheet. The 比例 field is written from the spec's own scale, because a sheet whose title
+    block states no scale fails the sheet's own point (GB/T 10609.1).
+    """
+    if not getattr(be, "supports_sheet", False):
+        raise BackendError(
+            f"backend {be.name!r} cannot start from template {spec.key!r}: a template is a "
+            "page setup, a frame and a title block, which are paperspace — only the dxf "
+            "driver writes them. Use drawing_new(backend='dxf', template=...)"
+        )
+    ops.setup_layers(be, standard=spec.standard)
+    paper = sheet.resolve_paper(spec.paper, spec.orientation)
+    ratio = sheet.resolve_scale(spec.scale)
+    be.set_page_setup(paper, ratio)
+    fields = {**spec.title_fields, "比例": spec.scale}
+    params = {
+        "paper": paper.name,
+        "scale": f"{ratio[0]}:{ratio[1]}",
+        "orientation": spec.orientation,
+        "template": spec.key,
+    }
+    with _auto_step("drawing_sheet", params, label=spec.label) as active:
+        report = ops.draw_sheet(active, paper, ratio, fields)
+    report["template"] = spec.describe()
+    return report
+
+
+@mcp.tool(annotations=_READONLY)
+def template_list() -> dict[str, Any]:
+    """List the templates a drawing can start from, with the sheet each one builds.
+
+    Each row names the key `drawing_new(template=...)` takes, the standard the template
+    draws under, the paper, orientation and plot scale it sets, the title block's own
+    fields, and the committed `.dxf` artefact under `templates/` that the specification
+    builds. A project's own templates file would merge over the package's; today this is
+    what ships.
+    """
+    return {"ok": True, "templates": templates.template_rows()}
 
 
 @mcp.tool(annotations=_DESTRUCTIVE_IDEMPOTENT)
@@ -840,6 +909,92 @@ def drawing_critique(focus: str = "") -> dict[str, Any]:
         e.key: e.tag_prefix for e in catalog.current().elements.values() if e.tag_prefix
     }
     return {"ok": True, **critique.run(be.step_rows(), tag_prefixes, focus=focus)}
+
+
+def _standard_snapshot(be: Backend) -> dict[str, Any]:
+    """The drawing as `standards.check` reads it, gathered off the backend as plain data.
+
+    ``be.entities()`` carries no text height, so the texts come from the journal's applied
+    steps' recorded primitives instead — every ``text`` primitive carries its height, layer
+    and content, and a sheet's title block (whose text is paper, at 1:1) rides along. The
+    plugin keeps its journal in the DWG and reports the primitives on its own step rows, so
+    both owners are read here — the same reconciliation `critique.py` already does.
+    """
+    info = be.info()
+    records = {step.index: step for step in getattr(getattr(be, "journal", None), "steps", [])}
+    texts: list[dict[str, Any]] = []
+    for row in be.step_rows():
+        if str(row.get("state", "")).strip().lower() in critique.INACTIVE_STATES:
+            continue
+        primitives = row.get("primitives")
+        if not isinstance(primitives, list):
+            record = records.get(row.get("index"))
+            primitives = getattr(record, "primitives", None) or []
+        for primitive in primitives:
+            if not isinstance(primitive, dict) or primitive.get("kind") != "text":
+                continue
+            texts.append(
+                {
+                    "height": primitive.get("height"),
+                    "layer": primitive.get("layer", ""),
+                    "content": primitive.get("text", ""),
+                    "paper": bool(primitive.get("paper")),
+                }
+            )
+    return {
+        "units": info.get("units", "mm"),
+        "layers_in_use": sorted(
+            {str(row.get("layer", "")) for row in be.entities(limit=10000) if row.get("layer")}
+        ),
+        "texts": texts,
+        "sheet": info.get("sheet") or {},
+    }
+
+
+@mcp.tool(annotations=_READONLY)
+def drawing_check_standard(standard: str = "") -> dict[str, Any]:
+    """Check the drawing against the drafting standard in force.
+
+    `standard` names one of the loaded GB/T standards; empty uses the standard in force
+    (`drawing_status`'s `standard` block says which that is, and every file the loader had
+    to skip). An unknown name is refused by name.
+
+    The checks are the standard's own, and the ones AutoCAD's CHECKSTANDARDS runs: the unit
+    is the millimetre this package draws in; every text height is in the standard's nominal
+    series, read as a *paper* height (model height times the plot scale, and text on the
+    sheet's layers already at 1:1 — a rule the reply's `assumed_scale` names when the
+    drawing carries no sheet to take a denominator from); every layer in use is one the
+    standard's table names (a warning, because a project's own layers are legitimate); and
+    the sheet states its 比例. Like `drawing_critique` this reports and never draws: each
+    finding carries `rule`, `severity`, `detail` and the `entities` it is about. It is
+    advisory — `drawing_finalize` does not gate on it this wave.
+
+    Deferred and named, never faked: the layer *definitions'* own colour, linetype and
+    lineweight need a `layer_table()` read no backend exposes yet, so this wave compares
+    the layer *names* in use (see `acadmcp.standards`'s docstring).
+    """
+    std = standards.in_force(standard)
+    if std is None:
+        names = ", ".join(standards.current().keys()) or "none"
+        raise BackendError(
+            f"no standard {standard!r} is loaded, so there is nothing to check against; "
+            f"this session has: {names}. Empty `standard` uses the standard in force"
+        )
+    be = _state.require()
+    issues = standards.check(std, _standard_snapshot(be))
+    counts = {"error": 0, "warning": 0}
+    for issue in issues:
+        severity = str(issue.get("severity", ""))
+        if severity in counts:
+            counts[severity] += 1
+    return {
+        "ok": True,
+        "standard": std.name,
+        "label": std.label,
+        "digest": std.digest(),
+        "issues": issues,
+        "counts": counts,
+    }
 
 
 @mcp.tool(annotations=_READONLY)
@@ -2219,6 +2374,71 @@ def element_capture(
                 base_point=base_point,
             ),
         }
+
+
+@mcp.tool(annotations=_MUTATING)
+def element_publish(key: str, path: str = "") -> dict[str, Any]:
+    """Publish a captured element, and its geometry, into the project library.
+
+    Publishing is what makes the library *accumulate*: `element_capture` is drawing-local —
+    the block definition lives in the drawing that captured it, and a fresh drawing has never
+    seen it — while a capture written into a project file is something a new drawing can
+    place. So two things are written: the catalogue entry, and a geometry fragment under
+    ``<catalogue dir>/library/<key>.dxf`` holding the block definition and, in its journal,
+    the element's own primitives. From then on `place_element(type=key)` works in a drawing
+    that never saw the capture, because `insert_captured` imports the fragment when the
+    definition is absent.
+
+    The geometry has to come from the **current drawing's journal**: the definition must be
+    one this drawing recorded, so open the drawing that captured it (`drawing_open`) and
+    publish from there. A publish from a drawing that never captured the key is refused by
+    name rather than writing an entry that resolves to nothing. Only applied capture steps
+    count — a capture that was undone is no longer the drawing's to publish.
+
+    `path` names the catalogue file to write; empty resolves to the first project catalogue
+    file in `acadmcp.json`, and when neither exists `./elements.json` is created beside a
+    `./acadmcp.json` naming it, reported in `created`. The target is **appended to, never
+    overwritten or re-sorted**, so publishing twice under one key refuses rather than
+    replacing (nothing in the library is ever silently overwritten). The reply is
+    `{ok, file, fragment, created, key, digest}`, with both the file and the fragment path
+    named so a file appearing in the project is never unannounced. Nothing is drawn, so this
+    is not a journal step.
+    """
+    be = _state.require()
+    element = _entry(key)
+    # The definition's record in this drawing's journal is the canonical geometry, not the
+    # block table — and the plugin keeps its journal in the DWG, so the finder is looked up
+    # rather than assumed (a backend without one publishes no geometry, and publish_to says
+    # so by name).
+    finder = getattr(be, "find_block_primitives", None)
+    fragment = finder(element.params.get("block", "")) if finder is not None else None
+    if fragment:
+        fragment["fingerprint"] = element.origin.get("fingerprint", "")
+    # publish_to forgets the settings cache after writing, so the catalogue in force is read
+    # once here, before the write, and never touched again.
+    return catalog.current().publish_to(path or None, element, fragment)
+
+
+@mcp.tool(annotations=_READONLY)
+def catalog_suggest(min_count: int = 3) -> dict[str, Any]:
+    """Point at the repetition in this drawing, and the capture worth making of it.
+
+    A plan drawn twice — five doors of one size, four identical runs — is a library element
+    waiting to be captured, and the journal already records every one of them. This mines
+    the current drawing's step rows and reports what repeats: each suggestion carries the
+    `op`, how many times it occurred (`count`), the shared `params`, the `steps` to capture,
+    and a `hint` naming the literal `element_capture` call (and the `element_publish` that
+    would sediment it). Two steps group when they share an op and their parameters are equal
+    after canonicalisation — keys sorted, numbers rounded to 0.1 mm — so two doors of a
+    different width do not group, and neither do two of the same size at two hinges.
+
+    Read-only and journal-scoped: it suggests, it captures nothing, and it acts on the
+    drawing open now. `min_count` is at least 2 (a single step is not a repeat). Steps the
+    drawing does not contain — undone, planned, failed — are left out, and a row it cannot
+    read is counted in `skipped`, never raised.
+    """
+    be = _state.require()
+    return {"ok": True, **suggest.suggestions(be.step_rows(), min_count=min_count)}
 
 
 def _positions(start: Any, end: Any, count: int | None, spacing: float | None, inset: float):

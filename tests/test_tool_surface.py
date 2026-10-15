@@ -22,7 +22,7 @@ def _tools() -> dict:
 
 def test_every_tool_carries_annotations():
     tools = _tools()
-    assert len(tools) == 52
+    assert len(tools) == 56
     missing = [name for name, t in tools.items() if t.annotations is None]
     assert not missing
 
@@ -50,6 +50,9 @@ def test_annotations_match_behaviour():
         "step_list",
         "element_types",
         "library_list",
+        "drawing_check_standard",
+        "template_list",
+        "catalog_suggest",
     }
     for name in read_only:
         ann = tools[name].annotations

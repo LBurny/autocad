@@ -21,6 +21,9 @@ never redraw what an undo can take back.
 WORKFLOW:
 1. drawing_new(backend="dxf") — draft headless even when AutoCAD is available;
    drawing_replay(backend="plugin") carries the finished plan into AutoCAD later.
+   Pass template="gb_a3_arch" to start on the shipped A3 architectural sheet instead
+   of a bare drawing: the template sets the standard's layers, the page setup and the
+   frame as one step, and template_list names the templates available.
 2. Building envelope: ONE call of draw_wall_with_openings(points=<ring>,
    closed=True, thickness=200, openings=[...]). Never four separate wall runs —
    each run has square-cut ends and leaves a half-wall notch at every corner.
@@ -44,7 +47,7 @@ WORKFLOW:
    plan whole. A sheet narrower than the building is a design choice, not an
    error — but say so in your report.
 
-VERIFY — all four, every time:
+VERIFY — all five, every time:
 - drawing_screenshot() and LOOK at it; zoom into regions with
   drawing_screenshot(window=[min_x, min_y, max_x, max_y]) until the room labels
   are legible in the shot.
@@ -55,6 +58,9 @@ VERIFY — all four, every time:
 - drawing_critique() — the components against the journal: a door off its wall
   or on an uncut one, an opening past its run, a tag breaking convention, a
   plan the viewport cannot hold.
+- drawing_check_standard() — the drawing against the drafting standard: the unit,
+  the layers in use, every text height against the standard's nominal series, and
+  that the sheet states its 比例. It reports, it never blocks — but read it.
 
 Then drawing_finalize() — the done-gate. It refuses while verify or critique
 find errors, so "finished" is never a claim you make unverified.

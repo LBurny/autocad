@@ -122,6 +122,9 @@ that refuses a drawing until both are clean
 **Library elements**: `library_list`, `element_types`, `place_element`,
 `place_along`, `place_grid`, `element_capture`
 
+**Standards, templates and the accumulating library**: `drawing_check_standard`,
+`template_list`, `element_publish`, `catalog_suggest`
+
 **Prompts**: `floor_plan`, `headless_to_live`, `drawing_review`
 
 ### The calls that matter most
@@ -228,7 +231,7 @@ by name.
 
 ```
 src/acadmcp/
-  geom.py        pure 2D geometry (no CAD deps)     server.py     the 52-tool MCP surface
+  geom.py        pure 2D geometry (no CAD deps)     server.py     the 56-tool MCP surface
   ops.py         backend-agnostic operations        journal.py    step bookkeeping
   backends/      dxf / com / plugin drivers         catalog.py    the element catalogue
   catalog_ops.py the parametric twins               summary.py    design summary from the journal

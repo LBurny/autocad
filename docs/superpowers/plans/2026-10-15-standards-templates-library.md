@@ -66,7 +66,7 @@ Execution order with subagent waves (the user's preference): **Wave 1 = Phase A 
 **Interfaces:**
 - Produces: `Standards.load(paths) -> Standards`, `Standards.current()`, `standards.get(name) -> Standard | None`, `Standard.lookup(table, key) -> row` (raises `ValueError` naming the key and the table's coverage), `Standard.layers -> dict[str, LayerSpec]` where `LayerSpec = tuple[int, str, float | None]` (colour, linetype, lineweight-mm or None), `Standard.text_heights -> frozenset[float]`, `Standard.skipped: list[str]`. Consumed by A3, B, C.
 
-- [ ] **Step 1: failing test** — `tests/test_standards.py`:
+- [x] **Step 1: failing test** — `tests/test_standards.py`:
 
 ```python
 def test_lookup_refuses_outside_the_table_by_name():
@@ -80,9 +80,9 @@ def test_empty_table_refuses_everything():
         std.lookup("line_width_groups", "1:20")  # row shipped empty pending transcription
 ```
 
-- [ ] **Step 2: run it** — `.venv/Scripts/python.exe -m pytest tests/test_standards.py -q` → FAIL (`standards` missing).
+- [x] **Step 2: run it** — `.venv/Scripts/python.exe -m pytest tests/test_standards.py -q` → FAIL (`standards` missing).
 
-- [ ] **Step 3: implement** `standards.py` (catalog-shaped: `load`/`current`/`reset`, tolerant `add_file` counting `skipped`, refused-by-name lookup):
+- [x] **Step 3: implement** `standards.py` (catalog-shaped: `load`/`current`/`reset`, tolerant `add_file` counting `skipped`, refused-by-name lookup):
 
 ```python
 class Standard:
@@ -102,7 +102,7 @@ class Standard:
 
 `data/standards.json`: one `"gbt50001"` standard. Populate only what the tree already measures: layers (from `layers.LAYERS` + lineweights **transcribed from GB/T 50001's line-width groups — each row `"source": "GB/T 50001 表…"`; any width not yet transcribed ships as an empty table), text heights `2.5/3.5/5/7/10/14/20` with source, scales as `"see sheet.SCALES"` (a pointer, not a copy — never two sources for one list), title block `{"width": 180, "height": 56, "rows": 4, "source": "GB/T 10609.1"}` matching `sheet.py`'s constants. A test asserts the JSON numbers equal `sheet.TITLE_BLOCK_WIDTH` etc., so the two cannot drift.
 
-- [ ] **Step 4: pass** — same command → PASS.
+- [x] **Step 4: pass** — same command → PASS.
 
 ### Task A2: Lineweight through the layer stack
 
@@ -114,10 +114,10 @@ class Standard:
 **Interfaces:**
 - Produces: `Backend.ensure_layer(name, color=None, linetype=None, lineweight: float | None = None)`. dxf writes `lineweight=int(mm*100)` on the layer table entry; com sets `Lineweight`; plugin forwards the field over RPC. Consumed by A3.
 
-- [ ] **Step 1: failing test** — dxf: after `ensure_layer("A-WALL", 2, "CONTINUOUS", lineweight=0.7)`, `doc.layers.get("A-WALL").dxf.lineweight == 70`.
-- [ ] **Step 2: fail** — pytest: unexpected kwarg.
-- [ ] **Step 3: implement** — protocol + dxf + com + recording passthrough. Plugin: add `"lineweight"` to the RPC payload and set `ltr.LineWeight = (LineWeight)(int)(mm * 100)` in `DrawingApi.EnsureLayer`; older plugins ignore an unknown field (JSON payload is tolerant), so no version dance.
-- [ ] **Step 4: pass** — pytest green; `cd plugin && dotnet test` green; `./scripts/selftest.sh --engine` when AutoCAD is free.
+- [x] **Step 1: failing test** — dxf: after `ensure_layer("A-WALL", 2, "CONTINUOUS", lineweight=0.7)`, `doc.layers.get("A-WALL").dxf.lineweight == 70`.
+- [x] **Step 2: fail** — pytest: unexpected kwarg.
+- [x] **Step 3: implement** — protocol + dxf + com + recording passthrough. Plugin: add `"lineweight"` to the RPC payload and set `ltr.LineWeight = (LineWeight)(int)(mm * 100)` in `DrawingApi.EnsureLayer`; older plugins ignore an unknown field (JSON payload is tolerant), so no version dance.
+- [x] **Step 4: pass** — pytest green; `cd plugin && dotnet test` green; `./scripts/selftest.sh --engine` when AutoCAD is free.
 
 ### Task A3: The standard drives layer setup, and settings name the project standard
 
@@ -131,8 +131,8 @@ class Standard:
 - Consumes: A1's `Standards.current()`, A2's `lineweight`.
 - Produces: `Settings.standards: list[str]`; `setup_layers` applies the in-force standard's layer table (colour, linetype, lineweight) overlaid by `settings.layers`; `drawing_status()["standard"]` = name + digest + skipped.
 
-- [ ] **Step 1: failing test** — `setup_layers` on a recording backend with a standard whose `A-WALL` row carries `lineweight 0.7` records `ensure_layer(..., lineweight=0.7)`; a project `standards` file replaces a row, package rows survive elsewhere (the catalogue's merge rule, restated).
-- [ ] **Step 2-4:** red → green → `drawing_status` gains `"standard"`; run full suite (layer-touching tests may need the new kwarg in fakes).
+- [x] **Step 1: failing test** — `setup_layers` on a recording backend with a standard whose `A-WALL` row carries `lineweight 0.7` records `ensure_layer(..., lineweight=0.7)`; a project `standards` file replaces a row, package rows survive elsewhere (the catalogue's merge rule, restated).
+- [x] **Step 2-4:** red → green → `drawing_status` gains `"standard"`; run full suite (layer-touching tests may need the new kwarg in fakes).
 
 ---
 
@@ -149,7 +149,7 @@ class Standard:
 
 Checks (this wave): units are mm; every layer in use exists in the standard's table (unknown = warning — project layers are legitimate); every text height is in the standard's series (off-series = error — that is the check AutoCAD's CHECKSTANDARDS actually runs); a sheet exists and its title block states 比例 (reuse the journal's `drawing_sheet` params, the way `critique.py` already reads steps). Layer-table property conformance (colour/linetype/lineweight of the *definition*) needs a backend `layer_table()` read the plugin RPC does not have yet — **deferred, named in the module docstring**, not faked from entity rows.
 
-- [ ] **Steps 1-4:** failing tests for each rule (unknown layer warns, `height=260` errors against the series, missing 比例 errors) → implement → green.
+- [x] **Steps 1-4:** failing tests for each rule (unknown layer warns, `height=260` errors against the series, missing 比例 errors) → implement → green.
 
 ### Task B2: `drawing_check_standard` tool
 
@@ -157,8 +157,8 @@ Checks (this wave): units are mm; every layer in use exists in the standard's ta
 - Modify: `src/acadmcp/server.py` (tool, `_READONLY` annotations), `src/acadmcp/terms.py`, `README.md` + `AGENTS.md` + `evaluations/` (tool count bumps by one here and again in each later phase — the running total lands at 56, see the final gate; update whatever the gate flags in the task that adds the tool)
 - Test: `tests/test_standards.py` (tool-level via a recording backend), `tests/test_tool_surface.py` picks it up automatically
 
-- [ ] **Step 1: failing test** — tool on a drawing with a 260 mm text returns `issues` containing the text-height rule, `ok: True`, verdict counts.
-- [ ] **Step 2-4:** implement thin wrapper (gather snapshot from `be.entities()`, `be.info()`, journal sheet params; call `check`); terms entry `Term(cad=("CHECKSTANDARDS", "STANDARDS"), phrases=("标准检查", "图层规范", "制图标准"))`; run suite + `check_doc_numbers.py`.
+- [x] **Step 1: failing test** — tool on a drawing with a 260 mm text returns `issues` containing the text-height rule, `ok: True`, verdict counts.
+- [x] **Step 2-4:** implement thin wrapper (gather snapshot from `be.entities()`, `be.info()`, journal sheet params; call `check`); terms entry `Term(cad=("CHECKSTANDARDS", "STANDARDS"), phrases=("标准检查", "图层规范", "制图标准"))`; run suite + `check_doc_numbers.py`.
 
 ---
 
@@ -175,7 +175,7 @@ Checks (this wave): units are mm; every layer in use exists in the standard's ta
 
 Two shipped templates: `gb_a3_arch` (gbt50001, A3 landscape, 1:100) and `gb_a4_arch` (gbt50001, A4 portrait, 1:50). Both named in Chinese for the office: label `"A3 建筑平面（GB/T）"`.
 
-- [ ] Steps: failing test (unknown key raises listing both names) → implement → green.
+- [x] Steps: failing test (unknown key raises listing both names) → implement → green.
 
 ### Task C2: `scripts/build_templates.py` + the fingerprint gate
 
@@ -184,10 +184,10 @@ Two shipped templates: `gb_a3_arch` (gbt50001, A3 landscape, 1:100) and `gb_a4_a
 - Create: `templates/gb_a3_arch.dxf`, `templates/gb_a4_arch.dxf` (built artefacts, committed)
 - Test: `tests/test_templates.py` runs `--check`
 
-- [ ] **Step 1: failing test** — `test_templates.py::test_artefacts_rebuild_identically` shells `python scripts/build_templates.py --check` and expects exit 0.
-- [ ] **Step 2: fail** — script absent.
-- [ ] **Step 3: implement.** For each spec: `make_backend("dxf", create=True)` → `ops.setup_layers` under the spec's standard → `drawing_sheet`-equivalent (`be.set_page_setup` + `ops.draw_sheet` with `title_fields`) → `be.save(templates/<key>.dxf)`. `--check` rebuilds into a temp dir and compares a **geometry fingerprint** — the eval-fixture lesson: `(dxftype, layer, text, height, points)` per entity as a `collections.Counter`, compared as sets; never bytes, never `git status`. The build also runs Phase-B `check()` against the artefact and fails on error-severity issues (the template↔standard binding, D4).
-- [ ] **Step 4: pass** — build, check green, suite green.
+- [x] **Step 1: failing test** — `test_templates.py::test_artefacts_rebuild_identically` shells `python scripts/build_templates.py --check` and expects exit 0.
+- [x] **Step 2: fail** — script absent.
+- [x] **Step 3: implement.** For each spec: `make_backend("dxf", create=True)` → `ops.setup_layers` under the spec's standard → `drawing_sheet`-equivalent (`be.set_page_setup` + `ops.draw_sheet` with `title_fields`) → `be.save(templates/<key>.dxf)`. `--check` rebuilds into a temp dir and compares a **geometry fingerprint** — the eval-fixture lesson: `(dxftype, layer, text, height, points)` per entity as a `collections.Counter`, compared as sets; never bytes, never `git status`. The build also runs Phase-B `check()` against the artefact and fails on error-severity issues (the template↔standard binding, D4).
+- [x] **Step 4: pass** — build, check green, suite green.
 
 ### Task C3: `drawing_new(template=...)` + `template_list`
 
@@ -199,14 +199,14 @@ Two shipped templates: `gb_a3_arch` (gbt50001, A3 landscape, 1:100) and `gb_a4_a
 - Consumes: C1's `resolve_template`, A3's standard-driven `setup_layers`.
 - Produces: `drawing_new(backend="dxf", template="gb_a3_arch")` — after `_stamp_catalog`, applies the spec: standard layers, page setup, sheet frame with `title_fields`. `template=""` is today's behaviour, untouched. `template_list()` returns `template_rows()`.
 
-- [ ] Steps: failing tool-level test (new drawing from `gb_a3_arch` carries A-SHEET lines + the standard's layers + `sheet` in `info()`) → implement → green → terms entries (`template_list`: `cad=("NEW",)`, phrases `("模板", "样板", "图框模板")`) → doc numbers.
+- [x] Steps: failing tool-level test (new drawing from `gb_a3_arch` carries A-SHEET lines + the standard's layers + `sheet` in `info()`) → implement → green → terms entries (`template_list`: `cad=("NEW",)`, phrases `("模板", "样板", "图框模板")`) → doc numbers.
 
 ### Task C4: `.dwt` twins (optional, live AutoCAD only)
 
 **Files:**
 - Modify: `scripts/build_templates.py` (`--dwt` flag)
 
-- [ ] `--dwt` opens each built `.dxf` in a scratch AutoCAD doc via win32com (`Documents.Open`), `SaveAs(path, <template format const>)` — verify the constant against `tools/AcadMcp.ApiProbe` output before hardcoding (AGENTS.md measured 25 = ac2018_dxf; the template constant is its neighbour, unverified) — then closes the doc. Without AutoCAD the flag prints `skipped: no AutoCAD` and exits 0. Not gated by pytest.
+- [x] `--dwt` opens each built `.dxf` in a scratch AutoCAD doc via win32com (`Documents.Open`), `SaveAs(path, <template format const>)` — verify the constant against `tools/AcadMcp.ApiProbe` output before hardcoding (AGENTS.md measured 25 = ac2018_dxf; the template constant is its neighbour, unverified) — then closes the doc. Without AutoCAD the flag prints `skipped: no AutoCAD` and exits 0. Not gated by pytest.
 
 ---
 
@@ -222,7 +222,7 @@ Two shipped templates: `gb_a3_arch` (gbt50001, A3 landscape, 1:100) and `gb_a4_a
 **Interfaces:**
 - Produces: `Element.origin: dict` = `{"source_drawing": str, "steps": list[int], "captured_at": str, "fingerprint": str}`, all optional, `{}` for file-authored entries. `describe()` includes it; `digest()` hashes `describe()` **minus** `origin` (D6). Also produces `fingerprint_primitives(prims: list[dict]) -> str` in `capture_ops` — sha256 over a canonicalisation: per primitive `(kind, layer, sorted-rounded-points (0.1 mm), text, height)`, order-free (set semantics, since capture order across steps is stable but step splitting is a caller choice). Both consumed by D2 and D3.
 
-- [ ] **Step 1: failing tests** — the silent-drop guard, which is the whole point:
+- [x] **Step 1: failing tests** — the silent-drop guard, which is the whole point:
 
 ```python
 def test_origin_survives_a_describe_adopt_round_trip():
@@ -237,9 +237,9 @@ def test_digest_ignores_origin():
     ...  # same entries, two origins, one digest
 ```
 
-- [ ] **Step 2: fail** (origin dropped by `_read_element`).
-- [ ] **Step 3: implement** — `Element` field, both readers, digest exclusion with a comment ("provenance is not placement semantics; a stamped entry and its file twin must hash alike"), `fingerprint_primitives`, and `capture_ops.capture` stamping `source_drawing` from `be.info()`, `steps`, UTC ISO time and the fingerprint.
-- [ ] **Step 4: pass** — full suite (identity/digest tests exist; they must stay green unchanged).
+- [x] **Step 2: fail** (origin dropped by `_read_element`).
+- [x] **Step 3: implement** — `Element` field, both readers, digest exclusion with a comment ("provenance is not placement semantics; a stamped entry and its file twin must hash alike"), `fingerprint_primitives`, and `capture_ops.capture` stamping `source_drawing` from `be.info()`, `steps`, UTC ISO time and the fingerprint.
+- [x] **Step 4: pass** — full suite (identity/digest tests exist; they must stay green unchanged).
 
 ### Task D2: Duplicate-geometry refusal
 
@@ -250,8 +250,8 @@ def test_digest_ignores_origin():
 **Interfaces:**
 - Consumes: D1's `fingerprint_primitives` and `origin.fingerprint`.
 
-- [ ] **Failing test:** capturing geometry whose fingerprint already sits on another entry raises `ValueError` naming the existing key ("the library already holds this geometry as 'door_900' — capture refused; rename only if it is genuinely a different element").
-- [ ] Implement + green. Register path keeps its duplicate-**key** refusal; this adds the duplicate-**geometry** one.
+- [x] **Failing test:** capturing geometry whose fingerprint already sits on another entry raises `ValueError` naming the existing key ("the library already holds this geometry as 'door_900' — capture refused; rename only if it is genuinely a different element").
+- [x] Implement + green. Register path keeps its duplicate-**key** refusal; this adds the duplicate-**geometry** one.
 
 ### Task D3: `element_publish` — entry **and geometry** into the project library
 
@@ -278,15 +278,15 @@ end-to-end sandbox in D4 fails by construction.)
   - Publish refuses, naming what's missing: key unknown in the in-force catalogue; key already in the target file (ADD-only); the `block` record absent from the current drawing's journal ("the definition lives in the drawing that captured it — open that drawing and publish from there"). Writes are atomic (tmp + `os.replace`), `ensure_ascii=False`, `indent=2`, entry appended never re-sorted, `_comment` preserved. After writing: `settings.reset()`. Reply: `{ok, file, fragment, created: [...], key, digest}`.
   - `insert_captured` (dxf backend only): when `block not in doc.blocks` and the entry's `origin.geometry_file` resolves (relative to the catalogue file the entry came from; an adopted, drawing-embedded entry has no file context and refuses by name) → `import_fragment` → `create_block` → insert. com/plugin name the capability, as usual.
 
-- [ ] **Failing tests:** publish creates both files + the fragment in an empty tmp cwd; publish into an existing file appends and preserves `_comment`; double-publish refuses by name; the published file loads back through `Catalog.load` (origin included — D1's round-trip across a file); **the loop test**: publish from drawing A, then a fresh `DxfBackend` places `place_element(key)` and the geometry matches A's block (fingerprint equal); publish from a drawing that never captured the key refuses naming the missing definition.
-- [ ] Implement + green + terms entry (`cad=("WBLOCK",)`, phrases `("发布元件", "入库", "存进组件库")`) at integration.
+- [x] **Failing tests:** publish creates both files + the fragment in an empty tmp cwd; publish into an existing file appends and preserves `_comment`; double-publish refuses by name; the published file loads back through `Catalog.load` (origin included — D1's round-trip across a file); **the loop test**: publish from drawing A, then a fresh `DxfBackend` places `place_element(key)` and the geometry matches A's block (fingerprint equal); publish from a drawing that never captured the key refuses naming the missing definition.
+- [x] Implement + green + terms entry (`cad=("WBLOCK",)`, phrases `("发布元件", "入库", "存进组件库")`) at integration.
 
 ### Task D4: Sandbox proof
 
 **Files:**
 - Create: `tests/sandbox_library_check.py` (the `sandbox_driver.py` pattern)
 
-- [ ] A sandbox run that draws, verifies, captures, publishes, starts a **fresh server**, and places the published element in a new drawing — the accumulation loop proven end to end over the wire, per the repo's sandbox rule. Prints the git HEAD line like its siblings.
+- [x] A sandbox run that draws, verifies, captures, publishes, starts a **fresh server**, and places the published element in a new drawing — the accumulation loop proven end to end over the wire, per the repo's sandbox rule. Prints the git HEAD line like its siblings.
 
 ---
 
@@ -301,7 +301,7 @@ end-to-end sandbox in D4 fails by construction.)
 **Interfaces:**
 - Produces: `suggestions(step_rows: list[dict], min_count: int = 3) -> list[dict]`. Pure, no CAD imports. Groups by `(op, canonical-params)` — params canonicalised by sorting keys and rounding floats to 0.1 mm; `steps`, `label` excluded. Each group ≥ `min_count` yields `{"op", "count", "params", "steps": [...], "hint": "these N steps drew the same thing — element_capture(steps=[...], key=…) would make it a library element"}`.
 
-- [ ] Failing tests (repeated `draw_door` group surfaces; two doors of different widths do **not** group; undone steps excluded) → implement → green.
+- [x] Failing tests (repeated `draw_door` group surfaces; two doors of different widths do **not** group; undone steps excluded) → implement → green.
 
 ### Task E2: `catalog_suggest` tool
 
@@ -309,15 +309,15 @@ end-to-end sandbox in D4 fails by construction.)
 - Modify: `src/acadmcp/server.py` (`_READONLY`), `terms.py`
 - Test: `tests/test_suggest.py` tool-level
 
-- [ ] Tool wrapper over `be.step_rows()`; terms entry (`cad=()`, phrases `("沉淀建议", "重复", "建议入库")`); suite + doc numbers green.
+- [x] Tool wrapper over `be.step_rows()`; terms entry (`cad=()`, phrases `("沉淀建议", "重复", "建议入库")`); suite + doc numbers green.
 
 ---
 
 ## Final gate (every phase, and at the end)
 
-- [ ] `.venv/Scripts/python.exe -m pytest -q` — green, count updated in AGENTS.md/README where quoted
-- [ ] `uv run ruff check . --output-format concise` and `uv run ruff format .`
-- [ ] `uv run python scripts/check_doc_numbers.py` — tool count 52 → 56 across README/AGENTS/`evaluations/`
+- [x] `.venv/Scripts/python.exe -m pytest -q` — green, count updated in AGENTS.md/README where quoted
+- [x] `uv run ruff check . --output-format concise` and `uv run ruff format .`
+- [x] `uv run python scripts/check_doc_numbers.py` — tool count 52 → 56 across README/AGENTS/`evaluations/`
 - [ ] `./scripts/selftest.sh --engine` once after Phase A2 (the plugin lineweight) when AutoCAD is free
 - [ ] Update `MEMORY.md` pointers (the two-pillars memory lists these gaps; close them out)
 
