@@ -41,42 +41,40 @@ def build(be) -> dict:
         extent=(-1200.0, -1200.0, W + 1200.0, D + 1200.0),
     )
 
-    # --- envelope, drawn as four runs so the openings are real ----------------
+    # --- envelope, as one closed ring so the corners mitre -------------------
+    # Openings are measured along the ring from (0, 0): the south wall first, then the
+    # east (W + d), the north (W + D + d) and the west (2W + D + d). Four separate runs
+    # cannot do this — a run's ends are capped square, so each corner would step in by
+    # half a wall thickness.
     ops.draw_wall_with_openings(
         be,
-        [(0.0, 0.0), (W, 0.0)],
+        [(0.0, 0.0), (W, 0.0), (W, D), (0.0, D)],
         [
             {"start": 1200, "width": 1500, "kind": "door", "swing": "left", "tag": "FM\u4e591521"},
             {"start": 4200, "width": 1200, "kind": "window", "tag": "C1212"},
             {"start": 8400, "width": 1200, "kind": "window", "tag": "C1212"},
+            # Window tags are pushed outboard of the facade so they clear the lift
+            # lobbies drawn against the inside face.
+            {
+                "start": W + 2800,
+                "width": 1800,
+                "kind": "window",
+                "tag": "C1821",
+                "tag_offset": -500,
+            },
+            {
+                "start": W + 9800,
+                "width": 1800,
+                "kind": "window",
+                "tag": "C1821",
+                "tag_offset": -500,
+            },
+            {"start": W + D + 2400, "width": 1800, "kind": "window", "tag": "C1821"},
+            {"start": 2 * W + D + 2000, "width": 1200, "kind": "window", "tag": "C1212"},
+            {"start": 2 * W + D + 8000, "width": 1200, "kind": "window", "tag": "C1212"},
         ],
         T,
-    )
-    ops.draw_wall_with_openings(
-        be,
-        [(W, 0.0), (W, D)],
-        [
-            # Window tags are pushed outboard of the facade so they clear the
-            # lift lobbies drawn against the inside face.
-            {"start": 2800, "width": 1800, "kind": "window", "tag": "C1821", "tag_offset": -500},
-            {"start": 9800, "width": 1800, "kind": "window", "tag": "C1821", "tag_offset": -500},
-        ],
-        T,
-    )
-    ops.draw_wall_with_openings(
-        be,
-        [(W, D), (0.0, D)],
-        [{"start": 2400, "width": 1800, "kind": "window", "tag": "C1821"}],
-        T,
-    )
-    ops.draw_wall_with_openings(
-        be,
-        [(0.0, D), (0.0, 0.0)],
-        [
-            {"start": 2000, "width": 1200, "kind": "window", "tag": "C1212"},
-            {"start": 8000, "width": 1200, "kind": "window", "tag": "C1212"},
-        ],
-        T,
+        closed=True,
     )
 
     # --- interior partitions --------------------------------------------------

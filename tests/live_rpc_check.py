@@ -283,12 +283,19 @@ def run(report: Report) -> None:
 
             name = dynamic[0]["name"] if dynamic else catalogued[0]["name"]
             first = client.call("ensure_block", block=name, source=str(library))
-            report.check("a block can be imported from the library", first["created"] is True, str(first))
+            report.check(
+                "a block can be imported from the library", first["created"] is True, str(first)
+            )
             again = client.call("ensure_block", block=name, source=str(library))
-            report.check("importing it a second time does nothing", again["created"] is False, str(again))
+            report.check(
+                "importing it a second time does nothing", again["created"] is False, str(again)
+            )
 
             imported = client.call("blocks")["blocks"]
-            report.check("the imported definition is now in this drawing", name in [b["name"] for b in imported])
+            report.check(
+                "the imported definition is now in this drawing",
+                name in [b["name"] for b in imported],
+            )
 
             # A dynamic block has to arrive still dynamic, with its parameters intact:
             # importing it is useless if what lands is a frozen picture of it.
@@ -297,9 +304,12 @@ def run(report: Report) -> None:
                 "it arrived still dynamic, with the same parameters",
                 definition.get("is_dynamic") is True
                 and [p["name"] for p in definition.get("properties", [])]
-                == [p["name"] for p in next((b for b in dynamic if b["name"] == name), {"properties": []}).get(
-                    "properties", []
-                )],
+                == [
+                    p["name"]
+                    for p in next(
+                        (b for b in dynamic if b["name"] == name), {"properties": []}
+                    ).get("properties", [])
+                ],
                 f"dynamic={definition.get('is_dynamic')}, "
                 f"{len(definition.get('properties', []))} parameter(s)",
             )
@@ -310,12 +320,12 @@ def run(report: Report) -> None:
             settable = [p for p in definition.get("properties", []) if not p["read_only"]]
             sized = next((p for p in settable if p["values"]), settable[0] if settable else None)
             wanted = (
-                sized["values"][len(sized["values"]) // 2]
-                if sized and sized["values"]
-                else 250.0
+                sized["values"][len(sized["values"]) // 2] if sized and sized["values"] else 250.0
             )
             report.note(
-                f"placing '{name}' with {sized['name']}={wanted}" if sized else f"'{name}' has no settable parameter"
+                f"placing '{name}' with {sized['name']}={wanted}"
+                if sized
+                else f"'{name}' has no settable parameter"
             )
 
             placed = client.call(
@@ -336,7 +346,9 @@ def run(report: Report) -> None:
                 },
             )
             result = placed["result"]
-            report.check("a step that inserts a library block commits", result["ok"], result["message"])
+            report.check(
+                "a step that inserts a library block commits", result["ok"], result["message"]
+            )
 
             handle = (result.get("step") or {}).get("handles", [""])[0]
             drawn = [row for row in client.call("entities")["entities"] if row["handle"] == handle]
@@ -362,14 +374,14 @@ def run(report: Report) -> None:
                 )
 
             back = client.call("rollback_to", index=0, force=True)
-            report.check("rolling the insert back succeeds", back["result"]["ok"], back["result"]["message"])
+            report.check(
+                "rolling the insert back succeeds", back["result"]["ok"], back["result"]["message"]
+            )
             report.check(
                 "the definition is still there after the rollback, and the reference is not",
                 name in [b["name"] for b in client.call("blocks")["blocks"]]
                 and not [
-                    row
-                    for row in client.call("entities")["entities"]
-                    if row["handle"] == handle
+                    row for row in client.call("entities")["entities"] if row["handle"] == handle
                 ],
             )
             client.call("reset")
@@ -424,7 +436,9 @@ def place_elements(report: Report) -> None:
         f"placed={frame['placed']} tags={frame['tags']}",
     )
 
-    wall = server.place_along("window", start=[0, 6000], end=[12000, 6000], spacing=3000, variant="1200")
+    wall = server.place_along(
+        "window", start=[0, 6000], end=[12000, 6000], spacing=3000, variant="1200"
+    )
     report.check("a run of elements places in one step", wall["ok"], wall["message"])
     report.check(
         "an element with no tags in the drawing yet starts at one",
@@ -442,11 +456,7 @@ def place_elements(report: Report) -> None:
 
     # What actually landed in the drawing, read back off the entities: the size asked for
     # and nothing else's.
-    placed = [
-        row
-        for row in server.listing_entities(limit=500)["entities"]
-        if row.get("block")
-    ]
+    placed = [row for row in server.listing_entities(limit=500)["entities"] if row.get("block")]
     sizes = [row for row in placed if row.get("properties", {}).get("立柱尺寸") == "50 x 150"]
     report.check(
         "every placed element is a block reference at the size it was asked for",
@@ -495,7 +505,7 @@ def _photograph(report: Report) -> None:
     from acadmcp import server
 
     try:
-        framed = server.acad_zoom_extents()
+        framed = server.acad_zoom()
         report.check("the view can be framed before photographing it", framed["ok"], str(framed))
         server.drawing_screenshot(path)
         report.note(f"photographed the placed elements to {path}")
@@ -532,7 +542,11 @@ def survey_libraries(report: Report) -> None:
             dynamic = [b for b in blocks if b.get("is_dynamic")]
             report.note(f"{filename}: {len(blocks)} definition(s), {len(dynamic)} dynamic")
             for block in blocks[:80]:
-                mark = "dynamic" if block.get("is_dynamic") else f"{block.get('entities', '?')} entities"
+                mark = (
+                    "dynamic"
+                    if block.get("is_dynamic")
+                    else f"{block.get('entities', '?')} entities"
+                )
                 report.note(f"  {block['name']}  ({mark})")
             for block in dynamic[:10]:
                 properties = block.get("properties") or []
@@ -565,8 +579,10 @@ def check_mcp_tools(report: Report) -> None:
     """
     from acadmcp import server
 
-    opened = server.plugin_connect(new_document=True)
-    report.check("plugin_connect attaches to a drawing", opened["ok"], str(opened.get("journal")))
+    opened = server.acad_connect(mode="plugin", new_document=True)
+    report.check(
+        "acad_connect(mode=plugin) attaches to a drawing", opened["ok"], str(opened.get("journal"))
+    )
 
     server.step_begin("draw_wall", label="wall", params={"length": 6000})
     server.draw_line([0, 0], [6000, 0], layer="A-WALL")

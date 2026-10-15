@@ -2,12 +2,9 @@
 
 An MCP server that lets an AI client drive AutoCAD to draw 2D architectural floor
 plans — walls, doors, windows, rooms with computed areas, stair cores, lifts,
-riser shafts, grids and dimensions — either into a **live, running AutoCAD
-session** or into a **headless DXF file**.
-
-It is the AutoCAD counterpart to [cadpilot](https://github.com/LBurny/cadpilot):
-same idea, same "the AI issues modelling operations" shape, but the target is a
-2D drawing rather than a 3D model.
+riser shafts, grids and dimensions — into a **live AutoCAD session** or a
+**headless DXF file**. It is the 2D counterpart to
+[cadpilot](https://github.com/LBurny/cadpilot).
 
 ```
 AI client  ──MCP──▶  acadmcp  ──┬── COM (pywin32) ──▶  running AutoCAD 2026
@@ -18,37 +15,25 @@ AI client  ──MCP──▶  acadmcp  ──┬── COM (pywin32) ──▶ 
 
 | | `dxf` | `com` | `plugin` |
 |---|---|---|---|
-| Needs AutoCAD running | no | yes | yes, with the plugin installed |
-| Speed | milliseconds | AutoCAD round-trips | one round trip per step |
-| Live editing afterwards | after you open the file | immediately, entities appear as the AI works | immediately, as one step at a time |
-| Undo granularity | — | per entity | per step, and rollback works regardless of the undo stack |
-| Screenshot | clean re-render, no UI | photographs the AutoCAD window | photographs the AutoCAD window |
-| Good for | generating a plan from scratch, batch work, CI | interactive design, editing an existing drawing | drawing a plan step by step, where any step can be taken back |
+| Needs AutoCAD | no | yes | yes + plugin installed |
+| Entities appear | on file open | live, as the AI works | live, one step at a time |
+| Undo | per step, journaled in the .dxf | per step, in memory | per step, journaled in the .dwg + palette |
+| Good for | batch generation, CI | editing an existing drawing | reviewing a plan as it is drawn |
 
-All geometry is computed once in `acadmcp/geom.py`, so a plan drawn through any
-backend contains identical coordinates.
-
-The `plugin` backend is the one to use when the drawing is meant to be *reviewed* as
-it is made. It keeps a journal of steps inside the DWG, so the user can roll back any
-step from a docked palette in AutoCAD — with or without this server running — and the
-AI can lay out a whole plan first and draw it a step at a time. See
-[docs/plugin.md](docs/plugin.md).
+Geometry is computed once in `geom.py`, so every backend produces identical
+coordinates. Every tool call is one journal step, so a mistake costs
+`drawing_undo()`, not a redraw — and a headless plan replays into live AutoCAD
+with one `drawing_replay()`. The plugin backend is for reviewing as you draw:
+its journal lives in the DWG and rolls back from a docked palette, with or
+without this server running. See [docs/plugin.md](docs/plugin.md).
 
 ## Install
 
 ```bash
-uv sync --extra preview      # or: pip install -e ".[preview]"
+uv sync --extra preview      # the preview extra is matplotlib, for PNG output
 ```
 
-`preview` pulls in matplotlib, which is only needed for PNG rendering.
-
-## Run the server
-
-```bash
-uv run acadmcp                # stdio transport
-```
-
-Register it with your MCP client, e.g. in ZCode's `config.json`:
+Register with your MCP client, e.g. in ZCode's `config.json`:
 
 ```json
 {
@@ -74,30 +59,35 @@ uv run python examples/floor_plan_demo.py --com      # draw into running AutoCAD
 ## Tool surface
 
 **Session** — `drawing_help`, `drawing_status`, `drawing_new`, `drawing_open`,
-`acad_connect`, `acad_zoom_extents`, `acad_zoom_window`, `drawing_save`,
-`drawing_export_dxf`, `drawing_preview`, `drawing_screenshot`, `listing_entities`
+`acad_connect` (`mode="com"|"plugin"`), `acad_zoom` (corners optional), `drawing_save`
+(.dwg or .dxf), `drawing_screenshot` (`inline=False` for just a PNG path),
+`listing_entities`
 
-**Layers and text** — `layer_create`, `layer_create_standard`, `set_text_style`
+**Journal** — `drawing_undo`, `drawing_redo`, `drawing_history`, `drawing_replay`
 
-**Primitives** — `draw_line`, `draw_polyline`, `draw_rect`, `draw_circle`, `draw_arc`
+**Layers and text** — `layer_create` (no name = the standard set), `set_text_style`
 
-**Architecture** — `draw_wall`, `draw_wall_with_openings`, `draw_room`,
-`add_room_label`, `draw_partition`, `draw_door`, `draw_window`, `draw_column`
+**Primitives** — `draw_line`, `draw_polyline`, `draw_rect`, `draw_circle`
+(angles make it an arc)
 
-**Core and services** — `draw_stair`, `draw_lift`, `draw_shaft`, `draw_equipment`
+**Architecture** — `draw_wall` (thickness=120 for a partition),
+`draw_wall_with_openings`, `draw_room` (`walls=False` to label only), `draw_door`,
+`draw_window`, `draw_column`
+
+**Core and services** — `draw_stair`, `draw_lift`, `draw_equipment`
+(`kind="shaft"` for a riser)
 
 **Annotation** — `draw_axis_grid`, `add_text`, `add_leader_note`,
-`add_dimension`, `add_dimension_chain`, `add_hatch`
+`add_dimension` (2 points or a chain), `add_hatch`
 
 **Library elements** — `library_list`, `element_types`, `place_element`,
 `place_along`, `place_grid`
 
 ### The calls that matter most
 
-`draw_wall_with_openings` is the workhorse for reproducing a real plan. Instead of
-drawing wall faces and then trying to place door symbols on top of them, you give
-it a wall run and a list of openings measured in millimetres along that run, and
-it splits the wall, inserts the symbols and keeps everything consistent:
+`draw_wall_with_openings` is the workhorse: give it a wall run and openings in
+millimetres along it, and it splits the wall and inserts the symbols
+consistently:
 
 ```python
 draw_wall_with_openings(
@@ -110,23 +100,21 @@ draw_wall_with_openings(
 )
 ```
 
-`place_along` and `place_grid` are what a factory needs, where the same element repeats
-dozens of times: they insert a real block out of your own library at every position, size
-it through the block's dynamic parameters, number it from the tags the drawing already
-has, and land the whole run as **one step** you can take back in one action:
+`place_along` / `place_grid` repeat a library block at every position, sized
+through its dynamic parameters and numbered from the drawing's existing tags —
+the whole run lands as one undoable step:
 
 ```python
-place_grid("stud", xs=[0, 6000, 12000], ys=[0, 6000])       # a frame of columns
+place_grid("stud", xs=[0, 6000, 12000], ys=[0, 6000])  # a frame of columns
 place_along("window", start=[0, 0], end=[12000, 0], spacing=3000, variant="1200")
 ```
 
-Which block stands for which element is a plain JSON catalogue — `element_types` shows it
-and reports any entry whose block your library has not got — and a project points it at its
-own library and layers with `acadmcp.json`. See [docs/plugin.md](docs/plugin.md).
+The block behind each element is a plain JSON catalogue (`element_types` shows
+it and flags entries whose block your library lacks); a project points it at
+its own library and layers with `acadmcp.json`.
 
-`draw_room` walls a ring in and reports the floor area it actually encloses —
-measured to the inner face of the walls, not the centreline, so the number is
-usable in a room schedule:
+`draw_room` walls a ring in and reports the area to the *inner* face of the
+walls, so the number is usable in a room schedule:
 
 ```python
 draw_room(boundary=[(0, 0), (4000, 0), (4000, 3000), (0, 3000)], name="无菌室", thickness=200)
@@ -135,103 +123,65 @@ draw_room(boundary=[(0, 0), (4000, 0), (4000, 3000), (0, 3000)], name="无菌室
 
 ## Looking at the drawing
 
-`drawing_screenshot` returns an **image content block**, so a multimodal model
-sees the drawing directly rather than being told a file path:
+`drawing_screenshot` returns an image content block, so a multimodal model sees
+the drawing directly. Pass `window=[min_x, min_y, max_x, max_y]` to frame a
+region — a whole plan at 1600 px leaves room labels unreadable. On `dxf` it is
+a clean re-render; on `com` a photograph of the AutoCAD window (needs an
+interactive desktop: the capture goes through `PrintWindow` with
+`PW_RENDERFULLCONTENT`).
 
 ```python
-drawing_screenshot()  # the whole drawing
-drawing_screenshot(window=[0, 3600, 7000, 8000])  # just the lab suite
-```
-
-`window` is `[min_x, min_y, max_x, max_y]` in millimetres. Use it. A whole floor
-plan scaled into a 1600 px image leaves the room labels as unreadable smudges;
-framing the region you changed is what makes a screenshot worth taking.
-
-On the `dxf` backend the image is a clean re-render with no UI around it. On the
-`com` backend it is a photograph of the AutoCAD window — the true current view
-and zoom, with AutoCAD's ribbon and panels included. A minimised AutoCAD window
-is restored automatically before the capture. `acad_zoom_window` frames the live
-view explicitly, which is what you want before a capture if the model needs to
-read text:
-
-```python
-acad_zoom_window(corner1=[0, 3600], corner2=[7000, 8000])
+acad_zoom(corner1=[0, 3600], corner2=[7000, 8000])  # frame the live view first
 drawing_screenshot()
 ```
 
-`drawing_preview` still exists but only returns a path — it is for scripts that
-want a file, not for looking.
-
 ## Conventions
 
-- **Units are millimetres** everywhere. `INSUNITS` is set to 4.
-- **Angles are degrees**, counter-clockwise from +X.
-- Layers follow the GB/T 50001 scheme: `A-WALL`, `A-DOOR`, `A-WINDOW`,
-  `A-ROOM-NAME`, `A-DIM`, `A-AXIS`, `A-STAIR`, `A-LIFT`, `A-SHAFT`, …
-- Room boundaries always mean the **wall centreline ring**; areas are reported for
-  the inner face, so a 4000×3000 ring with 200 mm walls reports 3.8×2.8 m.
-- Steps are the unit of review, not entities: `step_begin` … `step_commit` around the
-  drawing tools makes one step, which is what a rollback and the palette act on.
+- **Millimetres everywhere** (`INSUNITS` = 4); **degrees** counter-clockwise from +X.
+- Layers follow GB/T 50001: `A-WALL`, `A-DOOR`, `A-WINDOW`, `A-ROOM-NAME`,
+  `A-DIM`, `A-AXIS`, `A-STAIR`, `A-LIFT`, `A-SHAFT`, …
+- Room boundaries are the **wall centreline ring**; areas are measured to the
+  inner face (a 4000×3000 ring with 200 mm walls reports 3.8×2.8 m).
+- Steps are the unit of review: `step_begin` … `step_commit` groups drawing
+  calls into one step the palette and rollback act on.
 
 ## Notes and limits
 
-- The COM backend needs AutoCAD installed and, for the first call, running. It
-  attaches with `GetActiveObject("AutoCAD.Application")` and falls back to
-  launching one. Verified against AutoCAD 2026 (release 25.1).
-- AutoCAD answers `RPC_E_CALL_REJECTED` while it is mid-command or repainting,
-  which a few-hundred-entity run will hit. Every COM call is retried with
-  backoff, so a drawing run does not die on a transient.
-- Saving through the COM backend uses `SaveAs`, which **renames** the open
-  drawing. Prefer `drawing_export_dxf` to write a copy.
-- The `mcp` SDK renamed `FastMCP` to `MCPServer` in 2.x; the server imports
-  whichever is present, so both the 1.x and 2.x SDKs work.
-- `draw_wall_with_openings` handles straight runs and polyline runs; openings are
-  measured along the run from its start, and one that runs off the end is
-  trimmed and reported in `clamped_openings`.
-- Door and window symbols are drawn as plain line/arc geometry rather than block
-  references, so they behave identically on both backends. If you need blocks
-  with attributes for scheduling, that is the next thing to add.
-
-- Screenshotting the `com` backend needs an interactive desktop session: it
-  captures the window through `PrintWindow` with `PW_RENDERFULLCONTENT`, because
-  AutoCAD renders through DirectX and a plain capture comes back black. It will
-  not work from a service session with no visible desktop.
+- The COM backend attaches with `GetActiveObject("AutoCAD.Application")`,
+  launching AutoCAD if needed. Verified against AutoCAD 2026 (release 25.1).
+  AutoCAD answers `RPC_E_CALL_REJECTED` while busy; every COM call retries with
+  backoff, so a long run does not die on a transient.
+- Saving through COM uses `SaveAs`, which **renames** the open drawing — pass
+  `drawing_save` a .dxf path for a copy.
+- `draw_wall_with_openings(closed=True)` takes the envelope as a ring and mitres
+  the corners; drawn as four separate runs, each corner steps in by half the
+  wall thickness. An opening past the end is trimmed and reported in
+  `clamped_openings`.
+- Door and window symbols are plain line/arc geometry, not block references, so
+  they behave identically on every backend.
+- The `mcp` SDK renamed `FastMCP` to `MCPServer` in 2.x; both are imported, so
+  either SDK generation works.
 
 ### Chinese text
 
-Getting CJK to show up in AutoCAD rather than as `?` took three findings, all
-measured on AutoCAD 2026 here:
-
-- A stock drawing's `Standard` style is `txt.shx` with **no big font**. An SHX
-  font without a big font has no CJK glyphs, so every Chinese character renders
-  as `?`. Text drawn through the COM backend goes on an `HZ` style this package
-  creates, set to `gbenor.shx` + `gbcbig.shx`. That pair is what actually worked;
-  a CJK TrueType face did not — `simhei.ttf` still drew `?` in AutoCAD, even
-  though it renders correctly in the PNG preview.
-- Repointing a style's font does **not** repaint text already in the drawing.
-  `set_text_style` issues a regen for exactly that reason.
-- Superscript-two (`m²`, U+00B2) renders under every font tested. The single
-  codepoint square-metre sign (`㎡`, U+33A1) renders under **none** of them — not
-  under `gbcbig.shx`, `simhei.ttf` or `simsun.ttc`. Areas are therefore quoted
-  as `m²`.
-
-The DXF backend uses `simsun.ttc` for its own style, because SimSun has both CJK
-and the superscript-two glyph, while SimHei has CJK but no superscript two.
+Measured on AutoCAD 2026: a stock drawing's `Standard` style is `txt.shx` with
+no big font, so CJK renders as `?`. Text drawn here goes on an `HZ` style — the
+COM backend uses `gbenor.shx` + `gbcbig.shx` (the pair that works; `simhei.ttf`
+still draws `?`), the DXF backend `simsun.ttc` (which AutoCAD renders fine, and
+the PNG preview matches: a Chinese character is 1.42× its text height wide).
+Repointing a style does not repaint existing text — `set_text_style` regens for
+that reason. Areas are quoted as `m²` (U+00B2): the single codepoint `㎡`
+(U+33A1) renders under no font tested.
 
 ## Layout
 
 ```
 src/acadmcp/
-  geom.py             pure 2D geometry: offsets, areas, mitre joins (no CAD deps)
-  layers.py           drafting standard: layer names, ACI colours, text heights
-  ops.py              architectural operations built on a backend
-  capture.py          screen capture of a top-level window (for the com backend)
-  server.py           the MCP tool surface
-  backends/
-    base.py           the backend contract
-    dxf.py            ezdxf driver, renders to PNG
-    com.py            ActiveX driver for a live AutoCAD
-examples/floor_plan_demo.py
-plugin/                the in-AutoCAD step plugin (see docs/plugin.md)
-tests/
+  geom.py        pure 2D geometry (no CAD deps)     server.py     the 44-tool MCP surface
+  ops.py         backend-agnostic operations        journal.py    step bookkeeping
+  backends/      dxf / com / plugin drivers         catalog.py    the element catalogue
+  steps.py       journal control actions            acad_plugin_client.py
+plugin/          the in-AutoCAD step plugin (docs/plugin.md)
+examples/        floor_plan_demo.py                 evaluations/  read-only QA harness
+tests/           pytest, no AutoCAD needed
 ```

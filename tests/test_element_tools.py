@@ -18,6 +18,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import acadmcp.server as server  # noqa: E402
+from acadmcp.acad_plugin_client import PluginUnavailable  # noqa: E402
 from acadmcp.backends.base import BackendError  # noqa: E402
 from acadmcp.backends.plugin import PluginBackend  # noqa: E402
 from acadmcp.catalog import Catalog  # noqa: E402
@@ -38,7 +39,10 @@ class FakePlugin:
                     "ok": True,
                     "action": "apply",
                     "message": "applied",
-                    "step": {"handles": ["1", "2"], "primitives": len(params["step"]["primitives"])},
+                    "step": {
+                        "handles": ["1", "2"],
+                        "primitives": len(params["step"]["primitives"]),
+                    },
                 },
                 "status": {"count": len(self.steps)},
             }
@@ -128,23 +132,58 @@ def test_an_element_that_is_not_in_the_catalogue_is_refused_with_the_list(plugin
         server.place_element("chair", at=[0, 0])
 
 
-def test_element_types_reports_what_it_skipped_and_cannot_check():
+def test_element_types_reports_a_library_it_cannot_read(plugin, monkeypatch):
+    # The plugin is stubbed out rather than merely assumed absent. Assuming was the bug:
+    # with AutoCAD open and the plugin loaded — the normal state while working on this
+    # package — the catalogue really can be checked, `matches_library` comes back True,
+    # and this test failed for being run on a machine that had AutoCAD up. What is under
+    # test is the answer when the library cannot be read, so that is what is arranged.
+    class Dead:
+        def call(self, method: str, **params: Any) -> Any:
+            raise PluginUnavailable(f"{method}: nothing listening on 127.0.0.1:9880")
+
+    monkeypatch.setattr(server, "_client", Dead)
+
     listed = server.element_types()
 
     assert listed["ok"]
     assert listed["count"] == len(Catalog.load().elements)
     assert listed["skipped"] == []
-    # No AutoCAD in a pytest run, so the catalogue cannot be checked against the library.
-    # That has to come back as "unchecked", never as "fine": a catalogue that has drifted
+    # "Could not check" must never come back as "fine": a catalogue that has drifted
     # from its library places the wrong block, and silence is how that ships.
     assert listed["matches_library"] is False
     assert listed["problems"]
     assert "could not read" in listed["problems"][0]
-    assert "AcadMcp plugin" in listed["problems"][0]
+    assert "127.0.0.1:9880" in listed["problems"][0]
+
+
+def test_element_types_reports_autocad_being_unreachable(plugin, monkeypatch):
+    def no_plugin() -> Any:
+        raise PluginUnavailable("nothing listening")
+
+    monkeypatch.setattr(server, "_client", no_plugin)
+
+    listed = server.element_types()
+
+    # A different branch: nothing to talk to at all, rather than a library that would
+    # not open. Both have to say "unchecked" instead of reporting a clean catalogue.
+    assert listed["matches_library"] is False
+    assert listed["problems"] == ["AutoCAD is not reachable, so the catalogue could not be checked"]
+
+
+def test_element_types_can_skip_the_library_check(plugin, monkeypatch):
+    def no_plugin() -> Any:
+        raise PluginUnavailable("nothing listening")
+
+    monkeypatch.setattr(server, "_client", no_plugin)
+
+    listed = server.element_types(check_library=False)
+
+    assert "problems" not in listed and "matches_library" not in listed
 
 
 def test_a_placement_without_the_plugin_is_refused_rather_than_drawn_elsewhere():
     server._state.reset(None, None)
 
-    with pytest.raises(BackendError, match="plugin_connect"):
+    with pytest.raises(BackendError, match="acad_connect"):
         server.place_element("door", at=[0, 0])

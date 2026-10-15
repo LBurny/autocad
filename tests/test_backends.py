@@ -11,7 +11,7 @@ from PIL import Image as PILImage
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from acadmcp import ops  # noqa: E402
+from acadmcp import layers, ops  # noqa: E402
 from acadmcp.backends import make_backend  # noqa: E402
 from acadmcp.backends.base import BackendError  # noqa: E402
 
@@ -204,3 +204,220 @@ def test_com_backend_reports_clearly_when_autocad_is_absent():
         assert "AutoCAD" in str(exc)
     except Exception as exc:  # noqa: BLE001 - a live AutoCAD may be present
         pytest.skip(f"AutoCAD session available: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# wall rings, openings and the jamb that used to be drawn twice
+# ---------------------------------------------------------------------------
+
+RING = [(0, 0), (48000, 0), (48000, 24000), (0, 24000)]
+
+
+def _wall_vertices(be) -> set[tuple[float, float]]:
+    return {
+        (round(p[0], 3), round(p[1], 3))
+        for e in be.msp
+        if e.dxftype() == "LWPOLYLINE" and e.dxf.layer == "A-WALL"
+        for p in e.get_points()
+    }
+
+
+def _doubled_lines(be) -> dict[tuple, list[str]]:
+    seen: dict[tuple, list[str]] = {}
+    for e in be.msp:
+        if e.dxftype() != "LINE":
+            continue
+        a, b = e.dxf.start, e.dxf.end
+        key = tuple(sorted([(round(a.x, 3), round(a.y, 3)), (round(b.x, 3), round(b.y, 3))]))
+        seen.setdefault(key, []).append(e.dxf.layer)
+    return {key: layers for key, layers in seen.items() if len(layers) > 1}
+
+
+def test_a_closed_ring_with_openings_mitres_its_corners(be):
+    report = ops.draw_wall_with_openings(
+        be,
+        RING,
+        [{"start": 6000, "width": 4200, "kind": "door", "tag": "JLM4245"}],
+        240,
+        closed=True,
+    )
+
+    assert report["closed"] is True
+    assert report["total_length"] == 144000.0  # the ring's perimeter, not one run
+    assert report["openings"] == 1
+
+    # The outer corner of an envelope whose faces are mitred. Drawn as four separate
+    # runs — the only way to get openings in before `closed` existed — the west wall's
+    # face stops at y=0 and the south wall's at x=0, so this point is never reached and
+    # the outline steps in by 120 mm at every corner.
+    vertices = _wall_vertices(be)
+    assert (-120.0, -120.0) in vertices
+    assert (48120.0, -120.0) in vertices
+    assert (48120.0, 24120.0) in vertices
+    assert (-120.0, 24120.0) in vertices
+
+    assert _doubled_lines(be) == {}
+
+
+def test_a_closed_ring_without_openings_is_one_mitred_wall(be):
+    report = ops.draw_wall_with_openings(be, RING, [], 240, closed=True)
+
+    assert report == {
+        "segments": 1,
+        "openings": 0,
+        "clamped_openings": 0,
+        "total_length": 144000.0,
+        "symbols": 0,
+        "closed": True,
+    }
+    assert (-120.0, -120.0) in _wall_vertices(be)
+
+
+def test_a_closed_ring_needs_three_corners(be):
+    with pytest.raises(ValueError, match="three corners"):
+        ops.draw_wall_with_openings(be, [(0, 0), (1000, 0)], [], 240, closed=True)
+
+
+def test_an_opening_does_not_draw_its_jamb_twice(be):
+    ops.draw_wall_with_openings(
+        be, [(0, 0), (10000, 0)], [{"start": 2000, "width": 1000, "kind": "door"}], 200
+    )
+
+    # The wall's end cap and the door's jamb tick are the same line across the same
+    # thickness. Drawing both put each jamb in the drawing twice, on two layers, which
+    # was 40 of the 166 line segments of a real plan.
+    assert _doubled_lines(be) == {}
+
+    jambs = [
+        e
+        for e in be.msp
+        if e.dxftype() == "LINE"
+        and {round(e.dxf.start.x, 3), round(e.dxf.end.x, 3)} == {2000.0}
+        and {round(e.dxf.start.y, 3), round(e.dxf.end.y, 3)} == {-100.0, 100.0}
+    ]
+    assert [e.dxf.layer for e in jambs] == ["A-DOOR"]
+
+
+def test_a_bare_opening_still_has_its_wall_closed(be):
+    ops.draw_wall_with_openings(
+        be, [(0, 0), (10000, 0)], [{"start": 3000, "width": 1000, "kind": "opening"}], 200
+    )
+
+    # Nothing draws a symbol there, so the wall has to close its own jambs — once each.
+    jambs = [
+        e
+        for e in be.msp
+        if e.dxftype() == "LINE"
+        and {round(e.dxf.start.x, 3), round(e.dxf.end.x, 3)} in ({3000.0}, {4000.0})
+    ]
+    assert sorted(e.dxf.layer for e in jambs) == ["A-WALL", "A-WALL"]
+    assert _doubled_lines(be) == {}
+
+
+# ---------------------------------------------------------------------------
+# the stair's 上/下 labels, and where its outline goes
+# ---------------------------------------------------------------------------
+
+
+def test_stair_labels_sit_at_the_two_ends_of_the_flight(be):
+    ops.draw_stair(be, (0, 0), (3600, 3000), steps=10, axis="y")
+
+    marks = {
+        e.dxf.text: (e.dxf.insert[0], e.dxf.insert[1]) for e in be.msp if e.dxftype() == "TEXT"
+    }
+    up, down = marks["上"], marks["下"]
+
+    # At the two ends of the travel, on the same side of the arrow. They used to land
+    # in the middle of the flight 480 mm apart, on top of the arrow and each other.
+    assert up[1] > down[1]
+    assert abs(up[1] - down[1]) > 2000
+    assert abs(up[0] - down[0]) < 1e-6
+    assert (0 <= up[0] <= 3600) and (0 <= up[1] <= 3000)
+    assert (0 <= down[0] <= 3600) and (0 <= down[1] <= 3000)
+
+
+def test_stair_labels_follow_the_flight_along_x_too(be):
+    ops.draw_stair(be, (0, 0), (3000, 3600), steps=10, axis="x")
+
+    marks = {
+        e.dxf.text: (e.dxf.insert[0], e.dxf.insert[1]) for e in be.msp if e.dxftype() == "TEXT"
+    }
+    up, down = marks["上"], marks["下"]
+
+    assert up[0] > down[0]
+    assert abs(up[0] - down[0]) > 2000
+    assert abs(up[1] - down[1]) < 1e-6
+
+
+def test_the_stair_outline_is_on_the_stair_layer(be):
+    ops.draw_stair(be, (0, 0), (3600, 3000), steps=4)
+
+    # The outline is geometry, not annotation: turning A-ANNO off used to take the
+    # outline with it and leave the treads floating.
+    outline = [e for e in be.msp if e.dxftype() == "LWPOLYLINE" and e.closed]
+    assert [e.dxf.layer for e in outline] == ["A-STAIR"]
+    assert {e.dxf.layer for e in be.msp if e.dxftype() == "LINE"} == {"A-STAIR"}
+
+
+# ---------------------------------------------------------------------------
+# captions sized to fit what they sit in
+# ---------------------------------------------------------------------------
+
+
+def test_text_width_follows_the_measured_advance():
+    # Measured: "生产车间" at height 350 is 1991 mm wide in AutoCAD, 497.8 mm a character.
+    assert layers.text_width("生产车间", 350) == pytest.approx(1988.0, rel=0.01)
+    assert layers.text_width("6000", 250) == pytest.approx(750.0, rel=0.01)
+    assert layers.text_width("", 350) == 0
+
+
+def test_a_long_shaft_name_shrinks_instead_of_spilling(be):
+    ops.draw_shaft(be, (0, 0), (1500, 1500), "消防水井")
+    wide = [e for e in be.msp if e.dxftype() == "TEXT"][-1]
+
+    assert wide.dxf.height < layers.H_TEXT
+    assert layers.text_width(wide.dxf.text, wide.dxf.height) <= 1500 * 0.9 + 1e-6
+
+
+def test_a_short_shaft_name_keeps_the_normal_height(be):
+    ops.draw_shaft(be, (0, 0), (1500, 1500), "水井")
+    text = [e for e in be.msp if e.dxftype() == "TEXT"][-1]
+
+    assert text.dxf.height == layers.H_TEXT
+
+
+def test_equipment_captions_shrink_too(be):
+    ops.draw_equipment(be, (0, 0), (1200, 800), "螺杆式空气压缩机")
+    text = [e for e in be.msp if e.dxftype() == "TEXT"][-1]
+
+    assert layers.text_width(text.dxf.text, text.dxf.height) <= 1200 * 0.9 + 1e-6
+
+
+# ---------------------------------------------------------------------------
+# the boundary the area is measured to
+# ---------------------------------------------------------------------------
+
+
+def test_the_area_boundary_is_opt_in(be):
+    ops.add_room_label(be, [(0, 0), (4000, 0), (4000, 3000), (0, 3000)], "room", 200)
+
+    assert [e for e in be.msp if e.dxf.layer == "A-ROOM-BOUND"] == []
+
+
+def test_a_room_can_draw_the_face_its_area_is_measured_to(be):
+    report = ops.add_room_label(
+        be,
+        [(0, 0), (4000, 0), (4000, 3000), (0, 3000)],
+        "room",
+        200,
+        bound_layer="A-ROOM-BOUND",
+    )
+
+    bounds = [e for e in be.msp if e.dxf.layer == "A-ROOM-BOUND"]
+    assert len(bounds) == 1
+    xs = [p[0] for p in bounds[0].get_points()]
+    ys = [p[1] for p in bounds[0].get_points()]
+    # 100 mm inside the centreline ring, which is the wall's half thickness.
+    assert (min(xs), max(xs)) == (100.0, 3900.0)
+    assert (min(ys), max(ys)) == (100.0, 2900.0)
+    assert report["area_m2"] == pytest.approx(3800 * 2800 / 1e6, rel=1e-6)

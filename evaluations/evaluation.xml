@@ -1,0 +1,51 @@
+<evaluation>
+  <!--
+    Read-only evaluations for the acadmcp MCP server. Every question is
+    answerable with drawing_open / drawing_status / listing_entities /
+    element_types / drawing_help alone; none draws, saves or rolls back.
+
+    The fixture is evaluations/fixtures/floor_plan.dxf — the checked-in output
+    of examples/floor_plan_demo.py, so the numbers below are stable. All answers
+    were verified by driving the tools directly (see evaluations/README.md).
+  -->
+  <qa_pair>
+    <question>Open the drawing at evaluations/fixtures/floor_plan.dxf with the acadmcp server. How many entities does drawing_status report in total? Answer with the number only.</question>
+    <answer>247</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Open evaluations/fixtures/floor_plan.dxf. Of the layers that hold at least one entity, which layer holds the most? Answer with just the layer name.</question>
+    <answer>A-WALL</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Open evaluations/fixtures/floor_plan.dxf and inspect the layer that carries the windows. How many entities sit on it? Answer with the number only.</question>
+    <answer>42</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Open evaluations/fixtures/floor_plan.dxf. How many distinct layers contain at least one entity? (The document defines more layers than it uses.) Answer with the number only.</question>
+    <answer>13</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Open evaluations/fixtures/floor_plan.dxf, then call listing_entities with limit=200. Does the response's has_more flag come back true or false? Answer True or False.</question>
+    <answer>True</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Using the acadmcp element catalogue (check_library=False), how many element types are offered in the "structure" category? Answer with the number only.</question>
+    <answer>4</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Using the acadmcp element catalogue, what is the default variant of the light-gauge steel stud (the 钢立柱 element)? Quote the variant name exactly.</question>
+    <answer>50 x 100</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>In the acadmcp element catalogue, the plan-view window element (窗) is sized by a dynamic block parameter whose name is misleading — it says "door" although it drives a window. What is that parameter's exact name?</question>
+    <answer>DoorWidth</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>In the acadmcp element catalogue, exactly one element type carries an empty tag prefix, so placing it consumes no tag number. What is that element's key?</question>
+    <answer>weld_symbol</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>According to the acadmcp element catalogue, the recessed fluorescent light element (荧光灯) is imported from a block in which library drawing file? Answer with the file name only, not the directory.</question>
+    <answer>Architectural - Metric.dwg</answer>
+  </qa_pair>
+</evaluation>

@@ -47,6 +47,32 @@ H_AXIS = 500.0
 #: renders under all of them.
 AREA_UNIT = "m²"
 
+#: Advance width of a character as a multiple of the text height. Measured rather than
+#: assumed: "生产车间" at height 350 is 1991 mm wide in AutoCAD and 1973 mm in the PNG
+#: preview, so a Chinese character takes 1.42 x the height, not 1.0. Anything that sizes
+#: a caption to sit inside something has to use this, or the caption overflows.
+CJK_ADVANCE = 1.42
+LATIN_ADVANCE = 0.75
+
+
+def text_width(text: str, height: float) -> float:
+    """How wide `text` draws at `height`, close enough to keep a caption in its box."""
+    wide = sum(1 for ch in text if ord(ch) > 0x2E7F)  # CJK, and full-width punctuation
+    return height * (wide * CJK_ADVANCE + (len(text) - wide) * LATIN_ADVANCE)
+
+
+def fit_text_height(text: str, width: float, height: float, *, fit: float = 0.9) -> float:
+    """The largest height up to `height` at which `text` fits across `width`.
+
+    For captions meant to sit inside something drawn around them — a shaft, a piece of
+    equipment — so a long name shrinks instead of spilling over the line.
+    """
+    per_unit = text_width(text, 1.0)
+    if per_unit <= 0:
+        return float(height)
+    return min(float(height), width * fit / per_unit)
+
+
 # Default construction sizes in mm.
 WALL_THICKNESS = 200.0
 DOOR_WIDTH = 900.0

@@ -12,23 +12,29 @@ src/acadmcp/
   layers.py             drafting standard: layer names, ACI colours, text heights, mm sizes
   ops.py                architectural operations (walls, doors, rooms, cores, annotation)
   capture.py            Win32 window capture, and finding the AutoCAD frame
-  server.py             the MCP tool surface (38 tools)
+  server.py             the MCP tool surface (44 tools, each annotated by behaviour class)
+  journal.py            the backend-neutral step journal (undo/redo bookkeeping). No CAD imports.
   acad_plugin_client.py the socket client for the in-AutoCAD plugin
   steps.py              step-journal control, and the step_control action table
   backends/
     base.py             the Backend contract every driver implements
-    dxf.py              ezdxf driver — no AutoCAD needed, renders PNG
-    com.py              ActiveX driver — draws into a running AutoCAD
+    recording.py        the batching layer: steps, undo/redo, replay — shared by all three drivers
+    dxf.py              ezdxf driver — no AutoCAD needed, renders PNG; journals into the file
+    com.py              ActiveX driver — draws into a running AutoCAD; journals in memory
     plugin.py           records primitives per step and hands them to the plugin
 examples/floor_plan_demo.py
-tests/                  test_geom.py, test_backends.py, test_plugin_client.py,
+evaluations/            read-only QA pairs + fixture DXF + harness, per the mcp-builder guide
+tests/                  test_geom.py, test_backends.py, test_journal.py, test_recording.py,
+                        test_dxf_journal.py, test_plugin_backend.py, test_server_journal.py,
+                        test_plugin_client.py, test_catalog.py, test_element_tools.py,
+                        test_tool_surface.py (annotations, naming, pagination),
                         live_rpc_check.py (needs AutoCAD, so pytest never runs it)
 ```
 
 ## Commands
 
 ```bash
-uv run pytest -q                      # 36 tests, <1s, no AutoCAD required
+uv run pytest -q                      # 179 tests, ~7s, no AutoCAD required
 uv run ruff check . --output-format concise
 uv run ruff format .
 uv run python examples/floor_plan_demo.py           # DXF + PNG into examples/output/
@@ -115,7 +121,19 @@ The split is deliberate; keep it when editing.
 - **Backends only render.** If you are computing architecture inside a backend,
   it belongs in `ops.py` instead.
 - **`server.py` is thin.** Each tool parses JSON-ish input, calls one op or one
-  backend method, and returns a dict. No logic lives here.
+  backend method, and returns a dict. No logic lives here. Every drawing tool
+  body runs inside `_auto_step`, so one tool call is one journal step — that is
+  what makes a wrong coordinate cost one `drawing_undo` instead of a redraw.
+  Every tool also picks one of the five annotation sets (`_READONLY` …
+  `_DESTRUCTIVE_IDEMPOTENT`) defined under the server object — the client reads
+  them to decide what it may auto-approve, and `test_tool_surface.py` fails on a
+  tool without them.
+- **All three backends journal.** `backends/recording.py` owns the step
+  lifecycle (record primitives → apply as one batch → keep the handles);
+  `journal.py` owns the undo bookkeeping. A backend implements only
+  `_apply(primitives) -> handles` and `_erase(handles)`. The plugin backend is
+  the exception in one place: its journal lives in the DWG, so its undo/redo
+  delegate to the plugin's own rollback rather than to a local erase.
 - Both backends must implement the full `Backend` protocol in `backends/base.py`.
   When you add a method, add it to the protocol and to both drivers.
 
@@ -136,10 +154,16 @@ The split is deliberate; keep it when editing.
 
 **Chinese text in AutoCAD.** A stock drawing's `Standard` style is `txt.shx` with
 no big font, and an SHX font without a big font has no CJK glyphs — every Chinese
-character renders as `?`. Text goes on an `HZ` style using `gbenor.shx` +
-`gbcbig.shx`. A CJK **TrueType face does not work** in AutoCAD here, even though
-it renders fine in the ezdxf PNG. Also: repointing a style's font does **not**
-repaint existing text — `set_text_style` issues `doc.Regen(1)` for that reason.
+character renders as `?`. Text drawn through the COM backend therefore goes on an
+`HZ` style using `gbenor.shx` + `gbcbig.shx`. Measured 2026-10-15, and this
+**corrects an earlier claim here**: the *dxf* backend's `HZ` style carries
+`simsun.ttc`, a CJK TrueType face, and AutoCAD 2026 renders Chinese from it
+correctly — opening a 429-entity plan written by `drawing_save` to a .dxf path gave legible
+`生产车间`, `卷帘门 JLM4245 洞口 4200×4500` and the rest. So "a CJK TrueType face
+does not work in AutoCAD" was true of `simhei.ttf` specifically, not of TrueType as
+a class; do not repeat it as a blanket rule. What does still hold: repointing a
+style's font does **not** repaint existing text — `set_text_style` issues
+`doc.Regen(1)` for that reason.
 
 **Area unit.** Use `m²` (U+00B2). The single-codepoint `㎡` (U+33A1) measures as
 `?` under every font tested, including `gbcbig.shx`, `simhei.ttf` and `simsun.ttc`.
@@ -149,6 +173,31 @@ while mid-command or repainting, which a few-hundred-entity run hits constantly.
 Every COM call must go through `_call(fn, *args)` in `com.py`, never straight at
 the COM object. For property reads inside loops use `operator.attrgetter`, not a
 bare `lambda` (ruff B023).
+
+**A COM object belongs to the thread that made it, and the MCP server uses whichever
+thread is free.** This cost the whole AutoCAD path: the first tool call after a
+restart worked — it built the `ComBackend` and even created layers — and *every*
+later one failed, whatever it was. `acad_connect` twice, `draw_line`, the
+screenshot: all of them. AutoCAD itself was fine (`scripts/acad-state.ps1` says the
+window is enabled; a fresh process reads `ActiveDocument` over COM without
+trouble). The cause is the apartment: `import pythoncom` initialises COM for the
+thread that imports it and no other, `backends/com.py` is imported lazily by
+`make_backend("com")`, so the first call's worker thread got an apartment and every
+later call's thread did not. Off-apartment, win32com's dynamic dispatch loses the
+object's type and raises `AttributeError: <unknown>.AddLine` — which is *not* a
+`com_error`, so the retry wrapper never saw it and the tool layer reported a bare
+"failed". `_ComThread` now owns every COM call: it initialises COM once and all work
+is marshalled onto it, so the objects stay in the apartment they were made in.
+Two rules follow when editing `com.py`:
+
+- Pass a **zero-argument callable** when the target is reached through an attribute:
+  `_call(lambda: self.msp.AddLine(a, b))`, never `_call(self.msp.AddLine, a, b)`.
+  The second form resolves the attribute on the *calling* thread, which is the whole
+  bug. `_call(setattr, entity, "Layer", name)` and `attrgetter` are fine — they do
+  their lookup when they run.
+- `info()` no longer hides a lost link behind `entities: -1` and
+  `document: "<unnamed>"`, and `entities()` no longer returns `[]`: an empty entity
+  list reads as "no tags in this drawing", which silently restarts tag numbering at 1.
 
 **`uv sync` fails while the MCP server is running.** The client holds
 `.venv/Scripts/acadmcp.exe` open, so uv cannot rewrite it ("another program is
@@ -242,6 +291,20 @@ planned, measured and dropped; re-measure before resurrecting either. Step numbe
 positions, and a record that cannot be read is counted in `journal.Unreadable` and
 reported, not silently skipped.
 
+**Every drawing tool call is one journal step.** `_auto_step` in `server.py` wraps
+each `draw_*` tool; an explicit `step_begin` overrides it (while one is open, drawing
+records into it and nothing commits). Undo/redo are backend-neutral
+(`drawing_undo`/`drawing_redo`/`drawing_history`); on the plugin backend they delegate
+to the DWG journal so the palette never disagrees. The dxf journal persists inside the
+file (root dictionary `ACADMCP`, one XRecord, JSON `ensure_ascii`-escaped and chunked
+at 1900 chars because a group-code-1 string tops out at 2049) and survives
+`drawing_open` — handles are stable across ezdxf save/load, so an old session's steps
+stay undoable. Handles change on redo: `RecordingBackend.redo` stores the fresh ones
+back into the step, so never cache a handle across a redo. `drawing_replay` re-draws
+the applied journal onto another backend (dxf→plugin is how a headless session moves
+into AutoCAD without redrawing); steps a target cannot apply — a library insert onto
+dxf — are skipped and reported, never silently dropped.
+
 **A SplitContainer starts out 150x100.** Setting `Panel2MinSize` to anything useful in
 the constructor throws before the control has ever been laid out, and the message it
 throws talks about `SplitterDistance`, which sends you looking in the wrong place.
@@ -313,7 +376,39 @@ why `zoom_extents` sets the current view record synchronously (`Editor.GetCurren
 acdbmgd) and measures the extents off the entities rather than reading `Extmin`/`Extmax`,
 which AutoCAD only refreshes on its own terms.
 
+**A building envelope needs `draw_wall_with_openings(closed=True)`.** Openings can only
+be punched along a run, and a run has two square-capped ends, so drawing an envelope as
+four runs puts a cap on a corner: the outline steps in by half the wall thickness at
+every corner and both walls' poché overlaps in the 240 mm corner square. Measured on a
+48×24 m envelope: the mitred face reaches `(-120, -120)`, the four-run version never
+does. `closed=True` reads `points` as a ring, measures openings along it from the first
+vertex, and starts the run where its first opening starts — which puts both caps inside
+that opening (where a cap belongs) and leaves every corner mid-segment, where
+`offset_pair` mitres it. A ring with no openings is drawn as one closed wall.
+
+**An opening's jamb is drawn once, by the symbol that owns it.** `draw_wall_run`'s end
+cap and a door or window symbol's jamb tick are the same line across the same thickness;
+drawing both put each jamb in the drawing twice, on A-WALL and on A-DOOR at once — 40 of
+the 166 line segments of that envelope. Segments are now drawn with `cap_ends=False` and
+capped explicitly: at the run's own ends, and around a bare `opening`, which draws no
+symbol of its own.
+
+**A half-made COM hatch is worse than no hatch.** The ActiveX hatch API wants boundary
+*objects*, so `com.py` makes a temporary polyline, hatches it and deletes the boundary.
+If any step fails, the survivors are a hatch still at pattern scale 1.0 — a solid blob
+across a 240 mm wall — and a naked polyline, both on layer 0 and both invisible, because
+`draw_wall_run` suppresses a hatch failure so a decorative fill cannot take a wall down.
+The failure path now deletes both halves and the boundary is created on the target layer.
+Measured on a live envelope: one of four segments failed this way before, none did after.
+
+**A Chinese character is 1.42 x its text height wide, not 1.0.** Measured both sides of
+the same drawing: `生产车间` at height 350 is 1991 mm in AutoCAD and 1973 mm in this
+package's PNG preview, i.e. 497.8 mm a character — so the preview is a faithful proxy for
+text width, and anything that sizes a caption to sit inside a box has to use
+`layers.fit_text_height`, or a four-character shaft name is wider than a 1500 mm shaft.
+
 ## Environment
+
 
 - AutoCAD 2026 (release 25.1) is at `F:\AutoCAD\AutoCAD 2026` — **not** under
   `C:\Program Files\Autodesk`, and registry lookups for that path come back empty.

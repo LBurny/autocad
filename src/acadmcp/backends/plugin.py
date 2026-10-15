@@ -22,17 +22,10 @@ from pathlib import Path
 from typing import Any
 
 from ..acad_plugin_client import PluginClient
-from ..geom import Point, xy
+from ..geom import Point
+from ..journal import StepRecord
 from .base import BackendError
-
-
-def _points(points: Sequence[Point]) -> list[float]:
-    """Flatten to the x, y, x, y… wire form the plugin reads."""
-    flat: list[float] = []
-    for point in points:
-        x, y = xy(point)
-        flat.extend((x, y))
-    return flat
+from .recording import RecordingBackend
 
 
 class StepResult:
@@ -62,7 +55,7 @@ class StepResult:
         return f"StepResult(op={self.op!r}, ok={self.ok}, message={self.message!r})"
 
 
-class PluginBackend:
+class PluginBackend(RecordingBackend):
     """A :class:`~acadmcp.backends.base.Backend` that records primitives per step."""
 
     name = "plugin"
@@ -73,11 +66,8 @@ class PluginBackend:
         port: int | None = None,
         timeout: float | None = None,
     ) -> None:
+        super().__init__()
         self.client = client if client is not None else PluginClient(port=port, timeout=timeout)
-        self._pending: list[dict[str, Any]] = []
-        self._op = ""
-        self._label: str | None = None
-        self._params: dict[str, Any] = {}
         self._layers_seen: set[str] = set()
         self.path: str | None = None
         self.units_set = False
@@ -309,32 +299,21 @@ class PluginBackend:
         )
 
     # --- steps -------------------------------------------------------------
-
-    @property
-    def pending(self) -> list[dict[str, Any]]:
-        """The primitives recorded since the step began."""
-        return self._pending
-
-    @property
-    def open_step(self) -> str:
-        """The op name being recorded, or "" when no step is open."""
-        return self._op
-
-    def begin_step(
-        self, op: str, label: str | None = None, params: dict[str, Any] | None = None
-    ) -> None:
-        if self._op:
-            raise BackendError(
-                f"a step ({self._op!r}) is already open; steps do not nest — "
-                "commit or abort it first"
-            )
-        self._op = op
-        self._label = label
-        self._params = dict(params or {})
-        self._pending = []
+    #
+    # begin_step/abort_step/_record/_pending/open_step come from
+    # RecordingBackend — the same code, byte for byte, before it was extracted.
+    #
+    # commit_step and plan_step below deliberately do *not* call the base's
+    # commit_step: for the plugin the DWG journal is the source of truth, so a
+    # commit reports what the plugin recorded rather than appending to a local
+    # Journal. That is why undo/redo/history below delegate instead of inheriting.
 
     def commit_step(self) -> dict[str, Any]:
-        """Send the recorded batch to the plugin as one step."""
+        """Send the recorded batch to the plugin as one step.
+
+        Returns the plugin's own outcome dict, not a
+        :class:`~acadmcp.journal.StepRecord`: the step now lives in the drawing.
+        """
         if not self._op:
             raise BackendError("no step is open; call begin_step first")
         if not self._pending:
@@ -375,10 +354,6 @@ class PluginBackend:
         self._reset()
         return self.client.call("plan", steps=[record])
 
-    def abort_step(self) -> None:
-        """Throw away the recorded batch without drawing anything."""
-        self._reset()
-
     @contextlib.contextmanager
     def step(
         self, op: str, label: str | None = None, params: dict[str, Any] | None = None
@@ -401,23 +376,59 @@ class PluginBackend:
             raise
         result.outcome = self.commit_step()
 
-    # --- internals ---------------------------------------------------------
+    # --- journal actions: delegated to the drawing's own journal -----------
 
-    def _record(self, kind: str, points: Sequence[Point], **rest: Any) -> int:
-        if not self._op:
-            raise BackendError(
-                "this backend only draws inside a step; open one with "
-                "backend.step(...) or begin_step(...)"
-            )
-        # None values are dropped: the plugin's reader supplies its own defaults, and
-        # sending an explicit null for, say, linetype would overwrite "CONTINUOUS".
-        primitive: dict[str, Any] = {"kind": kind, "points": _points(points)}
-        primitive.update({k: v for k, v in rest.items() if v is not None})
-        self._pending.append(primitive)
-        return len(self._pending) - 1
+    def undo(self, count: int = 1) -> dict[str, Any]:
+        """Roll the DWG journal back past the last `count` applied steps.
 
-    def _reset(self) -> None:
-        self._op = ""
-        self._label = None
-        self._params = {}
-        self._pending = []
+        The plugin owns this journal, so undo is its rollback, not a local erase:
+        the palette and the MCP tools must never disagree about what is drawn.
+        """
+        steps = self.client.call("get_steps", offset=0, limit=10000)["steps"]
+        applied = [s for s in steps if s["state"] == "applied"]
+        if not applied:
+            return {"undone": [], "erased": 0, "missing": 0}
+        doomed = applied[-max(1, int(count)) :]
+        # The plugin's steps are 1-based and index 0 means "before the first
+        # step", so rolling back to one less than the oldest doomed step leaves
+        # everything before it standing, and undoing step 1 targets 0 — the
+        # legal wipe rather than a negative index.
+        response = self.client.call("rollback_to", index=doomed[0]["index"] - 1)
+        return {
+            "undone": [
+                {"index": s["index"], "op": s["op"], "label": s.get("label", "")}
+                for s in reversed(doomed)
+            ],
+            "response": response.get("result", {}),
+        }
+
+    def redo(self, count: int = 1) -> dict[str, Any]:
+        """Run the planned tail of the journal forward, oldest first."""
+        steps = self.client.call("get_steps", offset=0, limit=10000)["steps"]
+        planned = [s for s in steps if s["state"] == "planned"]
+        if not planned:
+            return {"redone": []}
+        chosen = planned[: max(1, int(count))]
+        response = self.client.call("run_to", index=chosen[-1]["index"])
+        return {
+            "redone": [
+                {"index": s["index"], "op": s["op"], "label": s.get("label", "")} for s in chosen
+            ],
+            "response": response.get("result", {}),
+        }
+
+    def history(self) -> str:
+        """The drawing's steps, one line each, read back from the plugin."""
+        from ..steps import describe_steps
+
+        return describe_steps(self.client.call("get_steps", offset=0, limit=10000)["steps"])
+
+    def replay_step(self, record: StepRecord) -> dict[str, Any]:
+        """Draw another journal's step here, as a real plugin step.
+
+        Returns the plugin's outcome dict, like :meth:`commit_step` — this backend
+        journals in the DWG, not in memory, so there is no StepRecord to hand back.
+        """
+        self.begin_step(record.op, label=record.label, params=record.params)
+        self._pending = [dict(p) for p in record.primitives]
+        return self.commit_step()

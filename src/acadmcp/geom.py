@@ -203,12 +203,19 @@ def inner_boundary(points: Sequence[Point], thickness: float, closed: bool = Tru
 
 
 def point_along(points: Sequence[Point], distance: float) -> Vec:
-    """Point at `distance` measured along a polyline from its start."""
+    """Point at `distance` measured along a polyline from its start.
+
+    Zero-length segments are skipped rather than divided by: a closed ring passed
+    as a run carries its first vertex again at the end, and a repeated vertex must
+    not look like a direction.
+    """
     if distance <= 0:
         return xy(points[0])
     travelled = 0.0
     for i in range(len(points) - 1):
         seg = dist(points[i], points[i + 1])
+        if seg <= EPS:
+            continue
         if travelled + seg >= distance:
             u = unit(sub(points[i + 1], points[i]))
             return add(points[i], mul(u, distance - travelled))
@@ -221,6 +228,8 @@ def angle_along(points: Sequence[Point], distance: float) -> float:
     travelled = 0.0
     for i in range(len(points) - 1):
         seg = dist(points[i], points[i + 1])
+        if seg <= EPS:
+            continue
         if travelled + seg >= distance or i == len(points) - 2:
             return angle_of(points[i], points[i + 1])
         travelled += seg

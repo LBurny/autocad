@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import contextlib
 import math
+import queue
+import threading
 import time
 from collections.abc import Callable, Sequence
 from operator import attrgetter
@@ -18,6 +20,7 @@ from typing import Any
 
 from ..geom import Point, left_normal, sub, unit, xy
 from .base import BackendError
+from .recording import RecordingBackend, unflatten_points
 
 try:  # pragma: no cover - platform dependent
     import pythoncom
@@ -63,6 +66,93 @@ CALL_RETRIES = 10
 CALL_BACKOFF = 0.2
 CALL_BACKOFF_MAX = 1.5
 
+#: How long a call may sit on the COM thread before its caller gives up. Generous,
+#: because a save or a large hatch legitimately takes a while; bounded, because a
+#: modal dialog in AutoCAD means no COM call ever returns.
+CALL_WAIT = 600.0
+
+#: Raised by `insert` and, at commit time, by `_apply_primitive`. Both have to say
+#: the same thing: a step recorded before an insert failed would otherwise replay
+#: here as "unknown primitive kind", which hides that the backend simply has no
+#: block library to draw from.
+INSERT_REFUSED = (
+    "the 'com' backend cannot insert blocks yet; the plugin backend can, and it is "
+    "the one that keeps the drawing's step journal"
+)
+
+
+class _Box:
+    """One call in flight: its result, its failure, and its completion."""
+
+    def __init__(self) -> None:
+        self.result: Any = None
+        self.error: BaseException | None = None
+        self.done = threading.Event()
+
+
+class _ComThread:
+    """The one thread that owns the COM objects.
+
+    A COM object belongs to the apartment of the thread that created it. The MCP
+    server runs each tool call on whichever worker thread happens to be free, so a
+    backend built during one call and used during the next is used from the wrong
+    apartment — and win32com reports that as ``AttributeError: <unknown>.AddLine``,
+    because the dynamic wrapper can no longer read the object's type. Measured
+    before this existed: the first call after a restart worked and every later one
+    failed, which made the whole AutoCAD path unusable past one command.
+
+    Every COM call is therefore marshalled here, where COM is initialised once for
+    the life of the thread and every object stays in the apartment it was made in.
+    """
+
+    def __init__(self) -> None:
+        #: True once this thread has initialised its COM apartment.
+        self.ready = False
+        self._queue: queue.Queue = queue.Queue()
+        self._thread = threading.Thread(target=self._serve, name="acadmcp-com", daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        pythoncom.CoInitialize()
+        self.ready = True
+        while True:
+            item = self._queue.get()
+            if item is None:
+                return
+            fn, args, box = item
+            try:
+                box.result = fn(*args)
+            except BaseException as exc:  # noqa: BLE001 - handed to the caller's thread
+                box.error = exc
+            finally:
+                box.done.set()
+
+    def run(self, fn: Callable[..., Any], *args: Any) -> Any:
+        """Run `fn` on the COM thread and bring its result — or failure — back."""
+        box = _Box()
+        self._queue.put((fn, args, box))
+        if not box.done.wait(CALL_WAIT):
+            raise BackendError(
+                f"AutoCAD did not answer within {CALL_WAIT:g}s. If a dialog is up in "
+                "the AutoCAD window, dismiss it and try again."
+            )
+        if box.error is not None:
+            raise box.error
+        return box.result
+
+
+_owner_lock = threading.Lock()
+_owner: _ComThread | None = None
+
+
+def _com_thread() -> _ComThread:
+    """The COM thread, started on first use so that importing this module is free."""
+    global _owner
+    with _owner_lock:
+        if _owner is None:
+            _owner = _ComThread()
+        return _owner
+
 
 def _require_com() -> None:
     if not HAS_COM:
@@ -73,16 +163,36 @@ def _require_com() -> None:
 
 
 def _call(fn: Callable[..., Any], *args: Any) -> Any:
-    """Invoke a COM call, retrying for as long as AutoCAD reports itself busy."""
+    """Invoke a COM call on the COM thread, retrying while AutoCAD reports busy.
+
+    Pass a *zero-argument callable* whenever the thing being called is reached
+    through an attribute — ``_call(lambda: self.msp.AddLine(a, b))``, not
+    ``_call(self.msp.AddLine, a, b)``. The second form resolves ``self.msp.AddLine``
+    on the calling thread, which is exactly the off-apartment access this function
+    exists to prevent; the callable form resolves it inside the worker.
+    ``_call(setattr, entity, "Layer", name)`` is fine, because ``setattr`` does its
+    lookup when it runs.
+    """
     delay = CALL_BACKOFF
     for attempt in range(CALL_RETRIES):
         try:
-            return fn(*args)
+            return _com_thread().run(fn, *args)
         except pythoncom.com_error as exc:  # type: ignore[attr-defined]
             if exc.args[0] != RPC_E_CALL_REJECTED or attempt == CALL_RETRIES - 1:
                 raise
             time.sleep(delay)
             delay = min(delay * 1.6, CALL_BACKOFF_MAX)
+        except AttributeError as exc:
+            # win32com's dynamic dispatch raises exactly this when a cached object is
+            # reached for off its apartment: the object is alive but its type is gone.
+            # Translating it matters because it is *not* a com_error, so the retry
+            # above never sees it and the tool layer reports a bare "failed".
+            if not str(exc).startswith("<unknown>."):
+                raise
+            raise BackendError(
+                f"AutoCAD would not accept {exc}. The COM link is most likely stale — "
+                "call acad_connect again and retry."
+            ) from exc
     raise AssertionError("unreachable")
 
 
@@ -102,7 +212,9 @@ def connect(create: bool = True, visible: bool = True) -> Any:
     _require_com()
     app = None
     try:
-        app = win32com.client.GetActiveObject("AutoCAD.Application")
+        # On the COM thread: the application object is used from it for the rest of
+        # the session, so it has to be made there.
+        app = _call(lambda: win32com.client.GetActiveObject("AutoCAD.Application"))
     except Exception:  # noqa: BLE001 - not running, or not in the ROT yet
         app = None
 
@@ -112,7 +224,7 @@ def connect(create: bool = True, visible: bool = True) -> Any:
         last: Exception | None = None
         for progid in PROGIDS:
             try:
-                app = win32com.client.Dispatch(progid)
+                app = _call(lambda p=progid: win32com.client.Dispatch(p))
                 break
             except Exception as exc:  # noqa: BLE001
                 last = exc
@@ -125,10 +237,22 @@ def connect(create: bool = True, visible: bool = True) -> Any:
     return app
 
 
-class ComBackend:
-    """Renders into the model space of the active AutoCAD drawing."""
+class ComBackend(RecordingBackend):
+    """Renders into the model space of the active AutoCAD drawing.
+
+    Primitives are *hybrid*: outside a step they draw eagerly, exactly as they
+    always have; inside one they are recorded, and the commit draws the batch and
+    journals the handles AutoCAD handed back. The journal lives in this process
+    only — AutoCAD owns the drawing, so unlike the plugin there is no DWG copy of
+    it to keep in step.
+    """
 
     name = "com"
+
+    #: Journal state default, on the class so a `__new__`-built instance answers.
+    #: tests/test_com_backend.py builds a fake link that way (no `__init__`, so no
+    #: AutoCAD), and every primitive reads `open_step` before it decides to draw.
+    _op = ""
 
     def __init__(
         self,
@@ -142,6 +266,7 @@ class ComBackend:
         cjk_big_font: str = CJK_BIG_FONT,
         **_: Any,
     ) -> None:
+        super().__init__()
         _require_com()
         self.text_style = text_style
         self.cjk_font = cjk_font
@@ -149,7 +274,7 @@ class ComBackend:
         self._style_ready = False
         self.app = app if app is not None else connect(create=create, visible=visible)
         if new_document:
-            self.doc = _call(self.app.Documents.Add)
+            self.doc = _call(lambda: self.app.Documents.Add())
         else:
             try:
                 self.doc = doc if doc is not None else _call(lambda: self.app.ActiveDocument)
@@ -161,28 +286,28 @@ class ComBackend:
         self.path: str | None = None
         self._ops = 0
         with contextlib.suppress(Exception):
-            _call(self.doc.SetVariable, "INSUNITS", 4)  # millimetres
+            _call(lambda: self.doc.SetVariable("INSUNITS", 4))  # millimetres
 
     # --- document ----------------------------------------------------------
     def ensure_layer(self, name: str, color: int | None = None, linetype: str | None = None) -> Any:
         try:
-            layer = _call(self.doc.Layers.Item, name)
+            layer = _call(lambda: self.doc.Layers.Item(name))
         except Exception:  # noqa: BLE001 - a missing layer raises a bare COM error
-            layer = _call(self.doc.Layers.Add, name)
+            layer = _call(lambda: self.doc.Layers.Add(name))
         if color is not None:
             with contextlib.suppress(Exception):
                 _call(setattr, layer, "color", int(color))
         if linetype and linetype != "CONTINUOUS":
             # Already loaded, or the standard linetype library is not present.
             with contextlib.suppress(Exception):
-                _call(self.doc.Linetypes.Load, linetype, "acad.lin")
+                _call(lambda: self.doc.Linetypes.Load(linetype, "acad.lin"))
             with contextlib.suppress(Exception):
                 _call(setattr, layer, "Linetype", linetype)
         return layer
 
     def set_units_mm(self) -> None:
         with contextlib.suppress(Exception):
-            _call(self.doc.SetVariable, "INSUNITS", 4)
+            _call(lambda: self.doc.SetVariable("INSUNITS", 4))
 
     def set_text_style(
         self, name: str | None = None, font: str | None = None, big_font: str | None = None
@@ -200,9 +325,9 @@ class ComBackend:
             # glyphs itself and must have none, or the big font wins.
             big_font = "" if font.lower().endswith(".ttf") else self.cjk_big_font
         try:
-            style = _call(self.doc.TextStyles.Item, name)
+            style = _call(lambda: self.doc.TextStyles.Item(name))
         except Exception:  # noqa: BLE001 - absent style raises a bare COM error
-            style = _call(self.doc.TextStyles.Add, name)
+            style = _call(lambda: self.doc.TextStyles.Add(name))
         with contextlib.suppress(Exception):
             _call(setattr, style, "bigFontFile", big_font)
         with contextlib.suppress(Exception):
@@ -214,7 +339,7 @@ class ComBackend:
         # Repointing a style does not repaint text already in the drawing; without
         # a regen the change looks like it did nothing.
         with contextlib.suppress(Exception):
-            _call(self.doc.Regen, 1)  # acActiveViewport
+            _call(lambda: self.doc.Regen(1))  # acActiveViewport
         return name
 
     def _cjk_style(self) -> str:
@@ -231,7 +356,7 @@ class ComBackend:
         target = str(Path(path).with_suffix(Path(path).suffix or ".dwg"))
         Path(target).parent.mkdir(parents=True, exist_ok=True)
         try:
-            _call(self.doc.SaveAs, target)
+            _call(lambda: self.doc.SaveAs(target))
         except Exception as exc:  # noqa: BLE001
             raise BackendError(f"AutoCAD could not save {target!r}: {exc}") from exc
         self.path = target
@@ -265,40 +390,52 @@ class ComBackend:
 
     def zoom_window(self, corner1: Point, corner2: Point) -> None:
         """Zoom the AutoCAD view to the rectangle spanned by two corners."""
-        _call(self.app.ZoomWindow, _point3(corner1), _point3(corner2))
+        _call(lambda: self.app.ZoomWindow(_point3(corner1), _point3(corner2)))
 
     def zoom_extents(self) -> None:
         with contextlib.suppress(Exception):
-            _call(self.app.ZoomExtents)
+            _call(lambda: self.app.ZoomExtents())
 
     def info(self) -> dict[str, Any]:
-        try:
-            count = int(_call(lambda: self.msp.Count))
-        except Exception:  # noqa: BLE001
-            count = -1
+        """What this backend is attached to, including when it cannot tell.
+
+        A lost link is reported rather than papered over. The old version returned
+        ``entities: -1`` and ``document: "<unnamed>"``, which reads as "an unnamed
+        drawing with a negative entity count" — a drawing problem — instead of "the
+        connection is gone", and that is what sent the last bug hunt the wrong way.
+        """
+        out: dict[str, Any] = {"backend": self.name, "units": "mm", "ops": self._ops}
         try:
             name = str(_call(lambda: self.doc.Name))
-        except Exception:  # noqa: BLE001
-            name = "<unnamed>"
-        return {
-            "backend": self.name,
-            "document": name,
-            "units": "mm",
-            "entities": count,
-            "ops": self._ops,
+            count = int(_call(lambda: self.msp.Count))
+        except Exception as exc:  # noqa: BLE001 - a status call reports, it never raises
+            out["document"] = None
+            out["entities"] = None
+            out["problem"] = f"{type(exc).__name__}: {exc}"
+            return out
+        out["document"] = name
+        out["entities"] = count
+        # The journal is this process's own bookkeeping, so it can be reported even
+        # though the drawing it describes is AutoCAD's. Kept out of the failure branch
+        # above: on a lost link the drawing state is the question, and a step count
+        # next to `entities: None` reads as if it described the same thing.
+        out["journal"] = {
+            "steps": len(self.journal.steps),
+            "applied": sum(s.state == "applied" for s in self.journal.steps),
         }
+        return out
 
     def entities(self, layer: str | None = None, limit: int = 200) -> list[dict]:
         out: list[dict] = []
-        try:
-            total = int(_call(lambda: self.msp.Count))
-        except Exception:  # noqa: BLE001
-            return out
+        # Deliberately not suppressed: this is the call the tag numbering reads, and an
+        # empty list would mean "the drawing has no tags", silently restarting the
+        # numbering at 1. A broken link has to say so instead.
+        total = int(_call(lambda: self.msp.Count))
         for i in range(total):
             if len(out) >= limit:
                 break
             try:
-                e = _call(self.msp.Item, i)
+                e = _call(lambda index=i: self.msp.Item(index))
                 ent_layer = str(_call(attrgetter("Layer"), e))
             except Exception:  # noqa: BLE001 - AutoCAD skips some proxy entities
                 continue
@@ -313,10 +450,17 @@ class ComBackend:
             )
         return out
 
-    # --- primitives --------------------------------------------------------
+    # --- primitives: eager outside a step, recorded inside one ---------------
     def line(self, p1: Point, p2: Point, *, layer: str = "0", linetype: str | None = None) -> Any:
+        if self.open_step:
+            return self._record("line", [p1, p2], layer=layer, linetype=linetype)
+        return self._draw_line(p1, p2, layer=layer, linetype=linetype)
+
+    def _draw_line(
+        self, p1: Point, p2: Point, *, layer: str = "0", linetype: str | None = None
+    ) -> Any:
         self._ops += 1
-        e = _call(self.msp.AddLine, _point3(p1), _point3(p2))
+        e = _call(lambda: self.msp.AddLine(_point3(p1), _point3(p2)))
         self._style(e, layer, linetype)
         return e
 
@@ -328,16 +472,33 @@ class ComBackend:
         layer: str = "0",
         linetype: str | None = None,
     ) -> Any:
+        if self.open_step:
+            return self._record("polyline", points, layer=layer, closed=closed, linetype=linetype)
+        return self._draw_polyline(points, closed=closed, layer=layer, linetype=linetype)
+
+    def _draw_polyline(
+        self,
+        points: Sequence[Point],
+        *,
+        closed: bool = False,
+        layer: str = "0",
+        linetype: str | None = None,
+    ) -> Any:
         self._ops += 1
         pts = [xy(p) for p in points]
-        e = _call(self.msp.AddLightWeightPolyline, _flat2(pts))
+        e = _call(lambda: self.msp.AddLightWeightPolyline(_flat2(pts)))
         _call(setattr, e, "Closed", bool(closed))
         self._style(e, layer, linetype)
         return e
 
     def circle(self, center: Point, radius: float, *, layer: str = "0") -> Any:
+        if self.open_step:
+            return self._record("circle", [center], layer=layer, radius=radius)
+        return self._draw_circle(center, radius, layer=layer)
+
+    def _draw_circle(self, center: Point, radius: float, *, layer: str = "0") -> Any:
         self._ops += 1
-        e = _call(self.msp.AddCircle, _point3(center), float(radius))
+        e = _call(lambda: self.msp.AddCircle(_point3(center), float(radius)))
         self._style(e, layer)
         return e
 
@@ -350,13 +511,34 @@ class ComBackend:
         *,
         layer: str = "0",
     ) -> Any:
+        if self.open_step:
+            return self._record(
+                "arc",
+                [center],
+                layer=layer,
+                radius=radius,
+                start_angle=start_deg,
+                end_angle=end_deg,
+            )
+        return self._draw_arc(center, radius, start_deg, end_deg, layer=layer)
+
+    def _draw_arc(
+        self,
+        center: Point,
+        radius: float,
+        start_deg: float,
+        end_deg: float,
+        *,
+        layer: str = "0",
+    ) -> Any:
         self._ops += 1
         e = _call(
-            self.msp.AddArc,
-            _point3(center),
-            float(radius),
-            math.radians(float(start_deg)),
-            math.radians(float(end_deg)),
+            lambda: self.msp.AddArc(
+                _point3(center),
+                float(radius),
+                math.radians(float(start_deg)),
+                math.radians(float(end_deg)),
+            )
         )
         self._style(e, layer)
         return e
@@ -371,8 +553,30 @@ class ComBackend:
         rotation: float = 0.0,
         align: str = "left",
     ) -> Any:
+        if self.open_step:
+            return self._record(
+                "text",
+                [pos],
+                layer=layer,
+                text=content,
+                height=height,
+                rotation=rotation,
+                align=align,
+            )
+        return self._draw_text(pos, content, height, layer=layer, rotation=rotation, align=align)
+
+    def _draw_text(
+        self,
+        pos: Point,
+        content: str,
+        height: float,
+        *,
+        layer: str = "0",
+        rotation: float = 0.0,
+        align: str = "left",
+    ) -> Any:
         self._ops += 1
-        e = _call(self.msp.AddText, str(content), _point3(pos), float(height))
+        e = _call(lambda: self.msp.AddText(str(content), _point3(pos), float(height)))
         with contextlib.suppress(Exception):
             # Set the style before alignment: repointing a style can reset it.
             _call(setattr, e, "StyleName", self._cjk_style())
@@ -393,8 +597,24 @@ class ComBackend:
         layer: str = "0",
         align: str = "center",
     ) -> Any:
+        if self.open_step:
+            return self._record(
+                "mtext", [pos], layer=layer, text=content, height=height, width=width, align=align
+            )
+        return self._draw_mtext(pos, content, height, width, layer=layer, align=align)
+
+    def _draw_mtext(
+        self,
+        pos: Point,
+        content: str,
+        height: float,
+        width: float = 0.0,
+        *,
+        layer: str = "0",
+        align: str = "center",
+    ) -> Any:
         self._ops += 1
-        e = _call(self.msp.AddMText, _point3(pos), float(width or 6000.0), str(content))
+        e = _call(lambda: self.msp.AddMText(_point3(pos), float(width or 6000.0), str(content)))
         with contextlib.suppress(Exception):
             _call(setattr, e, "StyleName", self._cjk_style())
             _call(setattr, e, "Height", float(height))
@@ -414,28 +634,84 @@ class ComBackend:
         angle: float = 0.0,
         solid: bool = False,
     ) -> Any:
+        if self.open_step:
+            return self._record(
+                "hatch",
+                points,
+                layer=layer,
+                pattern=pattern,
+                scale=scale,
+                angle=angle,
+                solid=solid,
+            )
+        return self._draw_hatch(points, pattern, scale, layer=layer, angle=angle, solid=solid)
+
+    def _draw_hatch(
+        self,
+        points: Sequence[Point],
+        pattern: str = "ANSI31",
+        scale: float = 1.0,
+        *,
+        layer: str = "0",
+        angle: float = 0.0,
+        solid: bool = False,
+    ) -> Any:
         self._ops += 1
         # The ActiveX hatch API wants boundary *objects*, so lay down a temporary
-        # polyline, hatch it, then remove the boundary again.
-        boundary = _call(self.msp.AddLightWeightPolyline, _flat2([xy(p) for p in points]))
+        # polyline, hatch it, then remove the boundary again. It goes on the target
+        # layer rather than 0, so that if it ever has to be left behind it is not junk
+        # on layer 0.
+        boundary = _call(lambda: self.msp.AddLightWeightPolyline(_flat2([xy(p) for p in points])))
         _call(setattr, boundary, "Closed", True)
-        pattern_name = "SOLID" if solid else pattern
-        h = _call(self.msp.AddHatch, AC_HATCH_PREDEFINED, pattern_name, False)
-        loop = VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_DISPATCH, (boundary,))
+        self._style(boundary, layer)
+
+        h = None
         try:
-            _call(h.AppendOuterLoop, loop)
+            pattern_name = "SOLID" if solid else pattern
+            h = _call(lambda: self.msp.AddHatch(AC_HATCH_PREDEFINED, pattern_name, False))
+            loop = VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_DISPATCH, (boundary,))
+            _call(lambda: h.AppendOuterLoop(loop))
             if not solid:
                 _call(setattr, h, "PatternScale", float(scale))
                 _call(setattr, h, "PatternAngle", math.radians(float(angle)))
-            _call(h.Evaluate)
-        finally:
-            # The temporary boundary has to go even if the hatch call failed.
-            with contextlib.suppress(Exception):
-                _call(boundary.Delete)
+            _call(lambda: h.Evaluate())
+        except Exception:
+            # A half-made hatch is worse than none: it keeps the pattern scale it was
+            # made with, so at 1.0 across a 240 mm wall it reads as a solid blob, and it
+            # sits on layer 0 because the styling below never ran. Measured on a real
+            # envelope: one of four wall segments failed this way and left both the hatch
+            # and its temporary boundary in the drawing — invisible, because the caller
+            # suppresses a hatch failure so a decorative fill cannot take a wall down.
+            for half in (h, boundary):
+                if half is not None:
+                    with contextlib.suppress(Exception):
+                        _call(lambda e=half: e.Delete())
+            raise
         self._style(h, layer)
+        with contextlib.suppress(Exception):
+            _call(lambda: boundary.Delete())
         return h
 
     def linear_dimension(
+        self,
+        p1: Point,
+        p2: Point,
+        offset: float,
+        *,
+        layer: str = "0",
+        text_height: float | None = None,
+    ) -> Any:
+        if self.open_step:
+            return self._record(
+                "dimension",
+                [p1, p2],
+                layer=layer,
+                offset=offset,
+                text_height=text_height or 0.0,
+            )
+        return self._draw_linear_dimension(p1, p2, offset, layer=layer, text_height=text_height)
+
+    def _draw_linear_dimension(
         self,
         p1: Point,
         p2: Point,
@@ -450,7 +726,7 @@ class ComBackend:
         n = left_normal(unit(sub(b, a)))
         mid = ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)
         text_pos = (mid[0] + n[0] * float(offset), mid[1] + n[1] * float(offset))
-        e = _call(self.msp.AddDimAligned, _point3(a), _point3(b), _point3(text_pos))
+        e = _call(lambda: self.msp.AddDimAligned(_point3(a), _point3(b), _point3(text_pos)))
         self._style(e, layer)
         return e
 
@@ -467,10 +743,126 @@ class ComBackend:
         properties: dict[str, Any] | None = None,
         layer: str = "0",
     ) -> Any:
-        """Refused: this backend has no block library to draw from."""
+        """Refused: this backend has no block library to draw from.
+
+        Inside a step it is recorded like any other primitive and the refusal moves
+        to the commit, where `_apply_primitive` raises. That is not a second chance:
+        it is so a replayed journal reports this backend's reason instead of an
+        unknown primitive kind.
+        """
+        if self.open_step:
+            return self._record(
+                "insert",
+                [at],
+                layer=layer,
+                block=block,
+                source=source,
+                rotation=rotation,
+                # One scale for both axes unless they are given separately, matching the
+                # plugin's wire format — both always travel, so no reader has to guess
+                # whether a missing one means 1.0.
+                scale_x=scale if scale_x is None else scale_x,
+                scale_y=scale if scale_y is None else scale_y,
+                properties=properties,
+            )
+        raise BackendError(INSERT_REFUSED)
+
+    # --- recording: applying and erasing a step -----------------------------
+    def _apply_primitive(self, prim: dict[str, Any]) -> Any:
+        """Draw one recorded primitive — the inverse of the recording branches above.
+
+        Keys are the plugin's wire format, so a step drawn on any backend can be
+        replayed here, and every missing key falls back to the same default the
+        corresponding public method has.
+        """
+        pts = unflatten_points(prim.get("points", []))
+        kind = prim["kind"]
+        if kind == "line":
+            return self._draw_line(
+                pts[0], pts[1], layer=prim.get("layer", "0"), linetype=prim.get("linetype")
+            )
+        if kind == "polyline":
+            return self._draw_polyline(
+                pts,
+                closed=bool(prim.get("closed", False)),
+                layer=prim.get("layer", "0"),
+                linetype=prim.get("linetype"),
+            )
+        if kind == "circle":
+            return self._draw_circle(pts[0], float(prim["radius"]), layer=prim.get("layer", "0"))
+        if kind == "arc":
+            return self._draw_arc(
+                pts[0],
+                float(prim["radius"]),
+                float(prim["start_angle"]),
+                float(prim["end_angle"]),
+                layer=prim.get("layer", "0"),
+            )
+        if kind == "text":
+            return self._draw_text(
+                pts[0],
+                str(prim["text"]),
+                float(prim["height"]),
+                layer=prim.get("layer", "0"),
+                rotation=float(prim.get("rotation", 0.0)),
+                align=str(prim.get("align", "left")),
+            )
+        if kind == "mtext":
+            return self._draw_mtext(
+                pts[0],
+                str(prim["text"]),
+                float(prim["height"]),
+                width=float(prim.get("width", 0.0)),
+                layer=prim.get("layer", "0"),
+                align=str(prim.get("align", "center")),
+            )
+        if kind == "hatch":
+            return self._draw_hatch(
+                pts,
+                str(prim.get("pattern", "ANSI31")),
+                float(prim.get("scale", 1.0)),
+                layer=prim.get("layer", "0"),
+                angle=float(prim.get("angle", 0.0)),
+                solid=bool(prim.get("solid", False)),
+            )
+        if kind == "dimension":
+            # text_height travels as 0.0 when unset; the drawer treats None as "default".
+            height = float(prim.get("text_height") or 0.0) or None
+            return self._draw_linear_dimension(
+                pts[0],
+                pts[1],
+                float(prim.get("offset", 0.0)),
+                layer=prim.get("layer", "0"),
+                text_height=height,
+            )
+        if kind == "insert":
+            raise BackendError(INSERT_REFUSED)
         raise BackendError(
-            "the 'com' backend cannot insert blocks yet; the plugin backend can, and it is the one that keeps the drawing's step journal"
+            f"the 'com' backend does not know the primitive kind {kind!r} and cannot draw it"
         )
+
+    def _apply(self, primitives: list[dict[str, Any]]) -> list[str]:
+        """Draw a recorded batch and report the handle of each entity."""
+        handles: list[str] = []
+        for prim in primitives:
+            entity = self._apply_primitive(prim)
+            # Handle is reached through the COM object, so the read goes through _call
+            # like every other attribute access; the loop variable is bound into the
+            # lambda, or every closure would read the last entity's handle.
+            handles.append(str(_call(lambda e=entity: e.Handle)))
+        return handles
+
+    def _erase(self, handles: list[str]) -> tuple[int, int]:
+        """Delete entities by handle, counting the ones already gone."""
+        erased = missing = 0
+        for handle in handles:
+            try:
+                obj = _call(lambda h=handle: self.doc.HandleToObject(h))
+                _call(lambda o=obj: o.Delete())
+                erased += 1
+            except Exception:  # noqa: BLE001 - a hand-deleted entity is counted, not fatal
+                missing += 1
+        return erased, missing
 
     # --- helpers -----------------------------------------------------------
     def _style(self, entity: Any, layer: str, linetype: str | None = None) -> None:

@@ -80,8 +80,14 @@ def _wall_ring(left: Sequence[Vec], right: Sequence[Vec], closed: bool) -> list[
 
 
 def _sub_polyline(points: Sequence[Point], d0: float, d1: float) -> list[Vec]:
-    """The portion of a polyline between two distances, keeping its corners."""
-    pts = geom.dedupe(points)
+    """The portion of a polyline between two distances, keeping its corners.
+
+    The input is deliberately *not* deduped: a ring handed over as a run repeats its
+    first vertex at the end, and removing that repeat would shorten the run by its
+    final segment — which is where the wall between the last opening and the seam
+    lives. `geom.point_along` steps over the repeated vertex, and the offset drops it.
+    """
+    pts = [geom.xy(p) for p in points]
     out = [geom.point_along(pts, d0)]
     travelled = 0.0
     for i in range(len(pts) - 1):
@@ -102,6 +108,7 @@ def draw_wall_with_openings(
     door_layer: str = "A-DOOR",
     window_layer: str = "A-WINDOW",
     hatch: bool = False,
+    closed: bool = False,
 ) -> dict[str, Any]:
     """Draw a wall run and punch door/window openings into it.
 
@@ -109,15 +116,43 @@ def draw_wall_with_openings(
     "kind": "door" | "window" | "opening", ...}`` with optional ``swing``
     ("left"/"right"), ``open_angle``, ``rotation_delta``, ``tag`` and
     ``tag_offset`` (moves the tag across the wall).
+
+    ``closed=True`` reads `points` as a ring — the way a building envelope is drawn —
+    and mitres the corners into one another. Openings are then measured along the
+    ring from its first vertex.
     """
-    pts = geom.dedupe(points)
-    total = geom.polyline_length(pts)
+    ring = [geom.xy(p) for p in points]
+    if closed and geom.is_closed(ring):
+        ring = ring[:-1]
+    if closed and len(ring) < 3:
+        raise ValueError("a closed wall run needs at least three corners")
+
+    total = geom.polyline_length([*ring, ring[0]]) if closed else geom.polyline_length(ring)
     ops = sorted(openings, key=lambda o: float(o["start"]))
 
-    wall_segments: list[list[Vec]] = []
+    if closed and not ops:
+        # Nothing to punch, so the ring is one closed wall and every corner mitres.
+        draw_wall_run(be, ring, thickness, closed=True, layer=layer, hatch=hatch)
+        return {
+            "segments": 1,
+            "openings": 0,
+            "clamped_openings": 0,
+            "total_length": round(total, 3),
+            "symbols": 0,
+            "closed": True,
+        }
+
+    seam_kind: str | None = None
+    if closed:
+        ring, ops = _rebase_ring(ring, total, ops)
+        seam_kind = ops[0].get("kind", "door")
+    pts = ring
+
+    wall_segments: list[tuple[float, float, bool, bool]] = []
     symbols: list[Any] = []
     cursor = 0.0
     clamped = 0
+    previous: str | None = None
 
     for op in ops:
         start = float(op["start"])
@@ -131,12 +166,12 @@ def draw_wall_with_openings(
             width = total - start
             clamped += 1
         end = start + width
+        kind = op.get("kind", "door")
         if start > cursor + 1e-6:
-            wall_segments.append(_sub_polyline(pts, cursor, start))
+            wall_segments.append((cursor, start, _needs_cap(cursor, previous), kind == "opening"))
 
         angle = geom.angle_along(pts, start + width / 2.0)
         angle += float(op.get("rotation_delta", 0.0))
-        kind = op.get("kind", "door")
         tag = op.get("tag")
         tag_offset = op.get("tag_offset")
 
@@ -166,13 +201,25 @@ def draw_wall_with_openings(
             )
         # kind == "opening": leave the gap bare
         cursor = max(cursor, end)
+        previous = kind
 
-    if cursor < total - 1e-6:
-        wall_segments.append(_sub_polyline(pts, cursor, total))
+    if cursor < total - 1e-6 or not wall_segments:
+        # A closed ring's run ends where its first opening starts, so that end is the
+        # opening's to close if the opening draws a symbol of its own.
+        tail_cap = True if seam_kind is None else seam_kind == "opening"
+        wall_segments.append((cursor, total, _needs_cap(cursor, previous), tail_cap))
 
-    for seg in wall_segments:
-        if len(seg) >= 2:
-            draw_wall_run(be, seg, thickness, layer=layer, hatch=hatch, cap_ends=True)
+    for seg_start, seg_end, cap_start, cap_end in wall_segments:
+        seg = _sub_polyline(pts, seg_start, seg_end)
+        if len(seg) < 2:
+            continue
+        draw_wall_run(be, seg, thickness, layer=layer, hatch=hatch, cap_ends=False)
+        if cap_start or cap_end:
+            left, right = geom.offset_pair(seg, thickness)
+            if cap_start:
+                be.line(left[0], right[0], layer=layer)
+            if cap_end:
+                be.line(left[-1], right[-1], layer=layer)
 
     return {
         "segments": len(wall_segments),
@@ -180,7 +227,46 @@ def draw_wall_with_openings(
         "clamped_openings": clamped,
         "total_length": round(total, 3),
         "symbols": len(symbols),
+        "closed": closed,
     }
+
+
+def _needs_cap(cursor: float, previous: str | None) -> bool:
+    """Whether a wall segment's start needs a line across the thickness.
+
+    A door or window symbol draws its own jamb tick, in the same place and across the
+    same thickness, so capping there as well draws one line twice — on A-WALL and on
+    A-DOOR at once. A bare ``opening`` draws nothing, so closing its jambs is the
+    wall's job.
+    """
+    return cursor == 0.0 or previous == "opening"
+
+
+def _rebase_ring(
+    ring: Sequence[Vec], total: float, ops: Sequence[dict]
+) -> tuple[list[Vec], list[dict]]:
+    """The ring re-started where its first opening starts, openings re-measured.
+
+    A run has two ends and each end is capped square across the wall. Starting the run
+    exactly at its first opening puts both of those caps inside an opening — where a
+    cap belongs — and leaves every corner in the middle of a segment, where the offset
+    mitres it. Drawing the ring as four runs instead is the only way to get openings
+    into it, and that is what left a half-thickness notch at each corner.
+    """
+    first = float(ops[0]["start"])
+    started = [geom.point_along([*ring, ring[0]], first)]
+    travelled = 0.0
+    for i, point in enumerate(ring):
+        following = ring[(i + 1) % len(ring)]
+        travelled += geom.dist(point, following)
+        if travelled > first + 1e-9:
+            started.append(following)
+    started.append(started[0])
+
+    moved = [{**op, "start": (float(op["start"]) - first) % total} for op in ops]
+    moved.sort(key=lambda o: float(o["start"]))
+    moved[0] = {**moved[0], "start": 0.0}
+    return started, moved
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +405,7 @@ def draw_room(
     hatch_pattern: str = "ANSI31",
     hatch_scale: float = 40.0,
     label_offset: float = 0.0,
+    bound_layer: str | None = None,
 ) -> dict[str, Any]:
     """Wall a room in and label it with its name and computed floor area.
 
@@ -342,6 +429,11 @@ def draw_room(
     c = geom.centroid(inner)
     if label_offset:
         c = (c[0], c[1] + label_offset)
+    if bound_layer:
+        # The face the area is measured to. A-ROOM-BOUND is in the standard for this and
+        # nothing drew on it before, so it is opt-in rather than extra geometry in every
+        # plan.
+        be.polyline(inner, closed=True, layer=bound_layer)
 
     if name:
         be.text(c, name, layers.H_ROOM_NAME, layer=name_layer, align="center")
@@ -374,11 +466,14 @@ def add_room_label(
     show_area: bool = True,
     name_layer: str = "A-ROOM-NAME",
     area_layer: str = "A-ROOM-AREA",
+    bound_layer: str | None = None,
 ) -> dict[str, Any]:
     """Label an existing room ring without redrawing its walls."""
     inner = geom.inner_boundary(boundary, thickness)
     c = geom.centroid(inner)
     area_m2 = geom.area(inner) / 1_000_000.0
+    if bound_layer:
+        be.polyline(inner, closed=True, layer=bound_layer)
     if name:
         be.text(c, name, layers.H_ROOM_NAME, layer=name_layer, align="center")
     if show_area:
@@ -421,9 +516,14 @@ def draw_stair(
     down_label: str | None = "\u4e0b",
     border_layer: str | None = None,
 ) -> dict[str, Any]:
-    """A run of stairs: outline, treads, flight direction arrow and 上/下 labels."""
+    """A run of stairs: outline, treads, flight direction arrow and 上/下 labels.
+
+    The arrow points the way the flight rises. `up_label` marks the end it rises
+    toward and `down_label` the end it starts from, both set to one side of the arrow
+    where they read without covering it.
+    """
     ring = geom.rect_corners(corner1, corner2)
-    made: list[Any] = [be.polyline(ring, closed=True, layer=border_layer or "A-ANNO")]
+    made: list[Any] = [be.polyline(ring, closed=True, layer=border_layer or layer)]
     x1, y1, x2, y2 = geom.bbox(ring)
 
     if axis == "x":
@@ -454,17 +554,21 @@ def draw_stair(
         tip = geom.polar(b, geom.angle_of(a, b) + 180 + sgn_angle, arrow)
         made.append(be.line(b, tip, layer=layer))
 
-    label_pos = ((x1 + x2) / 2.0, (y1 + y2) / 2.0 + (y2 - y1) * 0.28)
+    # 上 and 下 go to the two ends of the flight, on one side of the arrow. They used to
+    # be placed at the middle of the flight, 480 mm apart, so both landed on top of the
+    # arrow and of each other; the branch that was meant to swap them for the two axes
+    # read `down_label if axis == "x" else down_label`, which does nothing.
+    side = (other_b - other_a) * 0.28
+    if axis == "x":
+        up_at = (b[0], mid_other + side)
+        down_at = (a[0], mid_other + side)
+    else:
+        up_at = (mid_other + side, b[1])
+        down_at = (mid_other + side, a[1])
     if up_label:
-        be.text(label_pos, up_label, layers.H_TEXT, layer="A-ANNO", align="center")
+        be.text(up_at, up_label, layers.H_TEXT, layer="A-ANNO", align="center")
     if down_label:
-        be.text(
-            (label_pos[0], label_pos[1] + layers.H_TEXT * 1.6),
-            down_label if axis == "x" else down_label,
-            layers.H_TEXT,
-            layer="A-ANNO",
-            align="center",
-        )
+        be.text(down_at, down_label, layers.H_TEXT, layer="A-ANNO", align="center")
     return {"steps": steps, "axis": axis, "corners": ring}
 
 
@@ -514,8 +618,9 @@ def draw_shaft(
 ) -> list[Any]:
     """A service riser shaft (强电井/弱电井/水井): outline plus diagonal cross.
 
-    The caption sits inside the shaft, which keeps it clear of neighbouring
-    shafts and of whatever runs alongside.
+    The caption sits inside the shaft, which keeps it clear of neighbouring shafts and
+    of whatever runs alongside — and it is shrunk to fit, because a Chinese character
+    is 1.42 x its height wide, so a four-character name is wider than a 1500 shaft.
     """
     ring = geom.rect_corners(corner1, corner2)
     made: list[Any] = [
@@ -528,7 +633,13 @@ def draw_shaft(
             made.append(be.hatch(ring, "ANSI37", hatch_scale, layer=layer))
     if name:
         made.append(
-            be.text(geom.centroid(ring), name, layers.H_TEXT, layer=tag_layer, align="center")
+            be.text(
+                geom.centroid(ring),
+                name,
+                layers.fit_text_height(name, geom.dist(ring[0], ring[1]), layers.H_TEXT),
+                layer=tag_layer,
+                align="center",
+            )
         )
     return made
 
@@ -547,7 +658,15 @@ def draw_equipment(
     made: list[Any] = [be.polyline(ring, closed=True, layer=layer)]
     if name:
         c = geom.centroid(ring)
-        made.append(be.text(c, name, layers.H_TEXT, layer=tag_layer, align="center"))
+        made.append(
+            be.text(
+                c,
+                name,
+                layers.fit_text_height(name, geom.dist(ring[0], ring[1]), layers.H_TEXT),
+                layer=tag_layer,
+                align="center",
+            )
+        )
     return made
 
 
@@ -823,11 +942,7 @@ def _numbering(be: Backend, element: Element, how_many: int) -> list[str]:
 
 def existing_tags(be: Backend, layer: str | None = None, limit: int = 2000) -> list[str]:
     """Every text in the drawing, for numbering to be derived from rather than stored."""
-    return [
-        str(row["text"])
-        for row in be.entities(layer=layer, limit=limit)
-        if row.get("text")
-    ]
+    return [str(row["text"]) for row in be.entities(layer=layer, limit=limit) if row.get("text")]
 
 
 def _run_direction(start: Point, end: Point) -> float:

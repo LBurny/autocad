@@ -13,7 +13,10 @@ Run it with ``acadmcp`` or ``python -m acadmcp.server``.
 
 from __future__ import annotations
 
+import contextlib
 import subprocess
+import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +27,8 @@ except ImportError:  # pragma: no cover - mcp 1.x
     from mcp.server.fastmcp import FastMCP as _Server
     from mcp.server.fastmcp import Image
 
+from mcp.types import ToolAnnotations
+
 from . import catalog, geom, layers, ops, settings
 from .acad_plugin_client import PluginClient, PluginError, PluginUnavailable
 from .backends import make_backend
@@ -32,7 +37,35 @@ from .backends.plugin import PluginBackend
 from .catalog import Element
 from .steps import StepSession, describe_steps
 
-mcp = _Server("AutoCAD-MCP")
+mcp = _Server("autocad_mcp")
+
+# Tool annotations, one set per behaviour class — the client reads these to decide
+# what it may auto-approve, so the rules are:
+#   _READONLY   a pure query: no state changes, repeats freely.
+#   _IDEMPOTENT a side effect that repeats cleanly: render a file, move the view,
+#               save, ensure a layer or text style exists.
+#   _MUTATING   additive drawing and journaling: two calls draw twice, but nothing
+#               is destroyed — a wrong step is one drawing_undo away.
+#   _DESTRUCTIVE            erases entities or orphans the session's drawing
+#                           (drawing_undo, step_control, target switches).
+#   _DESTRUCTIVE_IDEMPOTENT a target switch that repeats cleanly (drawing_open and
+#                           the connects) or the re-runnable installer.
+# openWorldHint is False throughout: everything here is local machine state.
+_READONLY = ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+)
+_IDEMPOTENT = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+)
+_MUTATING = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+)
+_DESTRUCTIVE = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False
+)
+_DESTRUCTIVE_IDEMPOTENT = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
+)
 
 
 class _Session:
@@ -56,6 +89,27 @@ class _Session:
 
 
 _state = _Session()
+
+
+@contextlib.contextmanager
+def _auto_step(op: str, params: dict[str, Any], label: str | None = None) -> Iterator[Backend]:
+    """Wrap one tool call in a step, when the backend journals.
+
+    An explicit step (step_begin) takes precedence: while one is open the
+    drawing records into it, and no implicit commit happens. Backends without
+    a journal are passed through untouched.
+
+    `label` is human decoration on the step, not a parameter — the history
+    renders "{op} {label}", so a room's name belongs there rather than buried
+    in the params.
+    """
+    be = _state.require()
+    stepper = getattr(be, "step", None)
+    if stepper is None or getattr(be, "open_step", ""):
+        yield be
+        return
+    with stepper(op, label=label, params=params):
+        yield be
 
 
 def _pt(p: Any) -> tuple[float, float]:
@@ -87,7 +141,7 @@ def _window(window: Any) -> tuple[float, float, float, float] | None:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READONLY)
 def drawing_help() -> dict[str, Any]:
     """List the available tool groups and the workflow to follow."""
     return {
@@ -99,16 +153,19 @@ def drawing_help() -> dict[str, Any]:
         },
         "workflow": [
             "drawing_new(backend='dxf'|'com', path=...) or drawing_open(path)",
-            "plugin_connect() + step_begin/step_commit to draw in AutoCAD as steps",
+            "just draw — every tool call is one undoable step; drawing_undo/"
+            "drawing_redo/drawing_history manage the journal",
             "draw_axis_grid(...) to lay out the structural grid",
             "draw_wall / draw_wall_with_openings / draw_room for the envelope and partitions",
             "draw_door, draw_window, draw_column for openings and structure",
             "place_element / place_along / place_grid to repeat a library element — a frame"
             " of columns, a wall of windows — sized through the block's dynamic parameters",
-            "draw_stair, draw_lift, draw_shaft for the core and risers",
-            "draw_room / add_room_label for names and computed areas",
-            "add_dimension / add_dimension_chain, annotate for annotation",
-            "drawing_preview(...) to eyeball it, drawing_save(...) to keep it",
+            "draw_stair, draw_lift, draw_equipment(kind='shaft') for the core and risers",
+            "draw_room again with walls=False to label a room whose walls exist",
+            "add_dimension / add_text / add_hatch for annotation",
+            "drawing_replay(backend='plugin') re-draws a headless session into AutoCAD",
+            "drawing_screenshot(...) to eyeball it (inline=False for just a PNG file), "
+            "drawing_save(...) to keep it",
         ],
         "element_library": {
             "how": "element_types() lists what the catalogue offers; library_list(source) "
@@ -126,14 +183,14 @@ def drawing_help() -> dict[str, Any]:
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READONLY)
 def drawing_status() -> dict[str, Any]:
     """Report the active backend, document, entity count and layer list."""
     be = _state.require()
     return _state.backend.info() if _state.backend else be.info()
 
 
-@mcp.tool()
+@mcp.tool(annotations=_DESTRUCTIVE)
 def drawing_new(backend: str = "dxf", path: str | None = None) -> dict[str, Any]:
     """Start a new drawing on the chosen backend.
 
@@ -162,7 +219,7 @@ def drawing_new(backend: str = "dxf", path: str | None = None) -> dict[str, Any]
     return {"ok": True, **be.info()}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_DESTRUCTIVE_IDEMPOTENT)
 def drawing_open(path: str) -> dict[str, Any]:
     """Open an existing DXF file so further tools edit it."""
     be = make_backend("dxf", path=path)
@@ -170,68 +227,193 @@ def drawing_open(path: str) -> dict[str, Any]:
     return {"ok": True, **be.info()}
 
 
-@mcp.tool()
-def acad_connect(visible: bool = True, new_document: bool = False) -> dict[str, Any]:
+@mcp.tool(annotations=_DESTRUCTIVE_IDEMPOTENT)
+def acad_connect(
+    mode: str = "com", new_document: bool = False, visible: bool = True
+) -> dict[str, Any]:
     """Attach to a running AutoCAD (launching and showing it if needed).
 
-    Call this before issuing drawing commands with backend="com".
+    mode="com" draws live over ActiveX; mode="plugin" draws through the step
+    plugin, so every step is reviewable and can be rolled back from the palette
+    (open one explicitly with step_begin, draw, then step_commit). Call this
+    before issuing drawing commands against AutoCAD.
     """
-    be = make_backend("com", visible=visible, new_document=new_document)
-    _state.reset(be, "com")
+    dropped = _session_drawing()
+    kind = mode.strip().lower()
+    if kind == "com":
+        be = make_backend("com", visible=visible, new_document=new_document)
+    elif kind == "plugin":
+        be = _plugin_backend_connect(new_document=new_document)
+    else:
+        raise BackendError(f"unknown mode {mode!r}; expected 'com' or 'plugin'")
+    _state.reset(be, kind)
     ops.setup_layers(be)
-    return {"ok": True, **be.info()}
+    out: dict[str, Any] = {"ok": True, **be.info()}
+    if dropped:
+        out["note"] = (
+            f"this session was drawing {dropped}, which is now no longer the target; "
+            "save it with drawing_save(path=...dxf) first if it is still wanted"
+        )
+    return out
 
 
-@mcp.tool()
-def acad_zoom_extents() -> dict[str, Any]:
-    """Zoom the AutoCAD view to fit the whole drawing."""
+def _session_drawing() -> str:
+    """What the session is drawing right now, or "" when there is nothing to lose.
+
+    Switching backend drops the current drawing, and that used to happen silently.
+    """
+    be = _state.backend
+    if be is None:
+        return ""
+    try:
+        info = be.info()
+    except Exception:  # noqa: BLE001 - a status probe must never block the switch
+        return ""
+    count = info.get("entities")
+    if not count:
+        return ""
+    return f"{count} entities in {info.get('path') or info.get('document') or 'an unsaved drawing'}"
+
+
+def _default_screenshot_path() -> str:
+    """Where a screenshot goes when the caller did not name a file.
+
+    Deliberately not the working directory: the server's cwd is somebody's project, and
+    a relative default dropped ``screenshot.png`` into a repository root during one run
+    of this tool — even for a call that then failed.
+    """
+    return str(Path(tempfile.gettempdir()) / "acadmcp-screenshot.png")
+
+
+@mcp.tool(annotations=_IDEMPOTENT)
+def acad_zoom(corner1: Any = None, corner2: Any = None) -> dict[str, Any]:
+    """Zoom the AutoCAD view: to the whole drawing, or to a rectangle.
+
+    With no corners the view is fitted to all of the drawing. With corners it
+    frames that rectangle — home in on a detail before drawing_screenshot, so
+    the capture is legible rather than a whole plan at thumbnail scale.
+    """
     be = _state.require()
-    zoom = getattr(be, "zoom_extents", None)
-    if zoom is None:
-        return {"ok": False, "reason": "only available on the com backend"}
-    zoom()
+    if corner1 is None or corner2 is None:
+        zoom = getattr(be, "zoom_extents", None)
+        if zoom is None:
+            return {"ok": False, "reason": "only available on the com and plugin backends"}
+        zoom()
+        return {"ok": True}
+    zoom_window = getattr(be, "zoom_window", None)
+    if zoom_window is None:
+        return {"ok": False, "reason": "only available on the com and plugin backends"}
+    zoom_window(_pt(corner1), _pt(corner2))
     return {"ok": True}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_IDEMPOTENT)
 def drawing_save(path: str | None = None) -> dict[str, Any]:
-    """Save the drawing. On the com backend this saves through AutoCAD.
+    """Save the drawing, to .dwg or .dxf as the path's suffix says.
 
-    Note: saving a live AutoCAD drawing renames that document, so prefer
-    drawing_export_dxf for a non-destructive copy.
+    On the com backend this saves through AutoCAD, and saving a live drawing to
+    .dwg renames that document — pass a .dxf path for a non-destructive copy.
     """
     be = _state.require()
     return {"ok": True, "path": be.save(path)}
 
 
-@mcp.tool()
-def drawing_export_dxf(path: str) -> dict[str, Any]:
-    """Write the current drawing out as DXF (works from the live AutoCAD session too)."""
-    be = _state.require()
-    target = str(Path(path).with_suffix(".dxf"))
-    return {"ok": True, "path": be.save(target)}
+@mcp.tool(annotations=_DESTRUCTIVE)
+def drawing_undo(count: int = 1) -> dict[str, Any]:
+    """Take back the last `count` drawing steps, on any backend.
 
-
-@mcp.tool()
-def drawing_preview(path: str | None = None, theme: str = "dark") -> dict[str, Any]:
-    """Render a PNG of the drawing and return only its path.
-
-    Use drawing_screenshot instead when you want to actually look at the result —
-    this one is for scripts that just need a file on disk.
+    A wrong coordinate costs this one call plus the redraw of the single step —
+    not a redraw of the whole plan. On the plugin backend this is the drawing's
+    own journal rolling back, so the palette and this call never disagree.
     """
     be = _state.require()
-    target = path or "preview.png"
-    out = be.preview(target, theme=theme)
-    return {"ok": True, "path": out}
+    undo = getattr(be, "undo", None)
+    if undo is None:
+        raise BackendError(f"backend {be.name!r} keeps no journal; nothing can be undone")
+    return {"ok": True, **undo(int(count))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_MUTATING)
+def drawing_redo(count: int = 1) -> dict[str, Any]:
+    """Re-draw steps that drawing_undo took back (newest work first)."""
+    be = _state.require()
+    redo = getattr(be, "redo", None)
+    if redo is None:
+        raise BackendError(f"backend {be.name!r} keeps no journal; nothing can be redone")
+    return {"ok": True, **redo(int(count))}
+
+
+@mcp.tool(annotations=_READONLY)
+def drawing_history() -> dict[str, Any]:
+    """What has been drawn, one line per step — much cheaper than a screenshot.
+
+    Read this to know the drawing's state before deciding what to undo or add;
+    reach for drawing_screenshot only when the geometry itself needs eyeballing.
+    """
+    be = _state.require()
+    history = getattr(be, "history", None)
+    if history is None:
+        raise BackendError(f"backend {be.name!r} keeps no journal")
+    return {"ok": True, "backend": be.name, "rendered": history()}
+
+
+@mcp.tool(annotations=_DESTRUCTIVE)
+def drawing_replay(backend: str = "plugin", path: str | None = None) -> dict[str, Any]:
+    """Re-draw the current journal on another backend, step by step.
+
+    The journal is backend-neutral, so a plan drawn headless (fast, previewable)
+    replays into live AutoCAD in one call — switching backends no longer means
+    redrawing. Each replayed step lands as a real step on the target, so it
+    stays undoable there. Steps the target cannot apply (a library insert onto
+    the dxf backend) are skipped and reported, never silently dropped.
+    """
+    source = _state.require()
+    journal = getattr(source, "journal", None)
+    if journal is None:
+        raise BackendError(
+            f"backend {source.name!r} keeps no local journal to replay; "
+            "the plugin backend's steps live in the DWG — drive them with step_control"
+        )
+    applicable = [s for s in journal.steps if s.state == "applied"]
+
+    kind = backend.strip().lower()
+    if kind == "plugin":
+        target = _plugin_backend_connect(new_document=True)
+    elif kind == "dxf":
+        if not path:
+            raise BackendError("drawing_replay(backend='dxf') needs a path to draw into")
+        target = make_backend("dxf")
+        target.path = path
+    else:
+        raise BackendError(f"cannot replay onto backend {backend!r}; expected 'plugin' or 'dxf'")
+
+    ops.setup_layers(target)
+    failed: list[dict[str, Any]] = []
+    for record in applicable:
+        try:
+            target.replay_step(record)
+        except BackendError as exc:
+            failed.append({"index": record.index, "op": record.op, "reason": str(exc)})
+    if kind == "dxf":
+        target.save(path)
+    _state.reset(target, kind)
+    return {
+        "ok": True,
+        "backend": kind,
+        "replayed": len(applicable) - len(failed),
+        "failed": failed,
+        **({"path": path} if kind == "dxf" else {}),
+    }
+
+
+@mcp.tool(annotations=_IDEMPOTENT)
 def drawing_screenshot(
     path: str | None = None,
     window: Any = None,
     width: int = 1600,
     height: int = 1200,
     theme: str = "dark",
+    inline: bool = True,
 ) -> Any:
     """Look at the drawing. Returns an image you can see directly.
 
@@ -241,6 +423,8 @@ def drawing_screenshot(
     labels unreadable, so zoom in when you need to read text.
 
     `window` is [min_x, min_y, max_x, max_y] in millimetres, or [p1, p2].
+    inline=False returns only the PNG's path, for scripts that need a file on
+    disk rather than a picture to look at.
 
     What you get depends on the backend: with backend="dxf" this re-renders the
     drawing cleanly, white-on-dark or black-on-white. With backend="com" it
@@ -248,7 +432,7 @@ def drawing_screenshot(
     zoom, but also AutoCAD's ribbon and panels around it.
     """
     be = _state.require()
-    target = path or "screenshot.png"
+    target = path or _default_screenshot_path()
     out = be.screenshot(
         target,
         window=_window(window),
@@ -256,30 +440,25 @@ def drawing_screenshot(
         height=int(height),
         theme=theme,
     )
+    if not inline:
+        return {"ok": True, "path": out}
     return Image(path=out)
 
 
-@mcp.tool()
-def acad_zoom_window(corner1: Any, corner2: Any) -> dict[str, Any]:
-    """Zoom the live AutoCAD view to the rectangle spanned by two corners.
+@mcp.tool(annotations=_READONLY)
+def listing_entities(layer: str | None = None, limit: int = 100) -> dict[str, Any]:
+    """List entities, optionally filtered to one layer.
 
-    Use it to home in on a detail before drawing_screenshot, so the capture is
-    legible rather than a whole plan at thumbnail scale.
+    `has_more` tells you `limit` cut the list short; call again with a larger
+    limit for the rest.
     """
     be = _state.require()
-    zoom = getattr(be, "zoom_window", None)
-    if zoom is None:
-        return {"ok": False, "reason": "only available on the com backend"}
-    zoom(_pt(corner1), _pt(corner2))
-    return {"ok": True}
-
-
-@mcp.tool()
-def listing_entities(layer: str | None = None, limit: int = 100) -> dict[str, Any]:
-    """List entities, optionally filtered to one layer."""
-    be = _state.require()
-    items = be.entities(layer=layer, limit=limit)
-    return {"count": len(items), "entities": items}
+    probe = be.entities(layer=layer, limit=int(limit) + 1)
+    return {
+        "count": min(len(probe), int(limit)),
+        "has_more": len(probe) > int(limit),
+        "entities": probe[: int(limit)],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -287,24 +466,23 @@ def listing_entities(layer: str | None = None, limit: int = 100) -> dict[str, An
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_IDEMPOTENT)
 def layer_create(
-    name: str, color: int | None = None, linetype: str | None = None
+    name: str | None = None, color: int | None = None, linetype: str | None = None
 ) -> dict[str, Any]:
-    """Create a layer (no-op if it already exists) with an ACI colour and linetype."""
+    """Create a layer (no-op if it already exists) with an ACI colour and linetype.
+
+    With no name, creates the full standard architectural layer set
+    (A-WALL, A-DOOR, ...) instead.
+    """
     be = _state.require()
+    if name is None:
+        return {"ok": True, "layers": ops.setup_layers(be)}
     be.ensure_layer(name, color=color, linetype=linetype)
     return {"ok": True, "layer": name}
 
 
-@mcp.tool()
-def layer_create_standard() -> dict[str, Any]:
-    """Create the full standard architectural layer set (A-WALL, A-DOOR, ...)."""
-    be = _state.require()
-    return {"ok": True, "layers": ops.setup_layers(be)}
-
-
-@mcp.tool()
+@mcp.tool(annotations=_IDEMPOTENT)
 def set_text_style(
     name: str = "HZ", font: str = "simhei.ttf", big_font: str | None = None
 ) -> dict[str, Any]:
@@ -327,46 +505,61 @@ def set_text_style(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_MUTATING)
 def draw_line(p1: Any, p2: Any, layer: str = "0", linetype: str | None = None) -> dict[str, Any]:
     """Draw a straight line between two points."""
-    be = _state.require()
-    be.line(_pt(p1), _pt(p2), layer=layer, linetype=linetype)
+    a, b = _pt(p1), _pt(p2)
+    params = {"p1": a, "p2": b, "layer": layer, "linetype": linetype}
+    with _auto_step("draw_line", params) as be:
+        be.line(a, b, layer=layer, linetype=linetype)
     return {"ok": True}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_MUTATING)
 def draw_polyline(points: Any, closed: bool = False, layer: str = "0") -> dict[str, Any]:
     """Draw a polyline through a list of points."""
-    be = _state.require()
     pts = _pts(points)
-    be.polyline(pts, closed=closed, layer=layer)
+    params = {"points": pts, "closed": closed, "layer": layer}
+    with _auto_step("draw_polyline", params) as be:
+        be.polyline(pts, closed=closed, layer=layer)
     return {"ok": True, "vertices": len(pts), "closed": closed}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_MUTATING)
 def draw_rect(corner1: Any, corner2: Any, layer: str = "0") -> dict[str, Any]:
     """Draw an axis-aligned rectangle from two opposite corners."""
-    be = _state.require()
-    be.polyline(geom.rect_corners(_pt(corner1), _pt(corner2)), closed=True, layer=layer)
+    a, b = _pt(corner1), _pt(corner2)
+    params = {"corner1": a, "corner2": b, "layer": layer}
+    with _auto_step("draw_rect", params) as be:
+        be.polyline(geom.rect_corners(a, b), closed=True, layer=layer)
     return {"ok": True}
 
 
-@mcp.tool()
-def draw_circle(center: Any, radius: float, layer: str = "0") -> dict[str, Any]:
-    """Draw a circle."""
-    be = _state.require()
-    be.circle(_pt(center), float(radius), layer=layer)
-    return {"ok": True}
-
-
-@mcp.tool()
-def draw_arc(
-    center: Any, radius: float, start_deg: float, end_deg: float, layer: str = "0"
+@mcp.tool(annotations=_MUTATING)
+def draw_circle(
+    center: Any,
+    radius: float,
+    start_deg: float | None = None,
+    end_deg: float | None = None,
+    layer: str = "0",
 ) -> dict[str, Any]:
-    """Draw an arc, counter-clockwise from start_deg to end_deg."""
-    be = _state.require()
-    be.arc(_pt(center), float(radius), float(start_deg), float(end_deg), layer=layer)
+    """Draw a circle — or an arc, when start_deg and end_deg are given.
+
+    Angles are degrees, counter-clockwise from +X.
+    """
+    c = _pt(center)
+    params = {
+        "center": c,
+        "radius": float(radius),
+        "start_deg": start_deg,
+        "end_deg": end_deg,
+        "layer": layer,
+    }
+    with _auto_step("draw_circle", params) as be:
+        if start_deg is None or end_deg is None:
+            be.circle(c, float(radius), layer=layer)
+        else:
+            be.arc(c, float(radius), float(start_deg), float(end_deg), layer=layer)
     return {"ok": True}
 
 
@@ -375,7 +568,7 @@ def draw_arc(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_MUTATING)
 def draw_wall(
     points: Any,
     thickness: float = layers.WALL_THICKNESS,
@@ -386,10 +579,18 @@ def draw_wall(
     """Draw a wall as two offset faces along a centreline polyline.
 
     Set closed=True for a room envelope, hatch=True to poché the wall.
+    thickness=120 makes a light internal partition.
     """
-    be = _state.require()
     pts = _pts(points)
-    ops.draw_wall_run(be, pts, float(thickness), closed=closed, hatch=hatch, layer=layer)
+    params = {
+        "points": pts,
+        "thickness": float(thickness),
+        "closed": closed,
+        "hatch": hatch,
+        "layer": layer,
+    }
+    with _auto_step("draw_wall", params) as be:
+        ops.draw_wall_run(be, pts, float(thickness), closed=closed, hatch=hatch, layer=layer)
     return {
         "ok": True,
         "segments": len(pts) - 1,
@@ -398,12 +599,13 @@ def draw_wall(
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=_MUTATING)
 def draw_wall_with_openings(
     points: Any,
     openings: Any,
     thickness: float = layers.WALL_THICKNESS,
     hatch: bool = False,
+    closed: bool = False,
 ) -> dict[str, Any]:
     """Draw a wall run and cut door/window openings into it in one step.
 
@@ -411,55 +613,75 @@ def draw_wall_with_openings(
     "kind": "door"|"window"|"opening", "swing": "left"|"right", "tag": "M1522"}.
     This is the tool to reach for when reproducing a real plan: it keeps the
     wall faces and the opening symbols consistent.
+
+    Pass `closed=True` for a building envelope, with `points` as the ring: the corners
+    are then mitred into each other. Drawing the envelope as four separate runs instead
+    leaves a half-wall-thickness notch at every corner, because a run has two square-cut
+    ends and each one lands on a corner.
     """
-    be = _state.require()
-    return {
-        "ok": True,
-        **ops.draw_wall_with_openings(be, _pts(points), openings, float(thickness), hatch=hatch),
+    pts = _pts(points)
+    params = {
+        "points": pts,
+        "openings": openings,
+        "thickness": float(thickness),
+        "hatch": hatch,
+        "closed": closed,
     }
+    with _auto_step("draw_wall_with_openings", params) as be:
+        result = ops.draw_wall_with_openings(
+            be, pts, openings, float(thickness), hatch=hatch, closed=closed
+        )
+    return {"ok": True, **result}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_MUTATING)
 def draw_room(
     boundary: Any,
     name: str | None = None,
     thickness: float = layers.WALL_THICKNESS,
     hatch: bool = False,
     show_area: bool = True,
+    bound_layer: str | None = None,
+    walls: bool = True,
 ) -> dict[str, Any]:
     """Wall a room in, then label it with its name and computed area in m².
 
-    `boundary` is the wall centreline ring as a list of points.
+    `boundary` is the wall centreline ring as a list of points. Pass `bound_layer`
+    (e.g. "A-ROOM-BOUND") to also draw the face the area is measured to. With
+    walls=False only the label (and optional bound face) is drawn — for a room
+    whose walls exist already.
     """
-    be = _state.require()
-    result = ops.draw_room(
-        be, _pts(boundary), name, float(thickness), hatch=hatch, show_area=show_area
-    )
+    pts = _pts(boundary)
+    params = {
+        "boundary": pts,
+        "name": name,
+        "thickness": float(thickness),
+        "hatch": hatch,
+        "show_area": show_area,
+        "bound_layer": bound_layer,
+        "walls": walls,
+    }
+    # The name is the step's label as well as a parameter, so the history reads
+    # "draw_room 测试室" rather than a wall of coordinates.
+    with _auto_step("draw_room", params, label=name) as be:
+        if walls:
+            result = ops.draw_room(
+                be,
+                pts,
+                name,
+                float(thickness),
+                hatch=hatch,
+                show_area=show_area,
+                bound_layer=bound_layer,
+            )
+        else:
+            result = ops.add_room_label(
+                be, pts, name, float(thickness), show_area=show_area, bound_layer=bound_layer
+            )
     return {"ok": True, **result}
 
 
-@mcp.tool()
-def add_room_label(
-    boundary: Any,
-    name: str | None = None,
-    thickness: float = layers.WALL_THICKNESS,
-    show_area: bool = True,
-) -> dict[str, Any]:
-    """Label an existing room ring with its name and area, without drawing walls."""
-    be = _state.require()
-    result = ops.add_room_label(be, _pts(boundary), name, float(thickness), show_area=show_area)
-    return {"ok": True, **result}
-
-
-@mcp.tool()
-def draw_partition(points: Any, thickness: float = 120.0, hatch: bool = False) -> dict[str, Any]:
-    """Draw a light internal partition wall (120 mm by default)."""
-    be = _state.require()
-    ops.draw_partition(be, _pts(points), float(thickness), hatch=hatch)
-    return {"ok": True}
-
-
-@mcp.tool()
+@mcp.tool(annotations=_MUTATING)
 def draw_door(
     hinge: Any,
     width: float = layers.DOOR_WIDTH,
@@ -474,21 +696,31 @@ def draw_door(
     `hinge` is the hinge-side jamb on the wall centreline; `rotation` is the wall
     direction in degrees; swing is "left" or "right".
     """
-    be = _state.require()
-    ops.draw_door(
-        be,
-        _pt(hinge),
-        float(width),
-        float(wall_thickness),
-        rotation=float(rotation),
-        open_angle=float(open_angle),
-        swing=swing,
-        tag=tag,
-    )
+    hinge_pt = _pt(hinge)
+    params = {
+        "hinge": hinge_pt,
+        "width": float(width),
+        "wall_thickness": float(wall_thickness),
+        "rotation": float(rotation),
+        "open_angle": float(open_angle),
+        "swing": swing,
+        "tag": tag,
+    }
+    with _auto_step("draw_door", params) as be:
+        ops.draw_door(
+            be,
+            hinge_pt,
+            float(width),
+            float(wall_thickness),
+            rotation=float(rotation),
+            open_angle=float(open_angle),
+            swing=swing,
+            tag=tag,
+        )
     return {"ok": True}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_MUTATING)
 def draw_window(
     start: Any,
     width: float = layers.WINDOW_WIDTH,
@@ -497,14 +729,22 @@ def draw_window(
     tag: str | None = None,
 ) -> dict[str, Any]:
     """Draw a window symbol spanning an opening, starting at the given jamb."""
-    be = _state.require()
-    ops.draw_window(
-        be, _pt(start), float(width), float(wall_thickness), rotation=float(rotation), tag=tag
-    )
+    start_pt = _pt(start)
+    params = {
+        "start": start_pt,
+        "width": float(width),
+        "wall_thickness": float(wall_thickness),
+        "rotation": float(rotation),
+        "tag": tag,
+    }
+    with _auto_step("draw_window", params) as be:
+        ops.draw_window(
+            be, start_pt, float(width), float(wall_thickness), rotation=float(rotation), tag=tag
+        )
     return {"ok": True}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_MUTATING)
 def draw_column(
     center: Any,
     size: float = layers.COLUMN_SIZE,
@@ -513,10 +753,16 @@ def draw_column(
     hatch: bool = True,
 ) -> dict[str, Any]:
     """Draw a structural column as a rotated, optionally filled rectangle."""
-    be = _state.require()
-    ops.draw_column(
-        be, _pt(center), float(size), rotation=float(rotation), depth=depth, hatch=hatch
-    )
+    c = _pt(center)
+    params = {
+        "center": c,
+        "size": float(size),
+        "depth": depth,
+        "rotation": float(rotation),
+        "hatch": hatch,
+    }
+    with _auto_step("draw_column", params) as be:
+        ops.draw_column(be, c, float(size), rotation=float(rotation), depth=depth, hatch=hatch)
     return {"ok": True}
 
 
@@ -525,7 +771,7 @@ def draw_column(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_MUTATING)
 def draw_stair(
     corner1: Any,
     corner2: Any,
@@ -538,40 +784,54 @@ def draw_stair(
 
     `axis` is the travel direction ("x" or "y").
     """
-    be = _state.require()
-    result = ops.draw_stair(
-        be,
-        _pt(corner1),
-        _pt(corner2),
-        steps=int(steps),
-        axis=axis,
-        up_label=up_label,
-        down_label=down_label,
-    )
+    a, b = _pt(corner1), _pt(corner2)
+    params = {
+        "corner1": a,
+        "corner2": b,
+        "steps": int(steps),
+        "axis": axis,
+        "up_label": up_label,
+        "down_label": down_label,
+    }
+    with _auto_step("draw_stair", params) as be:
+        result = ops.draw_stair(
+            be,
+            a,
+            b,
+            steps=int(steps),
+            axis=axis,
+            up_label=up_label,
+            down_label=down_label,
+        )
     return {"ok": True, **result}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_MUTATING)
 def draw_lift(corner1: Any, corner2: Any, tag: str | None = None) -> dict[str, Any]:
     """Draw a lift/elevator shaft with its car outline and X cross."""
-    be = _state.require()
-    ops.draw_lift(be, _pt(corner1), _pt(corner2), tag=tag)
+    a, b = _pt(corner1), _pt(corner2)
+    params = {"corner1": a, "corner2": b, "tag": tag}
+    with _auto_step("draw_lift", params) as be:
+        ops.draw_lift(be, a, b, tag=tag)
     return {"ok": True}
 
 
-@mcp.tool()
-def draw_shaft(corner1: Any, corner2: Any, name: str | None = None) -> dict[str, Any]:
-    """Draw a service riser shaft (强电井/弱电井/水井) with a diagonal cross."""
-    be = _state.require()
-    ops.draw_shaft(be, _pt(corner1), _pt(corner2), name=name)
-    return {"ok": True}
+@mcp.tool(annotations=_MUTATING)
+def draw_equipment(
+    corner1: Any, corner2: Any, name: str | None = None, kind: str = "equipment"
+) -> dict[str, Any]:
+    """Draw a rectangular piece of fixed equipment with a caption.
 
-
-@mcp.tool()
-def draw_equipment(corner1: Any, corner2: Any, name: str | None = None) -> dict[str, Any]:
-    """Draw a rectangular piece of fixed equipment with a caption."""
-    be = _state.require()
-    ops.draw_equipment(be, _pt(corner1), _pt(corner2), name=name)
+    kind="shaft" draws a service riser instead (强电井/弱电井/水井): the same
+    captioned rectangle plus a diagonal cross, on A-SHAFT.
+    """
+    a, b = _pt(corner1), _pt(corner2)
+    params = {"corner1": a, "corner2": b, "name": name, "kind": kind}
+    with _auto_step("draw_equipment", params) as be:
+        if kind == "shaft":
+            ops.draw_shaft(be, a, b, name=name)
+        else:
+            ops.draw_equipment(be, a, b, name=name)
     return {"ok": True}
 
 
@@ -580,7 +840,7 @@ def draw_equipment(corner1: Any, corner2: Any, name: str | None = None) -> dict[
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_MUTATING)
 def draw_axis_grid(
     x_positions: Any,
     y_positions: Any,
@@ -594,21 +854,31 @@ def draw_axis_grid(
     `extent` is [min_x, min_y, max_x, max_y]. x_labels default to 1,2,3...,
     y_labels to A,B,C...
     """
-    be = _state.require()
+    xs = [float(v) for v in x_positions]
+    ys = [float(v) for v in y_positions]
     ex = [float(v) for v in extent]
-    result = ops.draw_axis_grid(
-        be,
-        [float(v) for v in x_positions],
-        [float(v) for v in y_positions],
-        x_labels=x_labels,
-        y_labels=y_labels,
-        extent=(ex[0], ex[1], ex[2], ex[3]),
-        bubble_r=float(bubble_r),
-    )
+    params = {
+        "x_positions": xs,
+        "y_positions": ys,
+        "extent": ex,
+        "x_labels": x_labels,
+        "y_labels": y_labels,
+        "bubble_r": float(bubble_r),
+    }
+    with _auto_step("draw_axis_grid", params) as be:
+        result = ops.draw_axis_grid(
+            be,
+            xs,
+            ys,
+            x_labels=x_labels,
+            y_labels=y_labels,
+            extent=(ex[0], ex[1], ex[2], ex[3]),
+            bubble_r=float(bubble_r),
+        )
     return {"ok": True, **result}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_MUTATING)
 def add_text(
     pos: Any,
     text: str,
@@ -618,14 +888,29 @@ def add_text(
     layer: str = "A-ANNO",
 ) -> dict[str, Any]:
     """Place single-line text. align is left, center, right or top-center."""
-    be = _state.require()
-    ops.annotate(
-        be, _pt(pos), text, height=float(height), rotation=float(rotation), layer=layer, align=align
-    )
+    pos_pt = _pt(pos)
+    params = {
+        "pos": pos_pt,
+        "text": text,
+        "height": float(height),
+        "rotation": float(rotation),
+        "align": align,
+        "layer": layer,
+    }
+    with _auto_step("add_text", params) as be:
+        ops.annotate(
+            be,
+            pos_pt,
+            text,
+            height=float(height),
+            rotation=float(rotation),
+            layer=layer,
+            align=align,
+        )
     return {"ok": True}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_MUTATING)
 def add_leader_note(
     anchor: Any,
     text: str,
@@ -634,34 +919,45 @@ def add_leader_note(
     height: float = layers.H_TEXT,
 ) -> dict[str, Any]:
     """Draw a one-segment leader from `anchor` with the note at its far end."""
-    be = _state.require()
-    ops.leader_note(
-        be,
-        _pt(anchor),
-        text,
-        direction=float(direction),
-        length=float(length),
-        height=float(height),
-    )
+    anchor_pt = _pt(anchor)
+    params = {
+        "anchor": anchor_pt,
+        "text": text,
+        "direction": float(direction),
+        "length": float(length),
+        "height": float(height),
+    }
+    with _auto_step("add_leader_note", params) as be:
+        ops.leader_note(
+            be,
+            anchor_pt,
+            text,
+            direction=float(direction),
+            length=float(length),
+            height=float(height),
+        )
     return {"ok": True}
 
 
-@mcp.tool()
-def add_dimension(p1: Any, p2: Any, offset: float = layers.DIM_OFFSET) -> dict[str, Any]:
-    """Add an aligned dimension between two points, offset sideways by `offset` mm."""
-    be = _state.require()
-    ops.dimension_between(be, _pt(p1), _pt(p2), float(offset))
-    return {"ok": True}
+@mcp.tool(annotations=_MUTATING)
+def add_dimension(points: Any, offset: float = layers.DIM_OFFSET) -> dict[str, Any]:
+    """Add an aligned dimension, offset sideways by `offset` mm.
+
+    Two points give a single dimension; three or more give a chain along the
+    run, plus the overall dimension.
+    """
+    pts = _pts(points)
+    params = {"points": pts, "offset": float(offset)}
+    with _auto_step("add_dimension", params) as be:
+        if len(pts) == 2:
+            ops.dimension_between(be, pts[0], pts[1], float(offset))
+            result: dict[str, Any] = {}
+        else:
+            result = ops.dimension_chain(be, pts, float(offset))
+    return {"ok": True, **result}
 
 
-@mcp.tool()
-def add_dimension_chain(points: Any, offset: float = layers.DIM_OFFSET) -> dict[str, Any]:
-    """Add a chained dimension along a run of points, plus the overall dimension."""
-    be = _state.require()
-    return {"ok": True, **ops.dimension_chain(be, _pts(points), float(offset))}
-
-
-@mcp.tool()
+@mcp.tool(annotations=_MUTATING)
 def add_hatch(
     points: Any,
     pattern: str = "ANSI31",
@@ -671,8 +967,17 @@ def add_hatch(
     layer: str = "A-HATCH",
 ) -> dict[str, Any]:
     """Hatch a closed boundary given as points (pattern, or solid fill)."""
-    be = _state.require()
-    be.hatch(_pts(points), pattern, float(scale), layer=layer, angle=float(angle), solid=solid)
+    pts = _pts(points)
+    params = {
+        "points": pts,
+        "pattern": pattern,
+        "scale": float(scale),
+        "angle": float(angle),
+        "solid": solid,
+        "layer": layer,
+    }
+    with _auto_step("add_hatch", params) as be:
+        be.hatch(pts, pattern, float(scale), layer=layer, angle=float(angle), solid=solid)
     return {"ok": True, "pattern": "SOLID" if solid else pattern}
 
 
@@ -717,7 +1022,9 @@ def _plugin_backend_connect(new_document: bool = False) -> PluginBackend:
 def _require_plugin() -> PluginBackend:
     backend = _state.backend
     if not isinstance(backend, PluginBackend):
-        raise BackendError("the step tools draw through the plugin; call plugin_connect first")
+        raise BackendError(
+            "the step tools draw through the plugin; call acad_connect(mode='plugin') first"
+        )
     return backend
 
 
@@ -769,7 +1076,7 @@ def _outcome(response: dict[str, Any], action: str) -> dict[str, Any]:
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READONLY)
 def plugin_status(with_steps: bool = True) -> dict[str, Any]:
     """Report the in-AutoCAD step plugin: whether it is there, and what it holds.
 
@@ -795,21 +1102,7 @@ def plugin_status(with_steps: bool = True) -> dict[str, Any]:
     return out
 
 
-@mcp.tool()
-def plugin_connect(new_document: bool = False) -> dict[str, Any]:
-    """Draw through the step plugin in AutoCAD from now on.
-
-    After this, drawing tools record into a step rather than placing loose entities,
-    and the user can roll any step back from the palette. Open a step with
-    step_begin, draw, then step_commit.
-    """
-    backend = _plugin_backend_connect(new_document=new_document)
-    _state.reset(backend, "plugin")
-    ops.setup_layers(backend)
-    return {"ok": True, "backend": "plugin", **backend.info()}
-
-
-@mcp.tool()
+@mcp.tool(annotations=_DESTRUCTIVE_IDEMPOTENT)
 def plugin_install(force: bool = False) -> dict[str, Any]:
     """Build and install the AutoCAD plugin into the per-user plug-in folder.
 
@@ -841,7 +1134,7 @@ def plugin_install(force: bool = False) -> dict[str, Any]:
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=_MUTATING)
 def step_begin(
     op: str, label: str | None = None, params: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -862,7 +1155,7 @@ def step_begin(
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=_MUTATING)
 def step_commit(planned: bool = False) -> dict[str, Any]:
     """Close the step opened by step_begin.
 
@@ -884,7 +1177,7 @@ def step_commit(planned: bool = False) -> dict[str, Any]:
     return _outcome(response, "plan" if planned else "apply")
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READONLY)
 def step_list() -> dict[str, Any]:
     """List the steps in the drawing's journal, oldest first."""
     try:
@@ -894,7 +1187,7 @@ def step_list() -> dict[str, Any]:
     return {"ok": True, "count": len(rows), "steps": rows, "rendered": describe_steps(rows)}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_DESTRUCTIVE)
 def step_control(
     action: str,
     index: int | None = None,
@@ -938,7 +1231,7 @@ def step_control(
     return _outcome(response, action)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READONLY)
 def library_list(source: str | None = None, limit: int = 500) -> dict[str, Any]:
     """List the block definitions in the open drawing, or in a library .dwg.
 
@@ -946,14 +1239,22 @@ def library_list(source: str | None = None, limit: int = 500) -> dict[str, Any]:
     that has drifted from the library is caught. Dynamic blocks come back with their
     parameters, the values each accepts and which are read-only. A library file is opened
     read-only on the side and never becomes a reference to it.
+
+    `has_more` tells you `limit` cut the list short; call again with a larger
+    limit for the rest.
     """
     try:
-        return {"ok": True, **_client().call("blocks", source=source, limit=int(limit))}
+        result = _client().call("blocks", source=source, limit=int(limit) + 1)
     except (PluginError, PluginUnavailable) as exc:
         raise BackendError(str(exc)) from exc
+    blocks = result.get("blocks", [])
+    result["blocks"] = blocks[: int(limit)]
+    result["count"] = min(len(blocks), int(limit))
+    result["has_more"] = len(blocks) > int(limit)
+    return {"ok": True, **result}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READONLY)
 def element_types(category: str | None = None, check_library: bool = True) -> dict[str, Any]:
     """What the element catalogue offers, and whether the library still matches it.
 
@@ -1001,7 +1302,7 @@ def _check_catalog(loaded: catalog.Catalog) -> list[str]:
     return loaded.check_against(known)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_MUTATING)
 def place_element(
     type: str,  # noqa: A002 - the tool surface speaks the caller's language
     at: Any,
@@ -1046,7 +1347,7 @@ def place_element(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=_MUTATING)
 def place_along(
     type: str,  # noqa: A002
     start: Any,
@@ -1072,8 +1373,13 @@ def place_along(
         be,
         "place_along",
         f"{len(_positions(start, end, count, spacing, inset))} x {element.label}",
-        {"type": element.key, "start": geom.xy(start), "end": geom.xy(end), "count": count,
-         "spacing": spacing},
+        {
+            "type": element.key,
+            "start": geom.xy(start),
+            "end": geom.xy(end),
+            "count": count,
+            "spacing": spacing,
+        },
         lambda: ops.place_along(
             be,
             element,
@@ -1090,7 +1396,7 @@ def place_along(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=_MUTATING)
 def place_grid(
     type: str,  # noqa: A002
     xs: list[float],
@@ -1113,8 +1419,14 @@ def place_grid(
         f"{len(xs) * len(ys)} x {element.label}",
         {"type": element.key, "xs": list(xs), "ys": list(ys)},
         lambda: ops.place_grid(
-            be, element, list(xs), list(ys), variant=variant, params=params,
-            rotation=float(rotation), tag=tag,
+            be,
+            element,
+            list(xs),
+            list(ys),
+            variant=variant,
+            params=params,
+            rotation=float(rotation),
+            tag=tag,
         ),
     )
 

@@ -8,6 +8,7 @@ testable without a CAD installation.
 from __future__ import annotations
 
 import contextlib
+import json
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -15,9 +16,13 @@ from typing import Any
 import ezdxf
 from ezdxf import const
 from ezdxf.enums import TextEntityAlignment
+from ezdxf.lldxf.tags import Tags
+from ezdxf.lldxf.types import DXFTag
 
 from ..geom import Point, xy
+from ..journal import Journal
 from .base import BackendError
+from .recording import RecordingBackend, unflatten_points
 
 #: Text style registering a CJK-capable TrueType face. SimSun rather than SimHei
 #: because SimHei has no superscript-two glyph, which the area labels need.
@@ -41,12 +46,24 @@ DEFAULT_MTEXT_WIDTH = 6000.0
 DIM_TEXT_HEIGHT = 250.0
 
 
-class DxfBackend:
+class DxfBackend(RecordingBackend):
     """Renders into an in-memory DXF document that can be saved and reopened."""
 
     name = "dxf"
 
+    #: Where the journal lives inside the file: root dictionary → ACADMCP → JOURNAL.
+    #: Same idea as the plugin's DWG journal: the steps travel with the drawing, so
+    #: opening a saved file can still undo what a previous session drew.
+    JOURNAL_DICT = "ACADMCP"
+    JOURNAL_KEY = "JOURNAL"
+    #: A group-code-1 string tops out at 2049 bytes; JSON is escaped to ASCII first,
+    #: so chunk by characters with margin.
+    JOURNAL_CHUNK = 1900
+
     def __init__(self, path: str | None = None, template: str = "R2010", **_: Any) -> None:
+        super().__init__()
+        # Set before any read so a backend with no path still reports the field.
+        self.journal_unreadable = ""
         if path:
             try:
                 self.doc = ezdxf.readfile(path)
@@ -60,6 +77,8 @@ class DxfBackend:
         self.msp = self.doc.modelspace()
         self.path = path
         self._ops = 0
+        if path:
+            self._read_journal()
 
     # --- document ----------------------------------------------------------
     def _ensure_style(self) -> None:
@@ -116,6 +135,7 @@ class DxfBackend:
         if not target:
             raise BackendError("no output path given and the document has none")
         Path(target).parent.mkdir(parents=True, exist_ok=True)
+        self._write_journal()
         self.doc.saveas(target)
         self.path = target
         return target
@@ -206,6 +226,11 @@ class DxfBackend:
             "entities": len(self.msp),
             "layers": sorted(layer.dxf.name for layer in self.doc.layers),
             "ops": self._ops,
+            "journal": {
+                "steps": len(self.journal.steps),
+                "applied": sum(s.state == "applied" for s in self.journal.steps),
+            },
+            "journal_unreadable": self.journal_unreadable,
         }
 
     def entities(self, layer: str | None = None, limit: int = 200) -> list[dict]:
@@ -219,11 +244,33 @@ class DxfBackend:
         return out
 
     # --- primitives --------------------------------------------------------
+    # Hybrid: outside a step the method draws eagerly (unchanged behaviour for
+    # the existing tests, examples and scripts); inside a step it records a
+    # plugin-format primitive and the commit draws the batch as one unit.
     def line(self, p1: Point, p2: Point, *, layer: str = "0", linetype: str | None = None) -> Any:
+        if self.open_step:
+            return self._record("line", [p1, p2], layer=layer, linetype=linetype)
+        return self._draw_line(p1, p2, layer=layer, linetype=linetype)
+
+    def _draw_line(
+        self, p1: Point, p2: Point, *, layer: str = "0", linetype: str | None = None
+    ) -> Any:
         self._ops += 1
         return self.msp.add_line(xy(p1), xy(p2), dxfattribs=self._attribs(layer, linetype))
 
     def polyline(
+        self,
+        points: Sequence[Point],
+        *,
+        closed: bool = False,
+        layer: str = "0",
+        linetype: str | None = None,
+    ) -> Any:
+        if self.open_step:
+            return self._record("polyline", points, layer=layer, closed=closed, linetype=linetype)
+        return self._draw_polyline(points, closed=closed, layer=layer, linetype=linetype)
+
+    def _draw_polyline(
         self,
         points: Sequence[Point],
         *,
@@ -236,10 +283,35 @@ class DxfBackend:
         return self.msp.add_lwpolyline(pts, close=closed, dxfattribs=self._attribs(layer, linetype))
 
     def circle(self, center: Point, radius: float, *, layer: str = "0") -> Any:
+        if self.open_step:
+            return self._record("circle", [center], layer=layer, radius=radius)
+        return self._draw_circle(center, radius, layer=layer)
+
+    def _draw_circle(self, center: Point, radius: float, *, layer: str = "0") -> Any:
         self._ops += 1
         return self.msp.add_circle(xy(center), float(radius), dxfattribs=self._attribs(layer))
 
     def arc(
+        self,
+        center: Point,
+        radius: float,
+        start_deg: float,
+        end_deg: float,
+        *,
+        layer: str = "0",
+    ) -> Any:
+        if self.open_step:
+            return self._record(
+                "arc",
+                [center],
+                layer=layer,
+                radius=radius,
+                start_angle=start_deg,
+                end_angle=end_deg,
+            )
+        return self._draw_arc(center, radius, start_deg, end_deg, layer=layer)
+
+    def _draw_arc(
         self,
         center: Point,
         radius: float,
@@ -267,6 +339,28 @@ class DxfBackend:
         rotation: float = 0.0,
         align: str = "left",
     ) -> Any:
+        if self.open_step:
+            return self._record(
+                "text",
+                [pos],
+                layer=layer,
+                text=content,
+                height=height,
+                rotation=rotation,
+                align=align,
+            )
+        return self._draw_text(pos, content, height, layer=layer, rotation=rotation, align=align)
+
+    def _draw_text(
+        self,
+        pos: Point,
+        content: str,
+        height: float,
+        *,
+        layer: str = "0",
+        rotation: float = 0.0,
+        align: str = "left",
+    ) -> Any:
         self._ops += 1
         t = self.msp.add_text(
             str(content),
@@ -281,6 +375,22 @@ class DxfBackend:
         return t
 
     def mtext(
+        self,
+        pos: Point,
+        content: str,
+        height: float,
+        width: float = 0.0,
+        *,
+        layer: str = "0",
+        align: str = "center",
+    ) -> Any:
+        if self.open_step:
+            return self._record(
+                "mtext", [pos], layer=layer, text=content, height=height, width=width, align=align
+            )
+        return self._draw_mtext(pos, content, height, width, layer=layer, align=align)
+
+    def _draw_mtext(
         self,
         pos: Point,
         content: str,
@@ -315,6 +425,28 @@ class DxfBackend:
         angle: float = 0.0,
         solid: bool = False,
     ) -> Any:
+        if self.open_step:
+            return self._record(
+                "hatch",
+                points,
+                layer=layer,
+                pattern=pattern,
+                scale=scale,
+                angle=angle,
+                solid=solid,
+            )
+        return self._draw_hatch(points, pattern, scale, layer=layer, angle=angle, solid=solid)
+
+    def _draw_hatch(
+        self,
+        points: Sequence[Point],
+        pattern: str = "ANSI31",
+        scale: float = 1.0,
+        *,
+        layer: str = "0",
+        angle: float = 0.0,
+        solid: bool = False,
+    ) -> Any:
         self._ops += 1
         h = self.msp.add_hatch(dxfattribs=self._attribs(layer))
         h.paths.add_polyline_path(
@@ -327,6 +459,25 @@ class DxfBackend:
         return h
 
     def linear_dimension(
+        self,
+        p1: Point,
+        p2: Point,
+        offset: float,
+        *,
+        layer: str = "0",
+        text_height: float | None = None,
+    ) -> Any:
+        if self.open_step:
+            return self._record(
+                "dimension",
+                [p1, p2],
+                layer=layer,
+                offset=offset,
+                text_height=text_height or 0.0,
+            )
+        return self._draw_linear_dimension(p1, p2, offset, layer=layer, text_height=text_height)
+
+    def _draw_linear_dimension(
         self,
         p1: Point,
         p2: Point,
@@ -355,7 +506,10 @@ class DxfBackend:
             p1=a, p2=b, distance=distance, override=override, dxfattribs=self._attribs(layer)
         )
         dim.render()
-        return dim
+        # add_aligned_dim hands back a DimStyleOverride wrapping the DIMENSION
+        # entity; the entity is returned because the journal needs its handle and
+        # every other _draw_* method returns the entity it created.
+        return dim.dimension
 
     def insert(
         self,
@@ -375,7 +529,132 @@ class DxfBackend:
         ezdxf could hold a block, but the definition has to come from a library .dwg, which
         ezdxf cannot read. Reading one is worth doing and is not done yet.
         """
+        # Inside a step the refusal is deferred to the commit, where the recorded
+        # primitive reaches _apply_primitive and raises there — same outcome, but
+        # the step machinery owns the failure path.
+        if self.open_step:
+            return self._record(
+                "insert",
+                [at],
+                layer=layer,
+                block=block,
+                source=source,
+                rotation=rotation,
+                scale_x=scale if scale_x is None else scale_x,
+                scale_y=scale if scale_y is None else scale_y,
+                properties=properties,
+            )
         raise BackendError(
             "the 'dxf' backend cannot insert blocks: it cannot read a library .dwg to copy "
             "a definition from. Use backend='plugin' to place library elements in AutoCAD."
         )
+
+    # --- journal application ------------------------------------------------
+    def _apply_primitive(self, prim: dict[str, Any]) -> Any:
+        pts = unflatten_points(prim.get("points", []))
+        kind = prim["kind"]
+        if kind == "line":
+            return self._draw_line(
+                pts[0], pts[1], layer=prim.get("layer", "0"), linetype=prim.get("linetype")
+            )
+        if kind == "polyline":
+            return self._draw_polyline(
+                pts,
+                closed=bool(prim.get("closed", False)),
+                layer=prim.get("layer", "0"),
+                linetype=prim.get("linetype"),
+            )
+        if kind == "circle":
+            return self._draw_circle(pts[0], float(prim["radius"]), layer=prim.get("layer", "0"))
+        if kind == "arc":
+            return self._draw_arc(
+                pts[0],
+                float(prim["radius"]),
+                float(prim["start_angle"]),
+                float(prim["end_angle"]),
+                layer=prim.get("layer", "0"),
+            )
+        if kind == "text":
+            return self._draw_text(
+                pts[0],
+                str(prim["text"]),
+                float(prim["height"]),
+                layer=prim.get("layer", "0"),
+                rotation=float(prim.get("rotation", 0.0)),
+                align=str(prim.get("align", "left")),
+            )
+        if kind == "mtext":
+            return self._draw_mtext(
+                pts[0],
+                str(prim["text"]),
+                float(prim["height"]),
+                width=float(prim.get("width", 0.0)),
+                layer=prim.get("layer", "0"),
+                align=str(prim.get("align", "center")),
+            )
+        if kind == "hatch":
+            return self._draw_hatch(
+                pts,
+                str(prim.get("pattern", "ANSI31")),
+                float(prim.get("scale", 1.0)),
+                layer=prim.get("layer", "0"),
+                angle=float(prim.get("angle", 0.0)),
+                solid=bool(prim.get("solid", False)),
+            )
+        if kind == "dimension":
+            # text_height travels as 0.0 when unset; the drawer treats None as "default".
+            height = float(prim.get("text_height") or 0.0) or None
+            return self._draw_linear_dimension(
+                pts[0],
+                pts[1],
+                float(prim.get("offset", 0.0)),
+                layer=prim.get("layer", "0"),
+                text_height=height,
+            )
+        raise BackendError(
+            f"the 'dxf' backend cannot apply primitive kind {kind!r}: it cannot read a "
+            "library .dwg to copy a block definition from. Use backend='plugin'."
+        )
+
+    def _apply(self, primitives: list[dict[str, Any]]) -> list[str]:
+        return [self._apply_primitive(p).dxf.handle for p in primitives]
+
+    def _erase(self, handles: list[str]) -> tuple[int, int]:
+        erased = missing = 0
+        for handle in handles:
+            entity = self.doc.entitydb.get(handle)
+            if entity is None or not entity.is_alive:
+                missing += 1  # a hand edit already removed it; count, don't fail
+                continue
+            self.msp.delete_entity(entity)
+            erased += 1
+        return erased, missing
+
+    # --- journal persistence ------------------------------------------------
+    def _write_journal(self) -> None:
+        payload = json.dumps(self.journal.to_dict(), ensure_ascii=True)
+        dictionary = self.doc.rootdict.get_required_dict(self.JOURNAL_DICT)
+        # add_xrecord always appends, hence the get-or-add: never two JOURNAL records.
+        xrecord = dictionary.get(self.JOURNAL_KEY) or dictionary.add_xrecord(self.JOURNAL_KEY)
+        xrecord.tags = Tags(
+            [
+                DXFTag(1, payload[i : i + self.JOURNAL_CHUNK])
+                for i in range(0, len(payload), self.JOURNAL_CHUNK)
+            ]
+        )
+
+    def _read_journal(self) -> None:
+        self.journal_unreadable = ""
+        dictionary = self.doc.rootdict.get(self.JOURNAL_DICT)
+        xrecord = dictionary.get(self.JOURNAL_KEY) if dictionary else None
+        if xrecord is None:
+            return
+        payload = "".join(str(tag.value) for tag in xrecord.tags if tag.code == 1)
+        if not payload:
+            return
+        try:
+            self.journal = Journal.from_dict(json.loads(payload))
+        except (ValueError, json.JSONDecodeError) as exc:
+            # The rule from the plugin journal applies here too: an unreadable
+            # record is counted and reported, never silently skipped.
+            self.journal_unreadable = f"journal in {self.path!r} ignored: {exc}"
