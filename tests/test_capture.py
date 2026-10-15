@@ -465,3 +465,23 @@ def test_the_duplicate_refusal_names_the_fingerprint_it_matched(be):
 
     assert first["fingerprint"].startswith("sha256:")
     assert first["fingerprint"] in str(caught.value)
+
+
+def test_capture_refuses_a_placement_step(be):
+    """A placed element is an insert primitive: capturing it nests a block inside a block, and
+    the fragment a publish writes is a fresh document with no child definitions, so the element
+    would place here and never accumulate. Refused at capture time, naming the recovery."""
+    _capture(be, _door_steps(be))
+    with be.step("place_element", params={"type": KEY}):
+        be.insert(BLOCK, (5000.0, 5000.0))
+
+    with pytest.raises(ValueError, match="cannot travel in a geometry fragment"):
+        _capture(be, [4], key="nested_placement")
+
+
+def test_capture_refuses_a_capture_step(be):
+    """A capture records a block-intent primitive — the same nesting one step removed."""
+    _capture(be, _door_steps(be))
+
+    with pytest.raises(ValueError, match="cannot travel in a geometry fragment"):
+        _capture(be, [3], key="capture_of_capture")

@@ -254,3 +254,11 @@ def test_place_element_refuses_a_three_item_at():
     so this pins the second half of the fix (geom.xy refuses a non-2 sequence)."""
     with pytest.raises(BackendError, match="two numbers"):
         _tool("place_element")(type="door", at=[0, 0, 0])
+
+
+def test_polyline_needs_two_points():
+    """An empty polyline used to record a step that drew nothing and report vertices: 0."""
+    with pytest.raises(BackendError, match="at least 2 points"):
+        _tool("draw_polyline")(points=[])
+    with pytest.raises(BackendError, match="at least 2 points"):
+        _tool("draw_polyline")(points=[[1000, 0]])

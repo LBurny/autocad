@@ -1321,7 +1321,7 @@ def draw_polyline(points: Any, closed: bool = False, layer: str = "0") -> dict[s
     pts = _pts(points)
     params = {"points": pts, "closed": closed, "layer": layer}
     with _auto_step("draw_polyline", params) as be:
-        be.polyline(pts, closed=closed, layer=layer)
+        ops.draw_polyline(be, pts, closed=closed, layer=layer)
     return {"ok": True, "vertices": len(pts), "closed": closed}
 
 
@@ -2335,7 +2335,13 @@ def place_grid(
         be,
         "place_grid",
         f"{len(xs) * len(ys)} x {element.label}",
-        {"type": element.key, "xs": list(xs), "ys": list(ys), "rotation": float(rotation), "tag": tag},
+        {
+            "type": element.key,
+            "xs": list(xs),
+            "ys": list(ys),
+            "rotation": float(rotation),
+            "tag": tag,
+        },
         lambda: ops.place_grid(
             be,
             element,
@@ -2447,9 +2453,19 @@ def element_publish(key: str, path: str = "") -> dict[str, Any]:
     fragment = finder(element.params.get("block", "")) if finder is not None else None
     if fragment:
         fragment["fingerprint"] = element.origin.get("fingerprint", "")
+    # An undone capture and a definition this drawing never had both arrive as no fragment,
+    # and their recoveries differ — publish_to cannot see the journal, so answer that here.
+    capture_undone = fragment is None and any(
+        row.get("op") == "element_capture"
+        and row.get("state") == "undone"
+        and str((row.get("params") or {}).get("key", "")).strip().lower() == key.strip().lower()
+        for row in be.step_rows()
+    )
     # publish_to forgets the settings cache after writing, so the catalogue in force is read
     # once here, before the write, and never touched again.
-    return catalog.current().publish_to(path or None, element, fragment)
+    return catalog.current().publish_to(
+        path or None, element, fragment, capture_undone=capture_undone
+    )
 
 
 @mcp.tool(annotations=_READONLY)

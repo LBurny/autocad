@@ -450,6 +450,21 @@ def test_element_publish_refuses_a_key_this_drawing_never_captured(_tool_session
         server.element_publish(key="elsewhere")
 
 
+def test_element_publish_names_the_undo_when_the_capture_was_undone(_tool_session):
+    """Tool level: the undone capture and the never-captured definition both arrive at
+    publish_to as no fragment, and the recoveries differ — the wire has to say which."""
+    server.draw_wall(points=[[0, 0], [6000, 0]], thickness=200)
+    server.draw_door(hinge=[1000, 0], width=900)
+    server.element_capture(steps=[1, 2], key="undone_door", layer="A-DOOR")
+    server.drawing_undo()
+
+    with pytest.raises(ValueError) as caught:
+        server.element_publish(key="undone_door")
+
+    assert "undone" in str(caught.value)
+    assert "drawing_redo" in str(caught.value)
+
+
 def test_a_capture_the_project_catalogue_lacks_survives_a_reopen(tmp_path, _tool_session):
     """Two processes: capture in a project that has a catalogue of its own, never publish, save,
     reopen. The project's files win the precedence — and the drawing's own capture is still

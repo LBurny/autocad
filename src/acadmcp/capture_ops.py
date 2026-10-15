@@ -127,9 +127,10 @@ def capture(
     Returns the definition's name, the key it was registered under, how many primitives it
     holds and the base point as placed. Refuses, loudly and by name: an empty gathering, a
     step index repeated (it would draw that geometry into the block twice), a step that is
-    missing or undone, sheet furniture (paper millimetres are not model geometry), geometry
-    the library already holds under another key, a key the catalogue already has, and a
-    backend that cannot write a definition at all.
+    missing or undone, sheet furniture (paper millimetres are not model geometry), a
+    placement or another capture (a block inside a block cannot travel in a fragment),
+    geometry the library already holds under another key, a key the catalogue already has,
+    and a backend that cannot write a definition at all.
     """
     wanted = [int(step) for step in (steps or [])]
     if not wanted:
@@ -170,6 +171,17 @@ def capture(
                 f"step geometry includes a {prim.get('kind', '?')} primitive drawn on the "
                 "sheet: a frame is paper millimetres and a block is model geometry. Capture the "
                 "model steps only"
+            )
+        if prim.get("kind") in ("insert", "block"):
+            # A placement or a capture inside the gathering makes a block inside a block. The
+            # fragment a publish writes is a fresh document with no child definitions, so the
+            # element would place in this drawing and never accumulate — found the hard way in
+            # the sandbox: capture said ok, publish refused, and the message blamed the backend.
+            raise ValueError(
+                f"step geometry includes a {prim['kind']} of '{prim.get('block', '?')}': a block "
+                "inside a block cannot travel in a geometry fragment, so the capture could "
+                "never be published. Capture the steps that drew the geometry itself, not a "
+                "placement of it"
             )
 
     loaded = catalog.current()

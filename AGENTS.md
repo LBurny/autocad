@@ -78,6 +78,9 @@ tests/                  test_geom.py, test_backends.py, test_journal.py, test_re
                         test_sheet_plot.py (the plotted PDF: size, scale, refusals),
                         test_dxf_create_render.py (drawing_new create, theme colours, glyphs),
                         test_input_validation.py (caller mistakes surface as readable errors),
+                        test_ops.py (empty point lists refused at the ops layer),
+                        test_replay.py (sheet and published-element steps replayed dxf→dxf),
+                        test_placement_params.py (rotation/scale/tag recorded on placement steps),
                         test_live_screenshot.py (no restore, no rename on export),
                         sandbox_driver.py (fresh-server sandbox for live drawing exercises),
                         sandbox_library_check.py (draw → check → suggest → capture → publish
@@ -92,7 +95,7 @@ tests/                  test_geom.py, test_backends.py, test_journal.py, test_re
 ## Commands
 
 ```bash
-uv run pytest -q                      # 611 tests, ~12s, no AutoCAD required
+uv run pytest -q                      # 689 tests, ~14s, no AutoCAD required
 uv run pytest tests/test_terms.py -q  # adding a tool without a vocabulary entry fails here
 uv run pytest tests/test_prompts.py -q  # a prompt naming a tool that does not exist fails here
 uv run python scripts/check_doc_numbers.py   # docs and evaluation answers vs the tree
