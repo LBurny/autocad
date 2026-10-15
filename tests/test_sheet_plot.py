@@ -76,6 +76,20 @@ def test_plotting_without_a_sheet_says_what_is_missing(session, tmp_path):
         _tool("drawing_plot_pdf")(str(tmp_path / "nosheet.pdf"))
 
 
+def test_a_reopened_sheetless_drawing_still_refuses_to_plot(session, tmp_path):
+    """The phantom consequence: a save/load round trip used to materialise ezdxf's default
+    page setup onto Layout1, so a sheetless drawing reopened reported an A3 at 1:1 and this
+    call *succeeded* on a frameless drawing. It refuses by name again."""
+    _tool("draw_line")([0, 0], [6000, 0])
+    target = str(tmp_path / "plain.dxf")
+    _tool("drawing_save")(target)
+    reopened = _tool("drawing_open")(target)
+    assert reopened["sheet"] == {}
+
+    with pytest.raises(BackendError, match="no sheet"):
+        _tool("drawing_plot_pdf")(str(tmp_path / "phantom.pdf"))
+
+
 def test_plotting_refuses_on_a_backend_without_paperspace():
     class _NoSheet:
         name = "plugin"

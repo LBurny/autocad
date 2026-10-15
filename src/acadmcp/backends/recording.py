@@ -188,9 +188,40 @@ class RecordingBackend:
         This is cross-backend replay: the primitives are backend-neutral, so a
         step recorded on the dxf backend draws the same geometry here.
         """
+        self._prepare_replay(record)
         self.begin_step(record.op, label=record.label, params=record.params)
         self._pending = [dict(p) for p in record.primitives]
         return self.commit_step()
+
+    def _prepare_replay(self, record: StepRecord) -> None:
+        """Rebuild the document state a step's primitives need but do not carry.
+
+        A sheet is two halves: a page setup, which is **document state** and is never
+        journalled, and a frame drawn on the layout, which is recorded as `paper`
+        primitives. Replaying the frame onto a fresh drawing therefore has nowhere to land
+        unless the page setup is rebuilt from the step's own params first — which is what
+        this does, before the primitives are applied, so the replay target ends up with the
+        same sheet the source had. The params carry `paper`, `scale` and `orientation` (the
+        keys `drawing_sheet` records), so nothing has to be guessed.
+
+        Guarded by `supports_sheet`: a backend with no paperspace keeps the named refusal
+        its applier gives, rather than this quietly setting up half a sheet.
+        """
+        if not self.supports_sheet:
+            return
+        if not any(isinstance(p, dict) and p.get("paper") for p in record.primitives):
+            return
+        paper = str(record.params.get("paper", "") or "").strip()
+        scale = str(record.params.get("scale", "") or "").strip()
+        if not paper or not scale:
+            return
+        # Imported here rather than at module scope: `sheet` is pure, but this keeps the
+        # batching layer's import list at the two things every driver shares.
+        from .. import sheet as _sheet
+
+        facing = str(record.params.get("orientation", "") or "landscape")
+        resolved = _sheet.resolve_paper(paper, facing)
+        self.set_page_setup(resolved, _sheet.resolve_scale(scale))
 
     # --- journal actions ---------------------------------------------------
 

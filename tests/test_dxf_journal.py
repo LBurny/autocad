@@ -219,8 +219,37 @@ def test_entities_reports_a_block_reference_under_both_names(be):
 
     inserts = [row for row in be.entities() if row["type"] == "INSERT"]
     assert inserts == [
-        {"type": "INSERT", "layer": "0", "block": "TEST_BLOCK", "definition": "TEST_BLOCK"}
+        {
+            "type": "INSERT",
+            "layer": "0",
+            "block": "TEST_BLOCK",
+            "definition": "TEST_BLOCK",
+            "at": [0.0, 0.0],
+            "rotation": 0.0,
+            "xscale": 1.0,
+            "yscale": 1.0,
+        }
     ]
+
+
+def test_an_insert_row_says_where_the_reference_landed(be):
+    """The read-only surface can answer "where did my element go?" without a round trip.
+
+    An INSERT row used to be `{type, layer, block, definition}` and nothing more, so an agent
+    that had just placed an element had to save the DXF and read it with ezdxf to confirm the
+    placement — the one question its own listing could not answer."""
+    block = be.doc.blocks.new("PLACED")
+    block.add_line((0, 0), (1, 0))
+    be.msp.add_blockref("PLACED", (1500, 2500), dxfattribs={"rotation": 30.0})
+    be.msp.add_blockref("PLACED", (0, 0), dxfattribs={"xscale": 2.0, "yscale": 0.5})
+
+    rows = [row for row in be.entities() if row["type"] == "INSERT"]
+    assert rows[0]["at"] == [1500.0, 2500.0] and rows[0]["rotation"] == 30.0
+    assert rows[1]["xscale"] == 2.0 and rows[1]["yscale"] == 0.5
+    # And only INSERT rows carry placement: the shape of every other row is unchanged.
+    be.msp.add_line((0, 0), (1, 1))
+    line = next(row for row in be.entities() if row["type"] == "LINE")
+    assert line == {"type": "LINE", "layer": "0"}
 
 
 # --- the name our record goes under ----------------------------------------

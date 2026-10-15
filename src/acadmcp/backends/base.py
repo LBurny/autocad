@@ -130,7 +130,17 @@ class Backend(Protocol):
 
     def info(self) -> dict[str, Any]: ...
 
-    def entities(self, layer: str | None = None, limit: int = 200) -> list[dict]: ...
+    def entities(self, layer: str | None = None, limit: int = 200) -> list[dict]:
+        """A thin listing of the drawing's entities for the read-only surface.
+
+        Every row carries at least ``type`` and ``layer``; a TEXT/MTEXT row adds ``text`` so a
+        tag scan can continue numbering rather than start from 1, and an **INSERT row carries
+        its placement** — ``block``/``definition`` and, where the driver can report them,
+        ``at``, ``rotation``, ``xscale`` and ``yscale`` — so a caller can confirm *where* its
+        own element landed without saving the file and reading it with a CAD library. A driver
+        that cannot report a field simply omits it; the shape is not padded with guesses.
+        """
+        ...
 
     def step_rows(self) -> list[dict[str, Any]]:
         """The journal as rows: ``index``, ``op``, ``label``, ``params``, ``state`` and an

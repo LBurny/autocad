@@ -405,12 +405,37 @@ class DxfBackend(RecordingBackend):
         return self.doc.layouts.get(name)
 
     @staticmethod
-    def _sheet_from_layout(layout: Any) -> dict[str, Any]:
+    def _looks_like_a_page_setup(layout: Any, paper_name: str) -> bool:
+        """Whether a layout carries the *evidence* of a page setup, not just its fields.
+
+        A save/load round trip materialises ezdxf's own defaults onto every paper layout:
+        `ezdxf.new("R2010")` has empty page-setup fields in memory, but a `Layout1` comes
+        back from the file as an A3 at 1:1 with a paper width and height — so the paper
+        fields alone cannot tell a sheet from a drawing that never had one, and a sheetless
+        file reopened used to report a phantom A3 and even plot.
+
+        The evidence is the layout's own **name**. `set_page_setup` renames the layout to
+        its paper name (`Layouts.rename`, not `Layout.rename` — see `_sheet_target`), so a
+        real sheet reopens as "A3" while the phantom keeps "Layout1". A caller that named
+        the layout something else falls back on `plot_type == 1` ("plot the layout's own
+        contents"), which the setup writes and ezdxf's default is not (the default is 5).
+        Measured 2026-10-15 on ezdxf 1.4.4: the phantom comes back `plot_type=5`, margins
+        7.5/20, `unit_factor=1.0`; a real 1:100 A3 comes back named "A3", `plot_type=1`,
+        `unit_factor=100.0`.
+        """
+        if layout.name.strip().upper() == paper_name.strip().upper():
+            return True
+        return int(layout.dxf.get("plot_type", 0) or 0) == 1
+
+    @classmethod
+    def _sheet_from_layout(cls, layout: Any) -> dict[str, Any]:
         """The reportable sheet a layout describes, or {} when it is not set up as one."""
         name = str(layout.dxf.get("paper_size", "") or "").strip().upper()
         width = layout.dxf.get("paper_width", None)
         height = layout.dxf.get("paper_height", None)
         if name not in sheet.PAPERS or not width or not height:
+            return {}
+        if not cls._looks_like_a_page_setup(layout, name):
             return {}
         landscape = (float(width), float(height)) == sheet.PAPERS[name]
         numerator = int(layout.dxf.get("scale_numerator", 1) or 1)
@@ -446,7 +471,10 @@ class DxfBackend(RecordingBackend):
         target.dxf.paper_width = paper.width
         target.dxf.paper_height = paper.height
         target.dxf.plot_paper_units = 1  # millimetres
-        target.dxf.plot_type = 1  # what the layout holds, not the extents or a window
+        # group 76: which plot area — 1 is "extents" (0 display, 2 limits, 3 view, 4 window,
+        # 5 layout). ezdxf's own round-trip default here is 5, so writing 1 is also one of
+        # the marks `_looks_like_a_page_setup` reads as evidence of a real setup.
+        target.dxf.plot_type = 1
         target.dxf.plot_rotation = 0
         target.dxf.scale_numerator = numerator
         target.dxf.scale_denominator = denominator
@@ -777,6 +805,15 @@ class DxfBackend(RecordingBackend):
                 # is on its own the one that was asked for. ezdxf resolves both to the
                 # reference's own name here.
                 row["block"] = row["definition"] = e.dxf.get("name", "")
+                # Where the reference landed. Without this a caller could place an element
+                # and still have to save the DXF and read it with ezdxf to confirm *where*
+                # it went — the one question the read-only surface could not answer about
+                # its own placement. Placement keys are added to INSERT rows only; every
+                # other row's shape is unchanged.
+                row["at"] = [float(e.dxf.insert[0]), float(e.dxf.insert[1])]
+                row["rotation"] = float(e.dxf.get("rotation", 0.0))
+                row["xscale"] = float(e.dxf.get("xscale", 1.0))
+                row["yscale"] = float(e.dxf.get("yscale", 1.0))
             out.append(row)
             if len(out) >= limit:
                 break
@@ -1127,6 +1164,20 @@ class DxfBackend(RecordingBackend):
         reference.dxf.yscale = float(scale_y)
         return reference
 
+    def _import_published_block(self, name: str) -> None:
+        """Bring a published element's definition in, the way `insert_captured` does.
+
+        Delegates to the catalogue's own fragment importer rather than reimplementing the
+        lookup: one place knows how an entry's `geometry_file` resolves against the catalogue
+        that carries it, and it is the same call a fresh `place_element` makes. A no-op (and
+        never reached in the normal path) when the drawing already holds the definition; it
+        is the replay path that needs it, because a definition is document state and is not
+        among the primitives a step records.
+        """
+        from .. import catalog_ops
+
+        catalog_ops._import_fragment_if_needed(self, name)
+
     def create_block(
         self, name: str, primitives: list[dict[str, Any]], base_point: Point
     ) -> dict[str, Any]:
@@ -1286,6 +1337,16 @@ class DxfBackend(RecordingBackend):
             # another drawing's library insert onto this backend is *reported* by
             # `drawing_replay` rather than raising out of ezdxf unmasked.
             name = str(prim["block"])
+            if name not in self.doc.blocks:
+                # A capture's definition is document state and is not journalled, so
+                # replaying a `place_element` step for a *published* element onto a fresh
+                # drawing finds the INSERT but not the block it references. The op layer's
+                # `insert_captured` resolves that by importing the published geometry
+                # fragment before it inserts; replay applies the primitives directly and
+                # never reaches that, so the same import is attempted here — the catalogue
+                # and its fragments resolve from the session exactly as a fresh placement
+                # does. A name the catalogue still cannot resolve is refused below.
+                self._import_published_block(name)
             if name not in self.doc.blocks:
                 raise BackendError(
                     f"the 'dxf' backend cannot apply an insert of {name!r}: this drawing has no "

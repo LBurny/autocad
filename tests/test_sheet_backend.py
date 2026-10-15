@@ -111,9 +111,42 @@ def test_a_reopened_drawing_still_knows_its_sheet(tmp_path):
     assert again._sheet_layout is not None
 
 
-def test_a_drawing_saved_without_a_sheet_reports_none():
+def test_a_new_drawing_reports_no_sheet_at_all():
     be = make_backend("dxf")
     assert be.sheet == {} and be._sheet_layout is None
+
+
+def test_a_drawing_saved_without_a_sheet_reports_none(tmp_path):
+    """The phantom this fixes: `ezdxf.new("R2010")` has empty page-setup fields in memory,
+    but a save/load round trip materialises ezdxf's own defaults (paper A3, 420x297, 1:1)
+    onto Layout1 — so a reopened *sheetless* drawing used to report an A3 sheet it never
+    had, and `drawing_plot_pdf` then plotted it. The discriminator is the layout's own
+    name: `set_page_setup` renames it to the paper name, so a real sheet reopens as "A3"
+    while the phantom keeps "Layout1"."""
+    be = make_backend("dxf")
+    be.line((0, 0), (1000, 0))
+    assert be.sheet == {}
+    target = str(tmp_path / "plain.dxf")
+    be.save(target)
+
+    reopened = make_backend("dxf", path=target)
+    assert reopened.sheet == {} and reopened._sheet_layout is None
+    assert reopened.info()["sheet"] == {}
+
+
+def test_a_reopened_sheetless_drawing_does_not_plot_or_adopt_a_phantom(tmp_path):
+    """The two measured consequences of the phantom: plot_pdf stopped refusing, and the
+    phantom 1:1 scale bypassed the assumed-scale fallback in the standard check."""
+    be = make_backend("dxf")
+    be.line((0, 0), (1000, 0))
+    target = str(tmp_path / "plain.dxf")
+    be.save(target)
+
+    reopened = make_backend("dxf", path=target)
+    with pytest.raises(BackendError, match="no sheet"):
+        reopened.plot_pdf(
+            str(tmp_path / "phantom.pdf"), paper=sheet.resolve_paper("A3"), scale=(1, 1)
+        )
 
 
 def test_the_live_drivers_declare_they_cannot_make_a_sheet():

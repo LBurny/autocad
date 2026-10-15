@@ -602,6 +602,19 @@ whose 75 says 1:10 while its 147 says 1.0 plots at 1:1 and claims 1:10, which is
 `STANDARD_SCALE_TYPES` exists to prevent; a ratio with no row there is written to 147 alone
 rather than given an invented 75.
 
+**"`ezdxf.new` sets none of the page-setup fields" is true in memory and false after a save/load
+round trip.** A round trip materialises ezdxf's own defaults onto every paper layout: a `Layout1`
+comes back as `paper_size` "A3", 420×297, `plot_type` 5, margins 7.5/20, `unit_factor` 1.0. So the
+paper *fields* alone cannot tell a real sheet from a drawing that never had one — and a reopened
+sheetless drawing therefore reported a phantom A3 at 1:1, which let `drawing_plot_pdf` plot a
+frameless file and quietly bypassed the assumed-scale fallback in `drawing_check_standard`.
+`_sheet_from_layout` now adopts a layout only when it carries the *evidence* of a setup: its name
+matches its own paper name (case-insensitive) — because `set_page_setup` renames the layout to the
+paper name, so a real sheet reopens as "A3" while the phantom keeps "Layout1" — or, for a layout a
+caller named something else, `plot_type == 1` ("plot the layout's contents"), which the setup writes
+and ezdxf's default is not. Measured 2026-10-15 on ezdxf 1.4.4; `test_sheet_backend.py` pins the
+round trip both directions.
+
 **Use `Layouts.rename`, not `Layout.rename`, and know why.** The object method sets the LAYOUT
 entity's name and leaves the `ACAD_LAYOUT` dictionary key alone, so the saved file carries a tab
 reading "A3" under an entry called "Layout1" — and ezdxf keys its own layout table by that entry
