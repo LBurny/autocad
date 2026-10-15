@@ -94,7 +94,7 @@ draw_wall_with_openings(
     points=[(0, 0), (12000, 0)],
     thickness=240,
     openings=[
-        {"start": 1200, "width": 1500, "kind": "door", "swing": "left", "tag": "FM乙1521"},
+        {"start": 1200, "width": 1500, "kind": "door", "swing": "left", "tag": "M1521"},
         {"start": 4200, "width": 1200, "kind": "window", "tag": "C1212"},
     ],
 )
@@ -117,8 +117,8 @@ its own library and layers with `acadmcp.json`.
 walls, so the number is usable in a room schedule:
 
 ```python
-draw_room(boundary=[(0, 0), (4000, 0), (4000, 3000), (0, 3000)], name="无菌室", thickness=200)
-# -> {"name": "无菌室", "area_m2": 10.64, "centroid": (2000.0, 1500.0)}
+draw_room(boundary=[(0, 0), (4000, 0), (4000, 3000), (0, 3000)], name="Meeting room", thickness=200)
+# -> {"name": "Meeting room", "area_m2": 10.64, "centroid": (2000.0, 1500.0)}
 ```
 
 ## Looking at the drawing
@@ -161,17 +161,6 @@ drawing_screenshot()
   they behave identically on every backend.
 - The `mcp` SDK renamed `FastMCP` to `MCPServer` in 2.x; both are imported, so
   either SDK generation works.
-
-### Chinese text
-
-Measured on AutoCAD 2026: a stock drawing's `Standard` style is `txt.shx` with
-no big font, so CJK renders as `?`. Text drawn here goes on an `HZ` style — the
-COM backend uses `gbenor.shx` + `gbcbig.shx` (the pair that works; `simhei.ttf`
-still draws `?`), the DXF backend `simsun.ttc` (which AutoCAD renders fine, and
-the PNG preview matches: a Chinese character is 1.42× its text height wide).
-Repointing a style does not repaint existing text — `set_text_style` regens for
-that reason. Areas are quoted as `m²` (U+00B2): the single codepoint `㎡`
-(U+33A1) renders under no font tested.
 
 ## Layout
 
