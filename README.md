@@ -6,10 +6,12 @@ riser shafts, grids and dimensions — into a **live AutoCAD session** or a
 **headless DXF file**. It is the 2D counterpart to
 [cadpilot](https://github.com/LBurny/cadpilot).
 
-```
-AI client  ──MCP──▶  acadmcp  ──┬── COM (pywin32) ──▶  running AutoCAD 2026
-                                └── ezdxf         ──▶  .dxf file (+ PNG preview)
-```
+![An AI client drives acadmcp over MCP; acadmcp reaches a running AutoCAD 2026
+through COM (pywin32), or writes a .dxf file with a PNG preview through
+ezdxf](docs/flow.png)
+
+The diagram is a drawing like any other — [docs/flow.dxf](docs/flow.dxf), drawn
+with this server, so it opens in AutoCAD and can be edited.
 
 ## Why three backends
 
