@@ -70,6 +70,31 @@ def setup_layers(be: Backend, standard: str = "") -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# primitives
+# ---------------------------------------------------------------------------
+
+
+def draw_polyline(
+    be: Backend,
+    points: Sequence[Point],
+    *,
+    closed: bool = False,
+    layer: str = "0",
+) -> list[Any]:
+    """A polyline through `points`, refusing a list that cannot be one.
+
+    Fewer than two points used to draw nothing and report success: the step recorded no
+    entity, ``vertices`` came back 0, and both the drawing and the journal claimed a polyline
+    that was never there. A polyline's whole content is its points, so the check belongs here
+    rather than in whatever a backend would make of an empty list.
+    """
+    pts = [geom.xy(p) for p in points]
+    if len(pts) < 2:
+        raise ValueError(f"a polyline needs at least 2 points, got {len(pts)}")
+    return [be.polyline(pts, closed=closed, layer=layer)]
+
+
+# ---------------------------------------------------------------------------
 # walls
 # ---------------------------------------------------------------------------
 
@@ -169,6 +194,11 @@ def draw_wall_with_openings(
         ring = ring[:-1]
     if closed and len(ring) < 3:
         raise ValueError("a closed wall run needs at least three corners")
+    if not closed and len(ring) < 2:
+        # One point has no direction, so `_sub_polyline`/`offset_pair` below would fail on it
+        # with a bare IndexError or an empty step; a run of fewer than two points is a caller
+        # slip and says so here instead.
+        raise ValueError(f"a wall run needs at least 2 points, got {len(ring)}")
 
     for i, op in enumerate(openings):
         if "start" not in op or "width" not in op:
@@ -958,6 +988,10 @@ def dimension_chain(
     layer: str = "A-DIM",
 ) -> dict[str, Any]:
     """A chain of dimensions along a polyline run, plus the overall dimension."""
+    if len(points) < 2:
+        # The loop below indexes points[0] and points[-1], so an empty or one-point chain was
+        # an IndexError (masked from the client) rather than a readable refusal.
+        raise ValueError(f"a dimension chain needs at least 2 points, got {len(points)}")
     made = []
     total = 0.0
     for i in range(len(points) - 1):
@@ -1021,6 +1055,45 @@ def _measured_width_refusal(key: str) -> str:
     )
 
 
+def _refuse_caller_params(element: Element, params: dict[str, Any] | None) -> None:
+    """Reject a caller's `params` that would rename the element or set a key it has not got.
+
+    Two measured failures, both silent before this guard existed:
+
+    * a captured element takes its definition's name from its own ``params['block']``, so a
+      caller's ``params={"block": ...}`` overwrote it: the INSERT that landed was a *different
+      element* while the step and the drawing summary still claimed the one asked for — the
+      drawing and the journal disagreeing, which is the exact failure the catalogue exists to
+      prevent;
+    * every adapter tolerates ``**params``, so a misspelled key rode straight through and was
+      ignored — a caller could set a size that reached nothing and be told it worked.
+
+    A captured element's geometry *is* its block, so it takes no caller params at all, and the
+    refusal names the fixed block. A twin takes its own named properties (a legitimate declared
+    override is always one of them); anything else is named back with the list it does accept.
+    """
+    if not params:
+        return
+    from . import catalog_ops
+
+    if element.op == "insert_captured":
+        block = str(element.params.get("block") or element.op_params.get("block") or "").strip()
+        raise ValueError(
+            f"'{element.key}' is a captured element: its geometry IS its block "
+            f"{block!r}, so its 'params' cannot be overridden; re-capture it at the size "
+            "wanted, or pass rotation/scale/tag as tool arguments rather than params"
+        )
+    accepted = catalog_ops.param_vocabulary(catalog_ops.get(element.op))
+    unknown = sorted(str(key) for key in params if key not in accepted)
+    if unknown:
+        raise ValueError(
+            f"'{element.key}' takes no parameter "
+            + ", ".join(repr(key) for key in unknown)
+            + f"; it is drawn by '{element.op}', which takes: "
+            + (", ".join(accepted) if accepted else "nothing")
+        )
+
+
 def place_element(
     be: Backend,
     element: Element,
@@ -1052,8 +1125,10 @@ def place_element(
     under the parameter the entry says carries one; an entry that has no such parameter is
     refused rather than given a nominal size to draw into a measured hole.
 
-    ``scale`` applies to the block path only: an op builds at real size, and scaling a door
-    symbol would produce a door of no standard size at all.
+    ``scale`` is honoured where it means something: the library-block path and a captured
+    block reference (an op-only entry whose adapter is `insert_captured`) both carry a real
+    scale factor. A parametric twin is built at real size from its own dimensions, so it
+    refuses a scale rather than drawing an unscaled door of no standard size.
     """
     if width is not None and not element.width_key:
         # Checked before the placement decision, because whether this entry can express a
@@ -1082,6 +1157,10 @@ def place_element(
     else:
         from . import catalog_ops
 
+        # A caller's `params` may name a twin's properties — and only those: `block` is the
+        # element's whole identity, and an unknown key used to be swallowed by the adapter's
+        # `**params`. Both are refused here rather than merged into the adapter's kwargs.
+        _refuse_caller_params(element, params)
         # The twin is called in its own vocabulary: a block's parameters are not its, and
         # handing it the block's names would leave it at its own defaults — a right-looking
         # element at the wrong size. `twin_settings` refuses that where it matters.
@@ -1090,6 +1169,7 @@ def place_element(
                 be,
                 geom.xy(at),
                 rotation=rotation,
+                scale=scale,
                 layer=layer or element.layer,
                 **element.twin_settings(variant, params, width),
             )

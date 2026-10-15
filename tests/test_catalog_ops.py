@@ -39,6 +39,23 @@ def _element(**over):
     return Element(**base)
 
 
+def _captured(key: str, block: str) -> Element:
+    """A captured element, the shape `element_capture` registers: op-only, with the
+    definition's name in its own `params` and no library block at all."""
+    return Element(
+        key=key,
+        label=key,
+        category="captured",
+        block="",
+        source="",
+        layer="A-DOOR",
+        op="insert_captured",
+        width_param="",
+        variants={},
+        params={"block": block},
+    )
+
+
 @pytest.fixture()
 def be():
     return make_backend("dxf")
@@ -106,6 +123,123 @@ def test_a_lift_cannot_be_asked_to_rotate(be):
     assert "rotat" in str(caught.value)
 
 
+# ---------------------------------------------------------------------------
+# a caller's `params` may not rename the element, and `scale` does what it says
+# ---------------------------------------------------------------------------
+
+
+def _inserts(be) -> list[dict]:
+    return [p for p in _primitives(be) if p["kind"] == "insert"]
+
+
+def test_a_captured_element_cannot_be_renamed_by_params(be):
+    """The measured bug: a caller's `params={"block": ...}` overwrote the definition's name,
+    so the INSERT that landed was a *different element* while the step and the drawing
+    summary still claimed the one asked for — the drawing and the journal disagreeing, which
+    is the exact failure the catalogue exists to prevent. The refusal names the fixed block."""
+    be.create_block(
+        "ACADMCP_CAP_A", [{"kind": "line", "points": [0.0, 0.0, 1000.0, 0.0]}], (0.0, 0.0)
+    )
+    be.create_block(
+        "ACADMCP_CAP_B", [{"kind": "line", "points": [0.0, 0.0, 500.0, 500.0]}], (0.0, 0.0)
+    )
+
+    with pytest.raises(ValueError) as caught:
+        ops.place_element(
+            be,
+            _captured("cap_a", "ACADMCP_CAP_A"),
+            (20000, 0),
+            params={"block": "ACADMCP_CAP_B"},
+        )
+
+    message = str(caught.value)
+    assert "ACADMCP_CAP_A" in message
+    assert "params" in message
+    assert _primitives(be) == []  # nothing was drawn at all
+
+
+def test_an_unknown_param_is_refused_with_the_vocabulary(be):
+    """`**params` used to swallow the key silently: a caller could set a size that reached
+    nothing and be told it worked. The refusal names the key and what the twin does take."""
+    with pytest.raises(ValueError) as caught:
+        ops.place_element(be, _element(), (0, 0), params={"anything": 1})
+
+    message = str(caught.value)
+    assert "anything" in message
+    assert "width" in message  # the vocabulary it does take
+    assert _primitives(be) == []
+
+
+def test_a_declared_twin_property_still_lands(be):
+    """The guard must not break the legitimate path: a key the twin does take is merged and
+    drawn — asserted on the geometry, not on the settings dict."""
+    element = _element(params={"wall_thickness": 240.0})
+    with be.step("place_element"):
+        ops.place_element(be, element, (0, 0), params={"wall_thickness": 240.0})
+
+    lengths = [
+        ((p["points"][2] - p["points"][0]) ** 2 + (p["points"][3] - p["points"][1]) ** 2) ** 0.5
+        for p in _primitives(be)
+        if p["kind"] == "line"
+    ]
+    # `draw_door` draws its two jamb ticks across the wall thickness, so a 240 mm thickness
+    # is two 240 mm lines.
+    assert [round(length, 3) for length in lengths].count(240.0) == 2
+
+
+def test_place_along_routes_through_the_param_guard(be):
+    """`place_along`/`place_grid` repeat `place_element`, so the guard covers them without a
+    second copy of it."""
+    with pytest.raises(ValueError) as caught:
+        ops.place_along(be, _element(), (0, 0), (6000, 0), count=3, params={"nope": 1})
+
+    assert "nope" in str(caught.value)
+
+
+def test_a_captured_element_places_at_the_scale_asked_for(be):
+    """The other measured bug: `scale` was dropped on the op path, so a captured element's
+    INSERT came out at 1.0 while the caller asked for 2 — and the journal agreed with the
+    wrong drawing, so a replay was consistently wrong too."""
+    be.create_block(
+        "ACADMCP_CAP_A", [{"kind": "line", "points": [0.0, 0.0, 1000.0, 0.0]}], (0.0, 0.0)
+    )
+    with be.step("place_element"):
+        ops.place_element(be, _captured("cap_a", "ACADMCP_CAP_A"), (0, 0), scale=2.0)
+
+    insert = _inserts(be)[0]
+    assert insert["scale_x"] == 2.0
+    assert insert["scale_y"] == 2.0
+
+
+def test_a_captured_element_at_the_default_scale_is_unchanged(be):
+    be.create_block(
+        "ACADMCP_CAP_A", [{"kind": "line", "points": [0.0, 0.0, 1000.0, 0.0]}], (0.0, 0.0)
+    )
+    with be.step("place_element"):
+        ops.place_element(be, _captured("cap_a", "ACADMCP_CAP_A"), (0, 0))
+
+    insert = _inserts(be)[0]
+    assert insert["scale_x"] == 1.0
+    assert insert["scale_y"] == 1.0
+
+
+def test_a_parametric_twin_refuses_a_scale(be):
+    """A twin is built from its own real-size dimensions, so a uniform scale would draw a
+    door of no standard size at all — refused by name rather than drawn unscaled."""
+    with pytest.raises(ValueError) as caught:
+        ops.place_element(be, _element(), (0, 0), scale=2.0)
+
+    assert "scal" in str(caught.value)
+    assert _primitives(be) == []
+
+
+def test_a_twin_at_the_default_scale_still_places(be):
+    with be.step("place_element"):
+        made = ops.place_element(be, _element(), (0, 0))
+
+    assert made and _primitives(be)
+
+
 def test_an_unknown_op_names_the_ones_there_are():
     with pytest.raises(ValueError) as caught:
         catalog_ops.get("no_such_thing")
@@ -126,6 +260,11 @@ def test_every_adapter_shares_one_signature():
         # Every adapter has to tolerate the parameters a catalogue entry carries, because
         # the entry's own `params` and its variant's are splatted straight in.
         assert params["width"].kind is inspect.Parameter.KEYWORD_ONLY, name
+        # `scale` is uniform too: it is forwarded by `place_element` to whichever adapter the
+        # entry names, so every one has to accept it — the twins refuse a non-1.0 by name,
+        # because only a captured block reference has a real scale factor.
+        assert params["scale"].kind is inspect.Parameter.KEYWORD_ONLY, name
+        assert params["scale"].default == 1.0, name
 
 
 def test_every_adapter_draws_something(be):

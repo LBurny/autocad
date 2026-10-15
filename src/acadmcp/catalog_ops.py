@@ -8,12 +8,14 @@ the same door out of line and arc. Both have to be reachable through one
 
 An adapter is a thin normaliser, and its signature is the catalogue's rather than the op's::
 
-    adapter(be, at, *, width=None, rotation=0.0, layer="", **params) -> list[Any]
+    adapter(be, at, *, width=None, rotation=0.0, scale=1.0, layer="", **params) -> list[Any]
 
 ``at`` is the element's *own* reference point — a column's centre, a door's hinge, a lift's
 first corner — because that is what a caller placing "a door here" means. The signature is
 deliberately uniform (``tests/test_catalog_ops.py`` pins it by introspection) so a catalogue
-entry can name any of them and be called one way.
+entry can name any of them and be called one way. ``scale`` is honoured only where it means
+something — a captured block reference — and refused by name by every twin, which is built
+from its own real-size dimensions.
 
 Nothing here computes geometry. Each adapter calls the op in :mod:`acadmcp.ops` that already
 draws this thing, and that op is where the coordinates live, so a catalogue element drawn
@@ -22,12 +24,60 @@ by an op lands in the same place as one drawn by the matching tool.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable
 from typing import Any
 
 from . import geom, layers, ops
 from .backends.base import BackendError
 from .geom import Point
+
+#: The names `place_element` passes the adapter itself rather than through a catalogue's
+#: `params`: they are tool arguments (a caller's rotation/scale, the resolved layer), not
+#: properties of the element. Excluded from the vocabulary a caller's `params` is checked
+#: against, so passing one of them as a param is a refusal rather than a duplicate keyword.
+_TOOL_LEVEL = frozenset({"rotation", "layer", "scale"})
+
+
+def param_vocabulary(adapter: Callable[..., list[Any]]) -> list[str]:
+    """The parameter names a catalogue entry or a caller may set on this twin.
+
+    An adapter tolerates ``**params`` so a catalogue's own declared keys can be splatted
+    straight in, which also makes a misspelled key silently ignorable — a caller could set a
+    size that reached nothing and be told it worked. This is the vocabulary that turns such a
+    key into a refusal: the adapter's own named parameters, minus the ones the tool passes
+    directly (`rotation`, `layer`, `scale`).
+
+    The adapter's names *are* the twin's vocabulary, which is exactly what a catalogue states
+    under ``op_params`` — the door block calls its width 门尺寸 while ``door_symbol`` calls it
+    ``width`` — so a legitimate declared override is always in this list.
+    """
+    names = [
+        name
+        for name, parameter in inspect.signature(adapter).parameters.items()
+        if name not in ("be", "at")
+        and name not in _TOOL_LEVEL
+        and parameter.kind
+        in (inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    return sorted(names)
+
+
+def _no_scale(what: str, scale: float) -> None:
+    """Refuse to scale something whose adapter draws it at real size.
+
+    A parametric twin is built from its own dimensions — a door from its `width`, a column
+    from its `size` — so a uniform scale would produce a door of no standard size at all,
+    which is the right-looking wrong element the catalogue exists to prevent. The size asked
+    for is the way to change it (a variant, or a measured width); a uniform scale only means
+    something for a captured block reference, whose geometry is fixed.
+    """
+    if abs(float(scale) - 1.0) > 1e-9:
+        raise ValueError(
+            f"{what} is drawn at its own real size from its dimensions, so it cannot be "
+            f"scaled by {scale:g}; place it at the size wanted (a variant, or a measured "
+            "width), or scale a captured block instead"
+        )
 
 
 def _no_rotation(what: str, rotation: float) -> None:
@@ -55,6 +105,7 @@ def column(
     size: float = layers.COLUMN_SIZE,
     depth: float | None = None,
     rotation: float = 0.0,
+    scale: float = 1.0,
     hatch: bool = True,
     width: float | None = None,
     layer: str = "A-COLUMN",
@@ -62,6 +113,7 @@ def column(
 ) -> list[Any]:
     """A column by its centre. `width` is the column's plan size, so a 承力柱 placed into a
     wall opening comes out as thick as the opening rather than at some nominal size."""
+    _no_scale("a column", scale)
     if width is not None:
         size = float(width)
     return ops.draw_column(be, at, size, rotation=rotation, depth=depth, layer=layer, hatch=hatch)
@@ -76,11 +128,13 @@ def door_symbol(
     swing: str = "left",
     open_angle: float = 90.0,
     rotation: float = 0.0,
+    scale: float = 1.0,
     layer: str = "A-DOOR",
     **params: Any,
 ) -> list[Any]:
     """A single-leaf door by its hinge — the same hinge `draw_door` takes, which is what an
     opening in a wall knows: the jamb it starts at."""
+    _no_scale("a door symbol", scale)
     return ops.draw_door(
         be,
         at,
@@ -100,10 +154,12 @@ def window_symbol(
     width: float = layers.WINDOW_WIDTH,
     wall_thickness: float = layers.WALL_THICKNESS,
     rotation: float = 0.0,
+    scale: float = 1.0,
     layer: str = "A-WINDOW",
     **params: Any,
 ) -> list[Any]:
     """A window by its first jamb — the same point `draw_window` starts from."""
+    _no_scale("a window symbol", scale)
     return ops.draw_window(be, at, width, wall_thickness, rotation=rotation, layer=layer)
 
 
@@ -115,11 +171,13 @@ def lift(
     depth: float = 2200.0,
     tag: str | None = None,
     rotation: float = 0.0,
+    scale: float = 1.0,
     layer: str = "A-LIFT",
     **params: Any,
 ) -> list[Any]:
     """A lift shaft by its lower-left corner: `width` along +X, `depth` along +Y."""
     _no_rotation("a lift shaft", rotation)
+    _no_scale("a lift shaft", scale)
     x, y = geom.xy(at)
     return ops.draw_lift(be, (x, y), (x + float(width), y + float(depth)), tag=tag, layer=layer)
 
@@ -133,12 +191,14 @@ def stair(
     steps: int = 9,
     axis: str = "y",
     rotation: float = 0.0,
+    scale: float = 1.0,
     layer: str = "A-STAIR",
     **params: Any,
 ) -> list[Any]:
     """A flight by its lower-left corner; `axis` is the direction it travels, as
     `draw_stair` takes it."""
     _no_rotation("a stair flight", rotation)
+    _no_scale("a stair flight", scale)
     x, y = geom.xy(at)
     return ops.draw_stair(
         be,
@@ -158,11 +218,13 @@ def shaft(
     depth: float = 1200.0,
     name: str | None = None,
     rotation: float = 0.0,
+    scale: float = 1.0,
     layer: str = "A-SHAFT",
     **params: Any,
 ) -> list[Any]:
     """A service riser by its lower-left corner."""
     _no_rotation("a service shaft", rotation)
+    _no_scale("a service shaft", scale)
     x, y = geom.xy(at)
     return ops.draw_shaft(be, (x, y), (x + float(width), y + float(depth)), name, layer=layer)
 
@@ -175,11 +237,13 @@ def equipment(
     depth: float = 600.0,
     name: str | None = None,
     rotation: float = 0.0,
+    scale: float = 1.0,
     layer: str = "A-EQUIP",
     **params: Any,
 ) -> list[Any]:
     """A piece of fixed equipment by its lower-left corner."""
     _no_rotation("a piece of equipment", rotation)
+    _no_scale("a piece of equipment", scale)
     x, y = geom.xy(at)
     return ops.draw_equipment(be, (x, y), (x + float(width), y + float(depth)), name, layer=layer)
 
@@ -189,6 +253,7 @@ def insert_captured(
     at: Point,
     *,
     rotation: float = 0.0,
+    scale: float = 1.0,
     width: float | None = None,
     layer: str = "",
     **params: Any,
@@ -204,7 +269,9 @@ def insert_captured(
     A measured `width` is refused rather than ignored. The block is fixed geometry, and a
     capture does not carry what the geometry is measured *from*, so there is no honest way to
     resize it — drawing it at its captured size into a measured hole is the wrong size that
-    looks right.
+    looks right. A uniform `scale`, on the other hand, *is* honoured: unlike a twin, which is
+    built from its dimensions, a block reference has a real scale factor, so this is where the
+    block path and the op path finally mean the same thing.
 
     Where the drawing has never seen the definition — a fresh drawing placing an element that
     was *published* from another — the published geometry fragment is imported and the block
@@ -224,7 +291,7 @@ def insert_captured(
             "entry whose twin takes a width"
         )
     _import_fragment_if_needed(be, block)
-    return [be.insert(block, at, rotation=rotation, layer=layer or "0")]
+    return [be.insert(block, at, rotation=rotation, scale=scale, layer=layer or "0")]
 
 
 def _import_fragment_if_needed(be, block: str) -> None:
