@@ -80,6 +80,13 @@ class Element:
     #: drawn against. Only meaningful for an entry that names a library block as well: an
     #: op-only entry's `params` are already the twin's vocabulary.
     op_params: dict[str, Any] = field(default_factory=dict)
+    #: Where this entry came from, for a captured one: source drawing, journal steps the
+    #: geometry was gathered from, when it was captured, a geometry fingerprint and — once
+    #: published — the fragment file. `{}` for an entry written by hand, so "no provenance"
+    #: and "provenance that could not be read" are never confused. It rides `describe()` so a
+    #: drawing carries it, but it is excluded from `digest()`: provenance is not placement
+    #: semantics, and a stamped entry must hash like its file twin.
+    origin: dict[str, Any] = field(default_factory=dict)
 
     @property
     def kind(self) -> str:
@@ -244,6 +251,7 @@ class Element:
             "params": dict(self.params),
             "variants": {name: v.describe() for name, v in self.variants.items()},
             "notes": self.notes,
+            "origin": dict(self.origin),
         }
 
 
@@ -258,6 +266,10 @@ class Catalog:
         self.skipped: list[str] = list(skipped or [])
         #: The library directory each file declared, for the report.
         self.libraries: dict[Path, str] = {}
+        #: Which file each entry was read from, so a published entry's `geometry_file` — a path
+        #: relative to the catalogue file it lives in — can be resolved. An entry adopted from a
+        #: drawing, or registered at capture time, has no file context and no row here.
+        self._files: dict[str, Path] = {}
 
     # --- loading -----------------------------------------------------------
 
@@ -295,6 +307,7 @@ class Catalog:
 
     def add_file(self, path: Path) -> None:
         """Merge one catalogue file in. A file that cannot be read is reported, not fatal."""
+        source_file = Path(path)
         try:
             payload = json.loads(Path(path).read_text(encoding="utf-8"))
         except FileNotFoundError:
@@ -317,14 +330,23 @@ class Catalog:
         if library:
             self.libraries[path] = library
 
-        self.add_entries(entries, library=library, where=str(path))
+        self.add_entries(entries, library=library, where=str(path), source_file=source_file)
 
-    def add_entries(self, entries: list[Any], library: str = "", where: str = "") -> None:
+    def add_entries(
+        self,
+        entries: list[Any],
+        library: str = "",
+        where: str = "",
+        source_file: Path | None = None,
+    ) -> None:
         """Read a list of raw entries through the one reader, later entries winning.
 
         Shared by :meth:`add_file` and :meth:`adopt` deliberately: an entry adopted from a
         drawing and an entry read from a project file must not be able to mean different
-        things, and a second reader would eventually drift from the first.
+        things, and a second reader would eventually drift from the first. `source_file` is
+        the catalogue file an entry was read from, recorded so a published entry's fragment
+        path — relative to that file — can be resolved; it is None for an adopted or
+        registered entry, which has no such context.
         """
         for index, entry in enumerate(entries):
             element = _read_element(
@@ -332,6 +354,8 @@ class Catalog:
             )
             if element is not None:
                 self.elements[element.key] = element
+                if source_file is not None:
+                    self._files[element.key] = source_file
 
     def register(self, payload: dict[str, Any]) -> Element:
         """Add one entry at runtime — a captured element — strictly, or not at all.
@@ -381,6 +405,16 @@ class Catalog:
 
     def sources(self) -> list[str]:
         return sorted({e.source for e in self.elements.values() if e.source})
+
+    def source_file(self, key: str) -> Path | None:
+        """The catalogue file an entry was read from, or None.
+
+        None for a registered or adopted entry: a capture adds an entry at runtime and a
+        drawing's embedded copy has no file behind it, so a `geometry_file` relative to a
+        catalogue file cannot be resolved for one — and the caller is told by name rather
+        than the path being guessed.
+        """
+        return self._files.get(str(key or "").strip().lower())
 
     # --- the check that matters -------------------------------------------
 
@@ -442,10 +476,122 @@ class Catalog:
         Over `describe()`, sorted and ASCII-escaped, so it is stable across machines and
         across a JSON round trip — the same catalogue embedded in a drawing and loaded from
         a file must hash the same, or every reopen reports a spurious mismatch.
+
+        `origin` is deliberately excluded: **provenance is not placement semantics**. A
+        capture stamps where its geometry came from, so a stamped entry and its file twin
+        would otherwise hash differently — and every drawing drawn before the field existed
+        would report a `catalog_warning` the moment it was reopened.
         """
-        rows = [self.elements[key].describe() for key in self.keys()]
+        rows = []
+        for key in self.keys():
+            row = self.elements[key].describe()
+            row.pop("origin", None)
+            rows.append(row)
         blob = json.dumps(rows, sort_keys=True, ensure_ascii=True, default=str)
         return "sha256:" + hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+    # --- publishing into the project library -------------------------------
+
+    def publish_to(
+        self, path: str | Path | None, element: Element, fragment: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        """Write `element` and its geometry fragment into the project catalogue at `path`.
+
+        Publishing is the one step that makes an element *accumulate*: a capture is
+        drawing-local, but a capture **plus its geometry** written into a project file is
+        something a fresh drawing can place. So two things are written — the catalogue entry,
+        and a headless DXF under ``<catalogue dir>/library/<key>.dxf`` holding the block
+        definition and, in its journal meta, the element's own geometry.
+
+        `fragment` is that geometry, in the journal's vocabulary — ``{"block", "primitives",
+        "base_point"}`` from `Backend.find_block_primitives`, plus the capture's
+        ``fingerprint``. Passing ``None`` (or a fragment with no geometry) is how a publish
+        from a drawing that never captured the definition is refused: the geometry lives in
+        the drawing that captured it, and nothing here re-derives primitives from entities.
+
+        `path` resolves in order: an explicit path; else the first project catalogue file in
+        settings; else ``./elements.json`` is created beside a ``./acadmcp.json`` naming it,
+        and what was created is reported. The target file is **appended to, never
+        overwritten or re-sorted**, its ``_comment`` and any other key preserved, and the
+        write is atomic (tmp + `os.replace`).
+
+        Returns ``{ok, file, fragment, created, key, digest}``. Refuses, by name: a key not
+        in the catalogue in force, a key the target file already has, and a missing
+        definition record.
+        """
+        key = str(getattr(element, "key", "") or "").strip().lower()
+        if not key:
+            raise ValueError("publishing needs an element with a key to name the entry")
+        if self.get(key) is None:
+            raise ValueError(
+                f"'{key}' is not in the catalogue in force, so there is nothing to publish; "
+                "capture it first with element_capture"
+            )
+
+        target, created = _resolve_publish_target(path)
+        payload = _read_target_payload(target)
+        if _entry_index(payload, key) is not None:
+            raise ValueError(
+                f"the catalogue file {str(target)!r} already has an entry '{key}'; publishing "
+                "adds a new element rather than replacing one — choose another key or file"
+            )
+
+        block = str((fragment or {}).get("block", "")).strip()
+        primitives = list((fragment or {}).get("primitives") or [])
+        base_point = list((fragment or {}).get("base_point") or [0.0, 0.0])
+        if not block or not primitives:
+            raise ValueError(
+                f"the definition for '{key}' lives in the drawing that captured it — open that "
+                "drawing and publish from there"
+            )
+
+        fingerprint = str((fragment or {}).get("fingerprint", "")).strip()
+        if not fingerprint:
+            # No fingerprint stamped: derive one from the geometry being published, so the
+            # entry that lands still carries a usable identity.
+            from . import capture_ops
+
+            fingerprint = capture_ops.fingerprint_primitives(primitives)
+
+        fragment_path = Path(target).parent / "library" / f"{key}.dxf"
+        from . import capture_ops
+
+        capture_ops.export_fragment(
+            str(fragment_path),
+            block,
+            primitives,
+            [float(base_point[0]), float(base_point[1])],
+            {"key": key, "fingerprint": fingerprint},
+        )
+        # Relative to the catalogue file, and forward-slashed, so the entry as committed is
+        # the same wherever the project is checked out.
+        relative = os.path.relpath(str(fragment_path), str(Path(target).parent))
+        relative = relative.replace(os.sep, "/")
+
+        entry = element.describe()
+        origin = dict(entry.get("origin") or {})
+        origin["geometry_file"] = relative
+        origin.setdefault("fingerprint", fingerprint)
+        entry["origin"] = origin
+        payload["elements"].append(entry)
+        _atomic_write_json(Path(target), payload)
+
+        # The project's catalogue files now differ from what was loaded: forget it, so the
+        # next lookup reads the file that was just written.
+        from . import settings as _settings
+
+        _settings.reset()
+
+        written = Catalog()
+        written.add_file(Path(target))
+        return {
+            "ok": True,
+            "file": str(target),
+            "fragment": str(fragment_path),
+            "created": created,
+            "key": key,
+            "digest": written.digest(),
+        }
 
 
 def _read_element(
@@ -510,6 +656,9 @@ def _read_element(
         op=op,
         width_param=str(entry.get("width_param", "")).strip(),
         op_params=dict(entry.get("op_params") or {}),
+        # Absent and empty both read as {}: an entry written by hand has no provenance, and a
+        # reader must never have to tell "no origin" from "an origin that went missing".
+        origin=dict(entry.get("origin") or {}),
     )
 
 
@@ -526,6 +675,85 @@ def _resolve_source(source: str, library: str) -> str:
     if not library:
         return source
     return source.replace("{library}", library.rstrip("\\/"))
+
+
+#: What a freshly created project catalogue says about itself. It is written into the file so
+#: the person who finds `elements.json` beside their drawing knows what put it there.
+ELEMENTS_COMMENT = (
+    "Project element catalogue. Entries written by element_publish live here; each one's "
+    "geometry is under library/. Edit by hand and it still loads."
+)
+
+
+def _resolve_publish_target(path: str | Path | None) -> tuple[Path, list[str]]:
+    """Where a publish goes, and what it had to create to get there.
+
+    An explicit path wins; then the first project catalogue file in settings; and only when
+    neither exists are `./elements.json` and `./acadmcp.json` created in the working
+    directory — reported, so a file appearing in someone's project is never a surprise.
+    """
+    if str(path or "").strip():
+        return Path(path), []
+
+    from . import settings as _settings
+
+    project = _settings.current()
+    if project.catalogs:
+        return Path(project.catalogs[0]), []
+
+    cwd = Path.cwd()
+    created: list[str] = []
+    elements = cwd / "elements.json"
+    if not elements.is_file():
+        _atomic_write_json(elements, {"_comment": ELEMENTS_COMMENT, "elements": []})
+        created.append(str(elements))
+    settings_file = cwd / _settings.FILENAME
+    if not settings_file.is_file():
+        _atomic_write_json(settings_file, {"catalogs": ["elements.json"]})
+        created.append(str(settings_file))
+    return elements, created
+
+
+def _read_target_payload(target: Path) -> dict[str, Any]:
+    """The target file's JSON, ready to append to, or a fresh payload when it is not there.
+
+    Strict where the loader is tolerant: a publish is a direct caller action with a caller
+    waiting, so a target file that cannot be read is refused by name rather than silently
+    replaced — overwriting somebody's catalogue is exactly what ADD-only exists to prevent.
+    """
+    if not Path(target).is_file():
+        return {"_comment": ELEMENTS_COMMENT, "elements": []}
+    try:
+        raw = json.loads(Path(target).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"cannot publish into {str(target)!r}: {exc}") from exc
+    if isinstance(raw, list):
+        return {"elements": raw}
+    if isinstance(raw, dict):
+        if not isinstance(raw.get("elements"), list):
+            raise ValueError(
+                f"cannot publish into {str(target)!r}: expected a list of elements under 'elements'"
+            )
+        return raw
+    raise ValueError(f"cannot publish into {str(target)!r}: expected an object or a list")
+
+
+def _entry_index(payload: dict[str, Any], key: str) -> int | None:
+    """The position of `key` among the payload's entries, or None."""
+    for index, entry in enumerate(payload.get("elements") or []):
+        if isinstance(entry, dict) and str(entry.get("key", "")).strip().lower() == key:
+            return index
+    return None
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    """Write `payload` in one move: a temp file in the same directory, then `os.replace`."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    tmp = path.with_name(path.name + ".part")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 # ---------------------------------------------------------------------------

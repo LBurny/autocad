@@ -20,11 +20,62 @@ reference placed later is an ordinary journalled entity.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from . import catalog, geom
 from .backends.base import Backend, BackendError
 from .backends.recording import unflatten_points
+
+
+def _round_tenth(value: Any) -> float:
+    """A coordinate rounded to 0.1 mm — close enough that two captures of the same geometry
+    agree, and precise enough that moving a door a millimetre is a different geometry."""
+    try:
+        return round(float(value), 1)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _canonical_primitive(prim: dict[str, Any]) -> tuple:
+    """One primitive in the shape the fingerprint hashes.
+
+    `(kind, layer, points, text, height)` with the points sorted and rounded — the parts of a
+    primitive that are the *geometry*. Radius, pattern and rotation are deliberately not here
+    yet: this wave fingerprints what a capture reliably carries, and a richer canonical form
+    can land later without invalidating the entries this one stamps.
+    """
+    flat = [_round_tenth(v) for v in (prim.get("points") or [])]
+    points = tuple(sorted((flat[i], flat[i + 1]) for i in range(0, len(flat) - 1, 2)))
+    return (
+        str(prim.get("kind", "")),
+        str(prim.get("layer", "")),
+        points,
+        str(prim.get("text", "")),
+        _round_tenth(prim.get("height", 0.0)),
+    )
+
+
+def fingerprint_primitives(prims: list[dict[str, Any]]) -> str:
+    """A sha256 over a canonicalisation of the captured geometry.
+
+    Order-free on purpose: how a caller split a capture across steps is its own choice, so the
+    same geometry gathered as one step or two must fingerprint the same. That is what lets a
+    second capture of an element the library already holds be *recognised* and refused, rather
+    than quietly registered as a duplicate under a new key.
+    """
+    rows = sorted({_canonical_primitive(p) for p in (prims or []) if isinstance(p, dict)})
+    blob = json.dumps(rows, ensure_ascii=True, default=str)
+    return "sha256:" + hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _utc_now() -> str:
+    """The capture time, UTC and second-precision — a stamp a person can read, not a clock."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
 
 
 def capture(
@@ -93,6 +144,16 @@ def capture(
             "than replacing one — choose another key"
         )
 
+    fingerprint = fingerprint_primitives(primitives)
+    for other in loaded.elements.values():
+        if other.origin.get("fingerprint") == fingerprint:
+            # The same geometry under another name is the same element, not a new one. Naming
+            # the existing key lets the caller reuse it, or rename only if it really differs.
+            raise ValueError(
+                f"the library already holds this geometry as '{other.key}' — capture refused; "
+                "rename only if it is genuinely a different element"
+            )
+
     points = [p for prim in primitives for p in unflatten_points(prim.get("points", []))]
     if base_point is not None:
         origin_x, origin_y = geom.xy(base_point)
@@ -113,6 +174,14 @@ def capture(
         # state: applying the intent only ensures it is there, and a rollback leaves it.
         be.record_block_intent(name, primitives, (origin_x, origin_y))
 
+    info = be.info() if hasattr(be, "info") else {}
+    origin = {
+        # A dxf drawing that has never been saved has no path, and "" is the honest answer.
+        "source_drawing": str((info or {}).get("path") or ""),
+        "steps": list(wanted),
+        "captured_at": _utc_now(),
+        "fingerprint": fingerprint,
+    }
     element = loaded.register(
         {
             "key": key,
@@ -126,6 +195,10 @@ def capture(
             # vocabulary — the shape the `column` entry uses — and `insert_captured` reads the
             # definition's name from there.
             "params": {"block": name},
+            # Provenance: which drawing, which steps, when, and a fingerprint of the geometry.
+            # It rides `describe()` into the drawing, so the element can be traced on another
+            # machine; it is excluded from `digest()`, which is placement semantics only.
+            "origin": origin,
         }
     )
     return {
@@ -133,4 +206,83 @@ def capture(
         "key": element.key,
         "entities": int(made.get("entities", len(primitives))),
         "base_point": [float(origin_x), float(origin_y)],
+        "fingerprint": fingerprint,
     }
+
+
+# ---------------------------------------------------------------------------
+# publishing the geometry as a fragment a fresh drawing can import
+# ---------------------------------------------------------------------------
+
+
+def export_fragment(
+    path: str,
+    name: str,
+    primitives: list[dict[str, Any]],
+    base_point: list[float] | tuple[float, float],
+    provenance: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Write the geometry of a captured element to a headless DXF as a block definition.
+
+    This is the second half of a publish: the catalogue entry is a name, and this file is what
+    the name resolves to on a machine that never saw the drawing it was captured in. The
+    document holds a single block definition (``create_block``), and the element's own
+    geometry — the journal's primitives, its base point and whatever `provenance` carries (the
+    element key and its fingerprint) — is recorded in the journal meta under
+    ``exported_element``. The DXF backend persists that meta, so the fragment is self-describing.
+
+    The primitives are the journal's own vocabulary: there is deliberately **no**
+    entity→primitive reverse mapping here, because the recorded primitives are the one
+    canonical form of the geometry and anything re-derived from the block table would be a
+    second source of truth for the same shape.
+
+    Written atomically: a temp file in the same directory, then `os.replace`.
+    """
+    from .backends.dxf import DxfBackend
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    be = DxfBackend(create=True)
+    be.create_block(str(name), primitives, base_point)
+
+    payload: dict[str, Any] = {
+        "block": str(name),
+        "primitives": [dict(p) for p in primitives],
+        "base_point": [float(base_point[0]), float(base_point[1])],
+    }
+    payload.update(dict(provenance or {}))
+    be.journal.note_meta(exported_element=payload)
+
+    tmp = target.with_name(target.name + ".part.dxf")
+    be.save(str(tmp))
+    os.replace(tmp, target)
+    return {
+        "path": str(target),
+        "key": str(payload.get("key", "")),
+        "block": str(name),
+        "primitives": len(primitives),
+        "fingerprint": str(payload.get("fingerprint", "")),
+    }
+
+
+def import_fragment(path: str) -> tuple[str, list[dict[str, Any]], list[float]]:
+    """Read a published fragment back: its block name, primitives and base point.
+
+    A file that carries no ``exported_element`` was not written by :func:`export_fragment`, so
+    there is no geometry to import and it is refused by name rather than guessed at.
+    """
+    from .backends.dxf import DxfBackend
+
+    be = DxfBackend(path=str(path))
+    payload = be.journal.meta.get("exported_element")
+    if not isinstance(payload, dict) or not str(payload.get("block", "")).strip():
+        raise ValueError(
+            f"{path!r} carries no exported element: it was not written by element_publish, so "
+            "there is no captured geometry to import"
+        )
+    base = payload.get("base_point") or [0.0, 0.0]
+    return (
+        str(payload["block"]),
+        [dict(p) for p in payload.get("primitives", [])],
+        [float(base[0]), float(base[1])],
+    )

@@ -309,3 +309,60 @@ def test_a_registered_entry_is_part_of_the_identity():
 
     assert loaded.get("thing") is not None
     assert loaded.identity()["count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# the geometry fingerprint
+# ---------------------------------------------------------------------------
+
+
+def test_the_fingerprint_rounds_to_a_tenth_of_a_millimetre_and_ignores_order():
+    one = [{"kind": "line", "layer": "A-WALL", "points": [0.0, 0.0, 6000.0, 0.0]}]
+    nudge = [{"kind": "line", "layer": "A-WALL", "points": [0.0004, 0.04, 6000.03, 0.0]}]
+
+    assert capture_ops.fingerprint_primitives(one) == capture_ops.fingerprint_primitives(nudge)
+    # Order-free: the same primitives gathered in another order hash the same, because how a
+    # caller split the capture across steps is its choice, not part of the geometry.
+    two = one + [{"kind": "circle", "layer": "A-WALL", "points": [0.0, 0.0], "radius": 5.0}]
+    assert capture_ops.fingerprint_primitives(two) == capture_ops.fingerprint_primitives(
+        list(reversed(two))
+    )
+    assert capture_ops.fingerprint_primitives(one).startswith("sha256:")
+
+
+def test_the_fingerprint_separates_different_geometry():
+    one = [{"kind": "line", "layer": "A-WALL", "points": [0.0, 0.0, 6000.0, 0.0]}]
+    moved = [{"kind": "line", "layer": "A-WALL", "points": [0.0, 0.0, 6001.0, 0.0]}]
+    other_layer = [{"kind": "line", "layer": "A-DOOR", "points": [0.0, 0.0, 6000.0, 0.0]}]
+
+    assert capture_ops.fingerprint_primitives(one) != capture_ops.fingerprint_primitives(moved)
+    assert capture_ops.fingerprint_primitives(one) != capture_ops.fingerprint_primitives(
+        other_layer
+    )
+
+
+# ---------------------------------------------------------------------------
+# provenance stamped at capture time
+# ---------------------------------------------------------------------------
+
+
+def test_a_capture_stamps_its_origin(be):
+    steps = _door_steps(be)
+    _capture(be, steps)
+
+    origin = catalog.current().get(KEY).origin
+
+    assert origin["steps"] == [1, 2]
+    # A dxf drawing that has never been saved has no path, and "" is the honest answer.
+    assert origin["source_drawing"] == ""
+    assert origin["captured_at"]
+    assert origin["fingerprint"] == capture_ops.fingerprint_primitives(be.step_primitives(steps))
+
+
+def test_capture_refuses_geometry_the_library_already_holds(be):
+    """The same geometry under another key is the same element, not a new component. The
+    existing key is named, so the caller can reuse it or rename only if it really differs."""
+    _capture(be, _door_steps(be), key="first")
+
+    with pytest.raises(ValueError, match="already holds this geometry as 'first'"):
+        _capture(be, _door_steps(be), key="second")

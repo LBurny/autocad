@@ -26,6 +26,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import geom, layers, ops
+from .backends.base import BackendError
 from .geom import Point
 
 
@@ -204,6 +205,11 @@ def insert_captured(
     capture does not carry what the geometry is measured *from*, so there is no honest way to
     resize it — drawing it at its captured size into a measured hole is the wrong size that
     looks right.
+
+    Where the drawing has never seen the definition — a fresh drawing placing an element that
+    was *published* from another — the published geometry fragment is imported and the block
+    written into this drawing first. Only the dxf driver can write a definition, so the live
+    drivers keep refusing by name, exactly as before.
     """
     block = str(params.get("block", "")).strip()
     if not block:
@@ -217,7 +223,58 @@ def insert_captured(
             "resized to a measured width; capture it at the size wanted, or use a parametric "
             "entry whose twin takes a width"
         )
+    _import_fragment_if_needed(be, block)
     return [be.insert(block, at, rotation=rotation, layer=layer or "0")]
+
+
+def _import_fragment_if_needed(be, block: str) -> None:
+    """Bring a published element's definition into a dxf drawing that lacks it.
+
+    A no-op on every other backend, whose `insert` refuses by name as it always has. On dxf,
+    when the definition is absent but the entry carries a ``geometry_file``, the fragment is
+    read back and its definition written — document state, so a rollback never erases it, the
+    same rule the capture that made it follows.
+    """
+    doc = getattr(be, "doc", None)
+    if doc is None or not getattr(be, "supports_block_create", False):
+        return
+    if block in doc.blocks:
+        return
+
+    from pathlib import Path
+
+    from . import capture_ops
+    from . import catalog as _catalog
+
+    loaded = _catalog.current()
+    element = next(
+        (e for e in loaded.elements.values() if str(e.params.get("block", "")).strip() == block),
+        None,
+    )
+    if element is None:
+        # Not an entry this catalogue knows: let `insert` refuse by name, as before.
+        return
+    geometry_file = str(element.origin.get("geometry_file", "")).strip()
+    if not geometry_file:
+        return
+
+    base = loaded.source_file(element.key)
+    if base is None:
+        raise BackendError(
+            f"'{element.key}' carries a geometry fragment, but the entry came from the drawing "
+            "itself (or was captured at runtime), so its fragment path has no catalogue file to "
+            "resolve against; publish it into a project catalogue file and reopen, or capture "
+            "the element in this drawing"
+        )
+    fragment_path = Path(base).parent / geometry_file
+    if not fragment_path.is_file():
+        raise BackendError(
+            f"'{element.key}' names the geometry fragment {geometry_file!r}, but "
+            f"{str(fragment_path)!r} is not there; republish the element from the drawing that "
+            "captured it"
+        )
+    name, primitives, base_point = capture_ops.import_fragment(str(fragment_path))
+    be.create_block(name, primitives, base_point)
 
 
 #: What a catalogue entry may name in its ``op``: the single list a catalogue is written

@@ -311,6 +311,47 @@ class RecordingBackend:
         """
         return self._record("block", [base_point], name=name, primitives=list(primitives))
 
+    def find_block_primitives(self, name: str) -> dict[str, Any] | None:
+        """The recorded definition of block `name`, or None when the drawing has no such record.
+
+        A capture records one `block` primitive carrying the definition it made, and that
+        record — not the block table — is the canonical form of the captured geometry. Publish
+        reads the fragment from here, so the geometry that travels to another drawing is the
+        journal's own vocabulary; there is deliberately no entity→primitive reverse mapping.
+
+        Only applied steps count: a capture that has been undone is no longer on the drawing,
+        so its geometry is not the drawing's to publish.
+        """
+        wanted = str(name or "").strip()
+        if not wanted:
+            return None
+        rows = {row.get("index"): row for row in self.step_rows() if isinstance(row, dict)}
+        by_index = {step.index: step for step in self.journal.steps}
+        for index in sorted(set(rows) | set(by_index)):
+            row = rows.get(index)
+            step = by_index.get(index)
+            state = row.get("state") if row is not None else (step.state if step else None)
+            if str(state) not in ("applied", "accepted"):
+                continue
+            primitives = row.get("primitives") if isinstance(row, dict) else None
+            if not isinstance(primitives, list):
+                # The local journal's rows carry a count, not the primitives; the StepRecord
+                # is where they are, exactly as `step_primitives` reads them.
+                primitives = step.primitives if step is not None else []
+            for prim in primitives:
+                if not isinstance(prim, dict) or prim.get("kind") != "block":
+                    continue
+                if str(prim.get("name", "")).strip() != wanted:
+                    continue
+                points = unflatten_points(prim.get("points", []))
+                base = [points[0][0], points[0][1]] if points else [0.0, 0.0]
+                return {
+                    "block": wanted,
+                    "primitives": [dict(p) for p in prim.get("primitives", [])],
+                    "base_point": base,
+                }
+        return None
+
     # --- the catalogue that drew it ----------------------------------------
 
     def note_catalog(self, loaded: Any) -> None:

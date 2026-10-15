@@ -655,3 +655,104 @@ def test_check_against_does_not_report_op_only_entries(tmp_path):
     loaded = _catalog(tmp_path, [_OP_ONLY, _BOTH])
 
     assert loaded.check_against({"lib.dwg": ["门 - 公制"]}) == []
+
+
+# ---------------------------------------------------------------------------
+# provenance: origin rides describe() but never digest()
+# ---------------------------------------------------------------------------
+
+
+def _origin_element(**over) -> Element:
+    """A captured entry, the shape whose `origin` carries where it came from."""
+    base = dict(
+        key="captured",
+        label="captured",
+        category="captured",
+        block="",
+        source="",
+        layer="A-DOOR",
+        op="insert_captured",
+        params={"block": "ACADMCP_CAPTURED"},
+    )
+    base.update(over)
+    return Element(**base)
+
+
+def test_origin_is_carried_by_describe():
+    element = _origin_element(
+        origin={"source_drawing": "a.dxf", "steps": [1, 2], "fingerprint": "sha256:f"}
+    )
+
+    assert element.describe()["origin"]["steps"] == [1, 2]
+    assert element.describe()["origin"]["source_drawing"] == "a.dxf"
+
+
+def test_a_file_authored_entry_has_an_empty_origin(tmp_path):
+    """A hand-written entry names no source drawing, so its origin is `{}` — not absent, so a
+    reader never has to tell "no provenance" from "provenance that could not be read"."""
+    loaded = _catalog(tmp_path, [{"key": "k", "block": "B"}])
+
+    assert loaded.get("k").origin == {}
+    assert loaded.get("k").describe()["origin"] == {}
+
+
+def test_origin_survives_a_describe_adopt_round_trip():
+    """The whole point of the field: the entry embedded in a drawing keeps its provenance, so
+    a machine opening the file elsewhere can trace where the element came from."""
+    loaded = Catalog()
+    loaded.register(
+        {
+            "key": "x",
+            "op": "insert_captured",
+            "params": {"block": "ACADMCP_X"},
+            "origin": {
+                "source_drawing": "a.dxf",
+                "steps": [3, 4],
+                "captured_at": "2026-10-15T01:00:00",
+                "fingerprint": "sha256:abc",
+            },
+        }
+    )
+
+    adopted = Catalog.adopt(loaded.identity())
+
+    assert adopted.get("x").origin["steps"] == [3, 4]
+    assert adopted.get("x").origin["fingerprint"] == "sha256:abc"
+
+
+def test_origin_survives_a_file_load_round_trip(tmp_path):
+    path = _write(
+        tmp_path,
+        {
+            "elements": [
+                {
+                    "key": "k",
+                    "block": "B",
+                    "origin": {
+                        "source_drawing": "a.dxf",
+                        "steps": [7],
+                        "captured_at": "t",
+                        "fingerprint": "sha256:zzz",
+                    },
+                }
+            ]
+        },
+    )
+
+    loaded = Catalog.load([path])
+
+    assert loaded.get("k").origin["source_drawing"] == "a.dxf"
+    assert loaded.get("k").origin["steps"] == [7]
+
+
+def test_digest_ignores_origin():
+    """Provenance is not placement semantics: a stamped entry and its file twin must hash
+    alike, or every drawing drawn before the field existed reports a spurious
+    `catalog_warning` the moment it is reopened."""
+    one = Catalog({"x": _origin_element(origin={"fingerprint": "a"})})
+    two = Catalog({"x": _origin_element(origin={"fingerprint": "b", "steps": [1, 2]})})
+
+    assert one.digest() == two.digest()
+    assert one.digest() == Catalog({"x": _origin_element()}).digest()
+    # ...and the digest still moves when the placement semantics do.
+    assert one.digest() != Catalog({"x": _origin_element(layer="A-OTHER")}).digest()
