@@ -70,6 +70,9 @@ uv run python examples/floor_plan_demo.py --com      # draw into running AutoCAD
 (.dwg or .dxf), `drawing_screenshot` (`inline=False` for just a PNG path),
 `listing_entities`
 
+**Sheet and plot** — `drawing_sheet` (paper, scale, frame, title block),
+`drawing_plot_pdf` (PDF at the paper's own size, verified against the file)
+
 **Journal** — `drawing_undo`, `drawing_redo`, `drawing_history`, `drawing_rollback_to`,
 `drawing_replay`, `drawing_summary`
 
@@ -146,6 +149,36 @@ acad_zoom(corner1=[0, 3600], corner2=[7000, 8000])  # frame the live view first
 drawing_screenshot()
 ```
 
+## Putting it on paper
+
+A plan is a plan; a drawing is a plan on paper of a named size, at a named
+scale, inside a frame with a title block. `drawing_sheet` does that in one call:
+an ISO A-series sheet (which is what GB/T 50001 takes its sizes from), a plot
+scale, a 25 mm bound edge, and a title block carrying 图名 / 图号 / 张次, with
+比例 always added from the scale itself.
+
+```python
+drawing_sheet(paper="A3", scale="1:100", title="生产车间平面图", number="JS-01")
+drawing_plot_pdf("sheet.pdf")
+```
+
+The page setup is written onto the drawing's own layout, so a DXF saved from
+here opens in AutoCAD with the sheet already configured, and the frame, the
+title block and the viewport are drawn at 1:1 in paper millimetres — paper, not
+something that scales with the plan.
+
+`drawing_sheet` also says whether the plan fits: at 1:100 an A3 shows
+38 × 22.1 m, so a 40 m bay is cut off, and the reply carries `fits: false` and
+the largest scale that holds it whole rather than leaving that to be discovered
+at the printer.
+
+`drawing_plot_pdf` writes a PDF the size of the paper and then **reads the paper
+size back out of the PDF itself**, answering `verified` and `mismatch_mm` from
+the file's own `/MediaBox` rather than from the number it asked for. Both tools
+are `dxf`-only for now: the live backends have no paperspace path and refuse by
+name — plotting a live drawing goes through AutoCAD's own plotter, which is not
+wired up here.
+
 ## Conventions
 
 - **Millimetres everywhere** (`INSUNITS` = 4); **degrees** counter-clockwise from +X.
@@ -177,7 +210,7 @@ drawing_screenshot()
 
 ```
 src/acadmcp/
-  geom.py        pure 2D geometry (no CAD deps)     server.py     the 47-tool MCP surface
+  geom.py        pure 2D geometry (no CAD deps)     server.py     the 49-tool MCP surface
   ops.py         backend-agnostic operations        journal.py    step bookkeeping
   backends/      dxf / com / plugin drivers         catalog.py    the element catalogue
   catalog_ops.py the parametric twins               summary.py    design summary from the journal

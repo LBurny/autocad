@@ -19,8 +19,11 @@ src/acadmcp/
                         No CAD imports, and none from this package either.
   terms.py              the tool vocabulary: the AutoCAD command and the Chinese phrase for
                         each tool. Data plus lookup; no CAD imports.
+  sheet.py              the sheet: paper sizes, plot scales, frame and title-block geometry,
+                        and the PDF paper-size read-back. Pure — it imports layers for the
+                        measured character width and nothing else, and no CAD library.
   capture.py            Win32 window capture, and finding the AutoCAD frame
-  server.py             the MCP tool surface (47 tools, each annotated by behaviour class)
+  server.py             the MCP tool surface (49 tools, each annotated by behaviour class)
   journal.py            the backend-neutral step journal (undo/redo bookkeeping). No CAD imports.
   acad_plugin_client.py the socket client for the in-AutoCAD plugin
   steps.py              step-journal control, and the step_control action table
@@ -42,6 +45,9 @@ tests/                  test_geom.py, test_backends.py, test_journal.py, test_re
                         test_verify.py (the journal's count against the drawing's),
                         test_terms.py (every tool has a vocabulary entry),
                         test_doc_numbers.py (the docs and the evaluation answers),
+                        test_sheet.py (paper, scale, frame, title block, PDF read-back),
+                        test_sheet_backend.py (the page setup and paperspace, read back),
+                        test_sheet_plot.py (the plotted PDF: size, scale, refusals),
                         test_dxf_create_render.py (drawing_new create, theme colours, glyphs),
                         test_input_validation.py (caller mistakes surface as readable errors),
                         test_live_screenshot.py (no restore, no rename on export),
@@ -52,7 +58,7 @@ tests/                  test_geom.py, test_backends.py, test_journal.py, test_re
 ## Commands
 
 ```bash
-uv run pytest -q                      # 359 tests, ~12s, no AutoCAD required
+uv run pytest -q                      # 415 tests, ~12s, no AutoCAD required
 uv run pytest tests/test_terms.py -q  # adding a tool without a vocabulary entry fails here
 uv run python scripts/check_doc_numbers.py   # docs and evaluation answers vs the tree
 uv run ruff check . --output-format concise
@@ -549,6 +555,88 @@ opening may name an `element`, and the opening's measured `width` is authoritati
 to the element as an override, so a nominal 900 block cannot be placed into a measured 1500
 hole. A failure is collected in the result's `element_openings.skipped`, never raised, so the
 opening still gets cut — the same trade `clamped_openings` makes.
+
+**A sheet is a page setup on the file's own LAYOUT, and the scale is written in three places that
+must agree.** `ezdxf.new("R2010")` sets none of the page-setup fields, so a drawing from this
+package used to open on whatever the reader's default was. `DxfBackend.set_page_setup` writes
+`paper_size`/`paper_width`/`paper_height`, the four margins, and the scale — and the scale has to
+go to `scale_numerator`/`scale_denominator` *and* `unit_factor` (DXF group 147, what a plot falls
+back to) *and* `standard_scale_type` (group 75, AutoCAD's enum: 1:100 is 7, 1:200 is 16). A file
+whose 75 says 1:10 while its 147 says 1.0 plots at 1:1 and claims 1:10, which is the failure
+`STANDARD_SCALE_TYPES` exists to prevent; a ratio with no row there is written to 147 alone
+rather than given an invented 75.
+
+**Use `Layouts.rename`, not `Layout.rename`, and know why.** The object method sets the LAYOUT
+entity's name and leaves the `ACAD_LAYOUT` dictionary key alone, so the saved file carries a tab
+reading "A3" under an entry called "Layout1" — and ezdxf keys its own layout table by that entry
+(measured on 1.4.4: `[l.name for l in doc.layouts]` says A3 while `doc.layouts.get("A3")` raises
+`KeyError`). Which is also why the document's existing paper layout is renamed rather than added
+to: two paper layouts in one file is how a reader plots the wrong one.
+
+**The sheet geometry follows the standards, and the viewport wraps the title block in an L.**
+The margins are GB/T 14689's: a 25 mm bound edge on every size, 10 mm on the other three for
+A0–A2 and 5 mm for A3/A4 (a uniform 10 would eat a tenth of an A4's width). The title block is
+180 x 56 mm in the frame's bottom-right corner — GB/T 10609.1's size — with four rows, so the
+比例 the tool always adds never evicts a caller's field; a sheet whose title block does not
+state its scale fails the sheet's own point. The viewport takes the strip *above* the title
+block, not the strip left of it: on a landscape sheet that is the larger of the two rectangles
+the corner leaves and the landscape shape a floor plan usually is, and on a portrait A4 the
+left-of strip is 210 - 180 - margins = negative — measured as a negative-width VIEWPORT before
+this was fixed. `SCALES` spans 2:1 to 1:1000 from GB/T 50001's tables (details at 1:5/1:10,
+site plans at 1:250/1:1000); it is the menu `largest_scale_that_fits` picks from, while
+`resolve_scale` accepts any ratio.
+
+**A sheet's frame is drawn at 1:1 in paper millimetres, so it is paperspace content.** The frame,
+the title block and the viewport are recorded as ordinary journal primitives carrying
+`paper: True`, and `DxfBackend._apply_primitive` swaps the destination around the same `_draw_*`
+methods the model uses — the drawing code stays destination-agnostic. Three consequences that
+were each a wrong version first:
+
+- **The viewport's view centre is resolved before the destination is swapped.** `_plan_center`
+  reads `self.msp`, and on the sheet that is the layout: resolved after the swap it measures the
+  frame and the title block, and the viewport frames the *sheet* instead of the plan on it. Both
+  coordinates came back as the frame's centre, in every drawing, which is how it was caught.
+- **Erase routes through the layout that owns the entity** (`doc.layouts.get_layout_for_entity`).
+  `msp.delete_entity(paper_entity)` raises `ValueError: list.remove(x): x not in list`, so
+  aiming every erase at the modelspace would leave an undone sheet's frame standing and report it
+  missing.
+- **`entities()` lists the paper layouts as well as the model.** A sheet is part of the drawing,
+  so a listing that stopped at the modelspace reported a frame the journal had recorded as
+  missing and a sheet's text as never drawn.
+- **The page setup is document state and outlives an undo**, exactly as a block definition does:
+  one `drawing_undo` takes back the frame and the viewport, not the paper.
+
+**The plot is composed as two axes, and neither computes a transform by hand.** The figure's size
+*is* the paper, so the PDF's own `/MediaBox` is the paper by construction and can be measured
+against what was asked for — which is what `drawing_plot_pdf`'s `verified` does, reading the bytes
+of the file it just wrote rather than checking its own arithmetic. The frame and title block go
+into an axes spanning the whole page in paper millimetres at 1:1; the plan goes into an axes
+sitting exactly on the viewport rectangle, with its data limits set to the model window that
+viewport shows, so the axes' own limits *are* the plot scale and matplotlib's own clipping is the
+viewport's edge. The vertical span is `sheet.view_height_model` and the horizontal follows from
+the viewport's proportions — the rule AutoCAD plots by. Matching both spans to the box instead
+prints a plan of the wrong proportions, which is the one error a reader would not catch by eye.
+The VIEWPORT entity is filtered out of the sheet pass: it is a window onto the model, not
+something a plot draws. CJK text is deferred to matplotlib in both passes (`_cjk_frontend_class`,
+shared with `screenshot`) or 图 comes out as an ink blob, and each pass sizes its deferred text by
+its own scale.
+
+**A second `drawing_sheet` on the same drawing is refused, not drawn.** The frame is drawn
+content rather than a setting, so `set_page_setup` reusing the layout is not enough — the second
+call would put a second frame and a second viewport on the same layout. Measured: two calls left
+24 lines on `A-SHEET` where there should be 12. The tool refuses and names the recovery
+(`drawing_undo`, then call again with the paper and scale wanted), rather than replacing the old
+frame in place: erasing another step's entities is not this step's to do, and an undo that cannot
+put them back would be worse than a refusal. The page setup is document state and outlives the
+undo, so that sequence ends where the caller wanted to be.
+
+**`drawing_sheet` says whether the plan fits, because a caller cannot work it out.** At 1:100 an
+A3 viewport is 380 x 221 mm and shows 38 x 22.1 m, so a 40 m bay is cut off — the plan is
+correctly at 1:100 and the page correctly 420 mm wide, and both are useless together. The reply
+carries `plan_mm`, `fits`, and when it does not fit a `note` naming the largest scale this package
+offers that holds it whole. Reported, never raised: a sheet narrower than the building is a design
+choice, and a detail sheet is drawn that way on purpose. A sheet on an empty drawing reports no
+`plan_mm` at all rather than a zero one.
 
 **The drawing records the catalogue that drew it.** The catalogue is otherwise ambient — a
 package file plus whichever `acadmcp.json` is found by walking up from the working directory —

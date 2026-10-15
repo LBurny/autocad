@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +19,7 @@ from ezdxf.enums import TextEntityAlignment
 from ezdxf.lldxf.tags import Tags
 from ezdxf.lldxf.types import DXFTag
 
-from .. import layers
+from .. import layers, sheet
 from ..catalog import Catalog
 from ..geom import Point, xy
 from ..journal import Journal
@@ -46,6 +46,29 @@ DEFAULT_MTEXT_WIDTH = 6000.0
 
 #: Dimension text height in mm, used when the caller does not specify one.
 DIM_TEXT_HEIGHT = 250.0
+
+#: DXF group 75: which standard scale a layout plots at. A plot reads this together with group
+#: 147 (`unit_factor`, the actual denominator), and AutoCAD only writes one of a fixed set of
+#: rows — so both are set from one place in `set_page_setup`, because a file whose 75 says 1:10
+#: while its 147 says 1.0 plots at 1:1 and claims 1:10. A ratio with no row here is written to
+#: 147 alone rather than given an invented 75. The rows are the ISO/ANSI set AutoCAD offers,
+#: with the code for each; 1:200 is 16, which is the value AutoCAD writes for a 1:200 plot.
+STANDARD_SCALE_TYPES: dict[tuple[int, int], int] = {
+    (1, 1): 0,
+    (1, 2): 1,
+    (1, 4): 2,
+    (1, 5): 3,
+    (1, 10): 4,
+    (1, 20): 5,
+    (1, 50): 6,
+    (1, 100): 7,
+    (2, 1): 8,
+    (4, 1): 9,
+    (8, 1): 10,
+    (10, 1): 11,
+    (100, 1): 13,
+    (1, 200): 16,
+}
 
 
 def _has_cjk(text: str) -> bool:
@@ -183,6 +206,40 @@ def _draw_cjk_texts(texts: Sequence[Any], ax: Any, color: str, points_per_unit: 
         )
 
 
+def _cjk_frontend_class() -> Any:
+    """A `Frontend` subclass that defers CJK text instead of letting ezdxf tessellate it.
+
+    ezdxf converts every glyph to a filled path, and that pipeline corrupts some CJK outlines —
+    SimSun's 图, the commonest character in a drawing title, comes out as an ink blob at some
+    canvas scales (the font, matplotlib and AutoCAD all render the same glyph fine). CJK texts
+    are collected and drawn natively afterwards; everything else stays on the ezdxf path.
+
+    Built here rather than declared at module level because `Frontend` exists only with the
+    preview extra installed, and this module imports without it. Both renderers share it: the
+    screenshot and the plot differ in what they frame, not in how they draw a character.
+    """
+    from ezdxf.addons.drawing import Frontend
+
+    class CjkFrontend(Frontend):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.cjk_texts: list[Any] = []
+
+        def draw_text_entity(self, entity: Any, properties: Any) -> None:
+            if _has_cjk(entity.dxf.get("text", "")):
+                self.cjk_texts.append(entity)
+                return
+            super().draw_text_entity(entity, properties)
+
+        def draw_mtext_entity(self, entity: Any, properties: Any) -> None:
+            if _has_cjk(entity.plain_text()):
+                self.cjk_texts.append(entity)
+                return
+            super().draw_mtext_entity(entity, properties)
+
+    return CjkFrontend
+
+
 def _cjk_font_properties() -> Any:
     """Matplotlib FontProperties for an installed CJK face, or None.
 
@@ -206,6 +263,10 @@ class DxfBackend(RecordingBackend):
     """Renders into an in-memory DXF document that can be saved and reopened."""
 
     name = "dxf"
+
+    #: The one driver that writes paperspace: the page setup goes onto the file's own LAYOUT
+    #: entity, which is where AutoCAD reads it, so a DXF saved here opens already configured.
+    supports_sheet = True
 
     #: Where the journal lives inside the file: root dictionary → ACADMCP_JOURNAL →
     #: JOURNAL. Same idea as the plugin's DWG journal: the steps travel with the drawing,
@@ -243,8 +304,16 @@ class DxfBackend(RecordingBackend):
         self.msp = self.doc.modelspace()
         self.path = path
         self._ops = 0
+        #: The sheet, once one is made: `sheet` is the reportable dict a tool returns and leaves
+        #: the process as JSON, `_sheet_layout` is the layout object the frame is drawn on and
+        #: never does. Two names because they are two things.
+        self.sheet: dict[str, Any] = {}
+        self._sheet_layout: Any = None
+        #: The last plot's own numbers, so a tool can report the viewport it asked for.
+        self.last_plot: dict[str, Any] = {}
         if path:
             self._read_journal()
+            self._read_sheet()
 
     # --- document ----------------------------------------------------------
     def _ensure_style(self) -> None:
@@ -296,6 +365,91 @@ class DxfBackend(RecordingBackend):
         self.doc.units = ezdxf.units.MM
         self.doc.header["$INSUNITS"] = 4
 
+    # --- sheets ------------------------------------------------------------
+    def _sheet_target(self, wanted: str = "") -> Any:
+        """The layout the sheet goes on: the named one, or the document's own paper layout.
+
+        A stock document already has one paper layout beside Model, so it is renamed rather than
+        added to — two paper layouts in one file is how a reader plots the wrong one.
+        """
+        name = (wanted or "").strip()
+        if name and name in self.doc.layouts:
+            return self.doc.layouts.get(name)
+        paper_layouts = [layout for layout in self.doc.layouts if layout.name.upper() != "MODEL"]
+        if not paper_layouts:
+            return self.doc.layouts.new(name or "A3")
+        target = paper_layouts[0]
+        if not name or target.name == name:
+            return target
+        # `Layouts.rename`, not `Layout.rename`: the object method sets the LAYOUT entity's name
+        # and leaves the ACAD_LAYOUT dictionary key alone, so the file carries a tab reading "A3"
+        # under an entry called "Layout1" — and ezdxf keys its own layout table by that entry, so
+        # reopening the file cannot find its own sheet by name. Measured on ezdxf 1.4.4.
+        self.doc.layouts.rename(target.name, name)
+        return self.doc.layouts.get(name)
+
+    @staticmethod
+    def _sheet_from_layout(layout: Any) -> dict[str, Any]:
+        """The reportable sheet a layout describes, or {} when it is not set up as one."""
+        name = str(layout.dxf.get("paper_size", "") or "").strip().upper()
+        width = layout.dxf.get("paper_width", None)
+        height = layout.dxf.get("paper_height", None)
+        if name not in sheet.PAPERS or not width or not height:
+            return {}
+        landscape = (float(width), float(height)) == sheet.PAPERS[name]
+        numerator = int(layout.dxf.get("scale_numerator", 1) or 1)
+        denominator = int(layout.dxf.get("scale_denominator", 1) or 1)
+        return {
+            "paper": name,
+            "orientation": "landscape" if landscape else "portrait",
+            "width": float(width),
+            "height": float(height),
+            "scale": f"{numerator}:{denominator}",
+            "layout": layout.name,
+            "style_sheet": str(layout.dxf.get("current_style_sheet", "") or ""),
+        }
+
+    def _read_sheet(self) -> None:
+        """Adopt the sheet a reopened drawing already carries, so a second session can plot it."""
+        for layout in self.doc.layouts:
+            if layout.name.upper() == "MODEL":
+                continue
+            found = self._sheet_from_layout(layout)
+            if found:
+                self.sheet = found
+                self._sheet_layout = layout
+                return
+
+    def set_page_setup(
+        self, paper: Any, scale: tuple[int, int], *, layout: str = "", style_sheet: str = ""
+    ) -> dict[str, Any]:
+        """Write the page setup onto the layout, which is where AutoCAD reads a sheet from."""
+        target = self._sheet_target(layout or paper.name)
+        numerator, denominator = int(scale[0]), int(scale[1])
+        target.dxf.paper_size = paper.name
+        target.dxf.paper_width = paper.width
+        target.dxf.paper_height = paper.height
+        target.dxf.plot_paper_units = 1  # millimetres
+        target.dxf.plot_type = 1  # what the layout holds, not the extents or a window
+        target.dxf.plot_rotation = 0
+        target.dxf.scale_numerator = numerator
+        target.dxf.scale_denominator = denominator
+        target.dxf.unit_factor = denominator / numerator
+        known = STANDARD_SCALE_TYPES.get((numerator, denominator))
+        if known is not None:
+            target.dxf.standard_scale_type = known
+        # A ratio with no enum row is *not* given one: group 147 alone is what a plot falls back
+        # to, and a wrong group 75 is worse than an absent one.
+        target.dxf.left_margin = paper.binding
+        target.dxf.bottom_margin = paper.margin
+        target.dxf.right_margin = paper.margin
+        target.dxf.top_margin = paper.margin
+        if style_sheet:
+            target.dxf.current_style_sheet = style_sheet
+        self._sheet_layout = target
+        self.sheet = self._sheet_from_layout(target)
+        return dict(self.sheet)
+
     def save(self, path: str | None = None) -> str:
         target = path or self.path
         if not target:
@@ -315,6 +469,24 @@ class DxfBackend(RecordingBackend):
     def preview(self, path: str, theme: str = "dark") -> str | None:
         """Render to PNG so the drawing can be eyeballed without opening AutoCAD."""
         return self.screenshot(path, theme=theme)
+
+    def paper_primitives(self, primitives: list[dict[str, Any]]) -> int:
+        """Record the sheet's primitives into the open step, marked for paperspace.
+
+        Recorded rather than drawn: a step defers everything to its commit, and that is what
+        makes the frame, the title block and the viewport one undoable step. The `paper` flag
+        travels in the journal with them, so `_apply` draws them on the layout and a replay
+        onto a backend that has no paperspace is reported rather than silently dropped.
+        """
+        if self._sheet_layout is None:
+            raise BackendError(
+                "this drawing has no sheet to draw on: call set_page_setup first, or open a "
+                "drawing saved with one"
+            )
+        for prim in primitives:
+            fields = {k: v for k, v in prim.items() if k not in ("kind", "points", "paper")}
+            self._record(prim["kind"], prim["points"], paper=True, **fields)
+        return len(primitives)
 
     def screenshot(
         self,
@@ -346,7 +518,7 @@ class DxfBackend(RecordingBackend):
             ]
             matplotlib.rcParams["axes.unicode_minus"] = False
             import matplotlib.pyplot as plt
-            from ezdxf.addons.drawing import Frontend, RenderContext
+            from ezdxf.addons.drawing import RenderContext
             from ezdxf.addons.drawing.config import ColorPolicy, Configuration
             from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
         except ImportError as exc:  # pragma: no cover - optional dependency
@@ -366,35 +538,7 @@ class DxfBackend(RecordingBackend):
         # pdsize=1 only pre-answers a question the Frontend would otherwise warn
         # about ("relative point size is not supported") on every render.
         config = Configuration(color_policy=policy, pdsize=1)
-
-        class _Frontend(Frontend):
-            """Defers CJK text instead of letting ezdxf tessellate its glyphs.
-
-            ezdxf converts every glyph to a filled path, and that pipeline
-            corrupts some CJK outlines — SimSun's 图, the commonest character
-            in a drawing title, comes out as an ink blob at some canvas scales
-            (the font, matplotlib and AutoCAD all render the same glyph fine).
-            CJK texts are drawn natively afterwards; everything else stays on
-            the ezdxf path.
-            """
-
-            def __init__(self, *args: Any, **kwargs: Any) -> None:
-                super().__init__(*args, **kwargs)
-                self.cjk_texts: list[Any] = []
-
-            def draw_text_entity(self, entity: Any, properties: Any) -> None:
-                if _has_cjk(entity.dxf.get("text", "")):
-                    self.cjk_texts.append(entity)
-                    return
-                super().draw_text_entity(entity, properties)
-
-            def draw_mtext_entity(self, entity: Any, properties: Any) -> None:
-                if _has_cjk(entity.plain_text()):
-                    self.cjk_texts.append(entity)
-                    return
-                super().draw_mtext_entity(entity, properties)
-
-        frontend = _Frontend(context, MatplotlibBackend(ax), config=config)
+        frontend = _cjk_frontend_class()(context, MatplotlibBackend(ax), config=config)
         frontend.draw_layout(self.msp, finalize=True)
         if frontend.cjk_texts:
             # The deferred texts must still count towards the framing, or a
@@ -436,12 +580,121 @@ class DxfBackend(RecordingBackend):
         plt.close(fig)
         return path
 
+    def plot_pdf(
+        self, path: str, *, paper: Any, scale: tuple[int, int], theme: str = "light"
+    ) -> str:
+        """Render the sheet to a PDF the size of its paper, with the plan at the plot scale.
+
+        Two axes, and neither computes a transform by hand. The figure's size *is* the paper, so
+        the PDF's own `/MediaBox` is the paper by construction and can be measured against what
+        was asked for. The frame and the title block are drawn into an axes spanning the whole
+        page in paper millimetres, so they come out at 1:1. The plan is drawn into an axes sitting
+        exactly on the viewport rectangle, with its data limits set to the model window that
+        viewport shows — so the axes' own limits *are* the plot scale, and its own clipping is the
+        viewport's edge. Nothing can be scaled twice.
+        """
+        try:
+            import matplotlib
+
+            matplotlib.use("Agg")
+            matplotlib.rcParams["font.sans-serif"] = [
+                "Microsoft YaHei",
+                "SimSun",
+                "SimHei",
+                "DejaVu Sans",
+            ]
+            matplotlib.rcParams["axes.unicode_minus"] = False
+            import matplotlib.pyplot as plt
+            from ezdxf.addons.drawing import RenderContext
+            from ezdxf.addons.drawing.config import ColorPolicy, Configuration
+            from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            raise BackendError("plotting needs matplotlib: uv sync --extra preview") from exc
+
+        if self._sheet_layout is None:
+            raise BackendError(
+                "this drawing has no sheet to plot: call set_page_setup first, or open a "
+                "drawing saved with one"
+            )
+        page, ink = ("#ffffff", "#000000") if theme == "light" else ("#1e1e1e", "#ffffff")
+        figure = plt.figure(
+            figsize=(sheet.mm_to_pt(paper.width) / 72.0, sheet.mm_to_pt(paper.height) / 72.0)
+        )
+        figure.patch.set_facecolor(page)
+        config = Configuration(
+            color_policy=ColorPolicy.BLACK if theme == "light" else ColorPolicy.WHITE, pdsize=1
+        )
+        # Points per drawing millimetre. Both axes fill their rectangle exactly and the figure
+        # *is* the paper, so one paper millimetre is always this many points; the plan's own texts
+        # are this much smaller because at 1:100 a model millimetre is a hundredth of a paper one.
+        points_per_mm = sheet.mm_to_pt(1.0)
+
+        # The sheet at 1:1 in paper millimetres: the frame and the title block. The VIEWPORT is
+        # filtered out — it is a window onto the model, not something a plot draws.
+        sheet_axes = figure.add_axes((0.0, 0.0, 1.0, 1.0))
+        sheet_axes.set_axis_off()
+        sheet_axes.set_facecolor(page)
+        sheet_axes.set_xlim(0.0, paper.width)
+        sheet_axes.set_ylim(0.0, paper.height)
+        sheet_frontend = _cjk_frontend_class()(
+            RenderContext(self.doc), MatplotlibBackend(sheet_axes), config=config
+        )
+        sheet_frontend.draw_layout(
+            self._sheet_layout, finalize=False, filter_func=lambda e: e.dxftype() != "VIEWPORT"
+        )
+
+        # The plan, inside the viewport: these limits are the plot scale. The vertical span is
+        # `view_height_model` and the horizontal follows from the viewport's own proportions,
+        # which is the rule AutoCAD plots by — the viewport fixes the scale, its shape fixes what
+        # else is in shot. Stretching both spans to the box would print a plan of the wrong
+        # proportions, which is the one error a reader would not catch by eye.
+        left, bottom, right, top = sheet.viewport_rect(paper)
+        plan_axes = figure.add_axes(
+            (
+                left / paper.width,
+                bottom / paper.height,
+                (right - left) / paper.width,
+                (top - bottom) / paper.height,
+            )
+        )
+        plan_axes.set_axis_off()
+        plan_axes.set_facecolor(page)
+        span_y = sheet.view_height_model(paper, scale)
+        span_x = span_y * (right - left) / (top - bottom)
+        center_x, center_y = self._plan_center()
+        plan_axes.set_xlim(center_x - span_x / 2.0, center_x + span_x / 2.0)
+        plan_axes.set_ylim(center_y - span_y / 2.0, center_y + span_y / 2.0)
+        plan_frontend = _cjk_frontend_class()(
+            RenderContext(self.doc), MatplotlibBackend(plan_axes), config=config
+        )
+        plan_frontend.draw_layout(self.msp, finalize=False)
+
+        _draw_cjk_texts(sheet_frontend.cjk_texts, sheet_axes, ink, points_per_unit=points_per_mm)
+        _draw_cjk_texts(
+            plan_frontend.cjk_texts,
+            plan_axes,
+            ink,
+            points_per_unit=points_per_mm * scale[0] / scale[1],
+        )
+
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(path)
+        plt.close(figure)
+        self.last_plot = {
+            "path": path,
+            "paper_mm": [paper.width, paper.height],
+            "scale": f"{scale[0]}:{scale[1]}",
+            "viewport_mm": [round(right - left, 3), round(top - bottom, 3)],
+            "plan_span_mm": [round(span_x, 3), round(span_y, 3)],
+        }
+        return path
+
     def info(self) -> dict[str, Any]:
         return {
             "backend": self.name,
             "path": self.path,
             "units": "mm",
-            "entities": len(self.msp),
+            "entities": sum(1 for _ in self._all_entities()),
             "layers": sorted(layer.dxf.name for layer in self.doc.layers),
             "ops": self._ops,
             "journal": {
@@ -450,6 +703,8 @@ class DxfBackend(RecordingBackend):
             },
             "journal_unreadable": self.journal_unreadable,
             "catalog": self.recorded_catalog(),
+            # Empty until a sheet is made: a drawing with no page setup is a plan, not a sheet.
+            "sheet": dict(self.sheet),
         }
 
     def recorded_catalog(self) -> dict[str, Any] | None:
@@ -483,8 +738,14 @@ class DxfBackend(RecordingBackend):
         return Catalog.adopt(payload)
 
     def entities(self, layer: str | None = None, limit: int = 200) -> list[dict]:
+        """Every entity the drawing holds, model and paper alike.
+
+        The sheet is part of the drawing, so a listing that stopped at the modelspace would
+        report a frame the journal recorded as missing and a sheet's text as never drawn. The
+        model comes first, which is the order a tag scan and a reader both expect.
+        """
         out: list[dict] = []
-        for e in self.msp:
+        for e in self._all_entities():
             if layer and e.dxf.get("layer", "0") != layer:
                 continue
             row: dict[str, Any] = {"type": e.dxftype(), "layer": e.dxf.get("layer", "0")}
@@ -813,6 +1074,39 @@ class DxfBackend(RecordingBackend):
 
     # --- journal application ------------------------------------------------
     def _apply_primitive(self, prim: dict[str, Any]) -> Any:
+        """Draw one primitive where it belongs: the model, or the sheet's paperspace.
+
+        A primitive marked `paper` is the frame, the title block or the viewport, and belongs on
+        the layout at 1:1 in paper millimetres. Every `_draw_*` method below reads `self.msp` and
+        nothing else, so the destination is swapped around them rather than threaded through
+        eight signatures — the drawing code stays destination-agnostic, which is what lets a
+        replay draw the same primitive somewhere else.
+        """
+        if prim.get("paper"):
+            if self._sheet_layout is None:
+                raise BackendError(
+                    "this drawing records a sheet's frame but carries no sheet: it was drawn "
+                    "before set_page_setup or the file lost its page setup. Call set_page_setup"
+                )
+            if prim["kind"] == "viewport" and "view_center" not in prim:
+                # Where to look is decided *before* the destination is swapped, because
+                # `_plan_center` reads whatever `self.msp` is: resolved after the swap it would
+                # measure the frame and the title block, and the viewport would frame the sheet
+                # instead of the plan on it. Copied rather than written in, so no drawing's own
+                # extent is ever journalled as another drawing's.
+                prim = {**prim, "view_center": list(self._plan_center())}
+            return self._apply_on(self._sheet_layout, prim)
+        return self._apply_on(self.msp, prim)
+
+    def _apply_on(self, layout: Any, prim: dict[str, Any]) -> Any:
+        saved = self.msp
+        self.msp = layout
+        try:
+            return self._apply_primitive_here(prim)
+        finally:
+            self.msp = saved
+
+    def _apply_primitive_here(self, prim: dict[str, Any]) -> Any:
         pts = unflatten_points(prim.get("points", []))
         kind = prim["kind"]
         if kind == "line":
@@ -873,13 +1167,90 @@ class DxfBackend(RecordingBackend):
                 layer=prim.get("layer", "0"),
                 text_height=height,
             )
+        if kind == "viewport":
+            return self._draw_viewport(pts[0], prim)
         raise BackendError(
             f"the 'dxf' backend cannot apply primitive kind {kind!r}: it cannot read a "
             "library .dwg to copy a block definition from. Use backend='plugin'."
         )
 
+    def _draw_viewport(self, center: Point, prim: dict[str, Any]) -> Any:
+        """Frame the plan on the sheet: one viewport, sized in paper mm and scaled in model mm.
+
+        `view_height` in model units is the whole of the plot scale — a 1:100 sheet shows 100
+        model millimetres per paper millimetre — and it comes from the `sheet` module rather than
+        from a constant here. `view_center` is always resolved by `_apply_primitive` before the
+        destination is swapped, so a building drawn away from the origin is still centred on its
+        sheet and a replay frames the target drawing's own content.
+        """
+        self._ops += 1
+        return self._sheet_layout.add_viewport(
+            center=xy(center),
+            size=(float(prim["size"][0]), float(prim["size"][1])),
+            view_center_point=xy(prim["view_center"]),
+            view_height=float(prim["view_height"]),
+            status=2,  # on and active: what a plot of this layout shows
+        )
+
+    def _plan_extent(self) -> tuple[float, float, float, float] | None:
+        """(min_x, min_y, max_x, max_y) of what the model holds, or None when it holds nothing.
+
+        Measured off the entities rather than read from `$EXTMIN`/`$EXTMAX`, which ezdxf only
+        refreshes on its own terms.
+        """
+        xs: list[float] = []
+        ys: list[float] = []
+        for entity in self.msp:
+            for key in ("start", "end", "center", "insert"):
+                if not entity.dxf.hasattr(key):
+                    continue
+                value = entity.dxf.get(key)
+                if value is not None:
+                    xs.append(float(value[0]))
+                    ys.append(float(value[1]))
+            getter = getattr(entity, "get_points", None)
+            if getter is None:
+                continue
+            try:
+                for point in getter("xy"):
+                    xs.append(float(point[0]))
+                    ys.append(float(point[1]))
+            except (TypeError, ValueError):  # a point layout this method cannot read
+                continue
+        if not xs:
+            return None
+        return (min(xs), min(ys), max(xs), max(ys))
+
+    def plan_extent(self) -> tuple[float, float, float, float] | None:
+        return self._plan_extent()
+
+    def _plan_center(self) -> Point:
+        """The middle of what the model holds, so the viewport lands on the plan.
+
+        An empty model centres on the origin, which is what an empty sheet should show.
+        """
+        extent = self._plan_extent()
+        if extent is None:
+            return (0.0, 0.0)
+        min_x, min_y, max_x, max_y = extent
+        return ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0)
+
     def _apply(self, primitives: list[dict[str, Any]]) -> list[str]:
         return [self._apply_primitive(p).dxf.handle for p in primitives]
+
+    def _paper_layouts(self) -> list[Any]:
+        """Every layout but the model, in the order the file lists them.
+
+        The sheet lives here rather than in the modelspace, and it is part of the drawing, so
+        both the entity listing and the erase path have to know about it — a paperspace entity
+        deleted through the modelspace raises `ValueError: list.remove(x): x not in list`.
+        """
+        return [layout for layout in self.doc.layouts if layout.name.upper() != "MODEL"]
+
+    def _all_entities(self) -> Iterator[Any]:
+        yield from self.msp
+        for layout in self._paper_layouts():
+            yield from layout
 
     def _erase(self, handles: list[str]) -> tuple[int, int]:
         erased = missing = 0
@@ -888,7 +1259,11 @@ class DxfBackend(RecordingBackend):
             if entity is None or not entity.is_alive:
                 missing += 1  # a hand edit already removed it; count, don't fail
                 continue
-            self.msp.delete_entity(entity)
+            # Erased through the layout that owns it: an entity lives in the modelspace or in a
+            # paper block record, and only its own space will let go of it. A sheet's frame and
+            # viewport are paper entities, so aiming every erase at the modelspace would leave
+            # them standing and report them missing.
+            self.doc.layouts.get_layout_for_entity(entity).delete_entity(entity)
             erased += 1
         return erased, missing
 

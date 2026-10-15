@@ -31,6 +31,11 @@ LAYERS: dict[str, tuple[int, str]] = {
     "A-EQUIP": (6, "CONTINUOUS"),
     "A-ANNO": (7, "CONTINUOUS"),
     "A-HATCH": (9, "CONTINUOUS"),
+    # The sheet itself: the frame, the title block's rulings and their written fields. On paper
+    # rather than in the model, at 1:1 in paper millimetres — a frame that scaled with the plan
+    # would be a frame around nothing in particular.
+    "A-SHEET": (7, "CONTINUOUS"),
+    "A-SHEET-TEXT": (7, "CONTINUOUS"),
 }
 
 # Text heights in mm, matched to a 1:100 plot.

@@ -29,7 +29,7 @@ except ImportError:  # pragma: no cover - mcp 1.x
 
 from mcp.types import ToolAnnotations
 
-from . import catalog, geom, layers, ops, settings, summary, terms, verify
+from . import catalog, geom, layers, ops, settings, sheet, summary, terms, verify
 from .acad_plugin_client import PluginClient, PluginError, PluginUnavailable
 from .backends import make_backend
 from .backends.base import Backend, BackendError
@@ -257,7 +257,7 @@ def drawing_help(term: str | None = None) -> dict[str, Any]:
             "hint": ""
             if matches
             else (
-                "no tool matched. This index covers the vocabulary of the 47 tools — an "
+                "no tool matched. This index covers the vocabulary of the 49 tools — an "
                 "AutoCAD command name, an English phrase or a Chinese one. It does not cover "
                 "the element catalogue: for those, call element_types() (钢立柱, 焊接符号, "
                 "钢梁 and the rest live there), and call drawing_help() with no term for the "
@@ -283,6 +283,9 @@ def drawing_help(term: str | None = None) -> dict[str, Any]:
             "draw_stair, draw_lift, draw_equipment(kind='shaft') for the core and risers",
             "draw_room again with walls=False to label a room whose walls exist",
             "add_dimension / add_text / add_hatch for annotation",
+            "drawing_sheet(paper='A3', scale='1:100', title=...) to put it on a named sheet — a "
+            "page setup, a frame and a title block on the drawing's own layout — then "
+            "drawing_plot_pdf(...) for a PDF whose paper size is read back out of the file",
             "drawing_replay(backend='plugin') re-draws a headless session into AutoCAD",
             "drawing_screenshot(...) to eyeball it (inline=False for just a PNG file), "
             "drawing_save(...) to keep it",
@@ -343,6 +346,8 @@ def drawing_status() -> dict[str, Any]:
     `catalog` is the catalogue in force now, `drawing_catalog` is what the drawing itself
     recorded (and whether the two disagree), and on the com backend `sidecar` names the
     file a session's journal was written to beside the drawing.
+
+    `sheet` is the paper this drawing is set up on — empty until `drawing_sheet` is called.
     """
     be = _state.require()
     out = dict(be.info())
@@ -353,6 +358,7 @@ def drawing_status() -> dict[str, Any]:
         "library": settings.current().library,
         "skipped": list(loaded.skipped),
     }
+    out["sheet"] = dict(getattr(be, "sheet", {}) or {})
     recorder = getattr(be, "drawing_catalog", None)
     if recorder is not None:
         out["drawing_catalog"] = recorder()
@@ -413,6 +419,92 @@ def drawing_open(path: str) -> dict[str, Any]:
     if stamp:
         _stamp_catalog(be, chosen)
     return {"ok": True, **be.info(), **provenance, **_switch_note(dropped)}
+
+
+@mcp.tool(annotations=_MUTATING)
+def drawing_sheet(
+    paper: str = "A3",
+    scale: str = "1:100",
+    orientation: str = "landscape",
+    title: str = "",
+    number: str = "",
+    sheet_of: str = "",
+    style_sheet: str = "",
+) -> dict[str, Any]:
+    """Put a sheet on the drawing: a named paper, a plot scale, a frame and a title block.
+
+    The paper is the ISO A series (`A0`…`A4`), which is what GB/T 50001 takes its sheet sizes
+    from; `scale` is a ratio like `1:100`. Both are refused by name when this package has no
+    row for them, because a plan on the wrong paper or at the wrong scale is discovered at the
+    printer rather than here. `title`, `number` and `sheet_of` are written into the title block
+    as 图名/图号/张次, with 比例 always added from the scale — a sheet whose title block does not
+    state its scale fails the sheet's own point. A field too long for its cell is shrunk to fit.
+
+    The page setup goes onto the file's own layout, so a DXF saved from here opens in AutoCAD
+    with the sheet already configured — `style_sheet` names a plot style (a `.ctb`) when the
+    office has one. The frame, the title block and the viewport are drawn at 1:1 in paper
+    millimetres, so they are paper rather than anything that scales with the plan.
+
+    The page setup is document state and outlives an undo, the way a block definition does: one
+    `drawing_undo` takes back the frame and the viewport, not the paper. The com and plugin
+    backends have no paperspace path and refuse by name.
+    """
+    be = _state.require()
+    if not getattr(be, "supports_sheet", False):
+        raise BackendError(
+            f"backend {be.name!r} cannot make a sheet: a page setup, a frame and a viewport are "
+            "paperspace, which only the dxf driver writes. Use drawing_new(backend='dxf') for a "
+            "sheet, or set the page setup in AutoCAD itself"
+        )
+    resolved = sheet.resolve_paper(paper, orientation)
+    ratio = sheet.resolve_scale(scale)
+    # A frame is drawn content, not a setting, so a second sheet would put a second frame and a
+    # second viewport on the same layout — measured: two calls left 24 lines on A-SHEET where
+    # there should be 12. Refused with the recovery named rather than replaced in place: erasing
+    # the old frame is not this step's to do, and an undo that cannot put it back is worse than a
+    # refusal. The page setup itself is document state and outlives the undo, so the sequence the
+    # message gives ends with the sheet the caller wanted.
+    already = be.entities(layer="A-SHEET", limit=1000)
+    if already:
+        raise BackendError(
+            f"this drawing already carries a sheet ({len(already)} lines on A-SHEET): the frame "
+            "is drawn, so a second one would leave two frames and two viewports on the same "
+            "layout. Call drawing_undo to take the existing sheet back — the page setup itself is "
+            "document state and outlives the undo — then call this again with the paper and scale "
+            "you want"
+        )
+    meta = {k: v for k, v in {"图名": title, "图号": number, "张次": sheet_of}.items() if v}
+    meta["比例"] = f"{ratio[0]}:{ratio[1]}"
+    params = {
+        "paper": resolved.name,
+        "scale": f"{ratio[0]}:{ratio[1]}",
+        "orientation": orientation,
+    }
+    with _auto_step("drawing_sheet", params, label=title) as be:
+        report = be.set_page_setup(resolved, ratio, style_sheet=style_sheet)
+        report.update(ops.draw_sheet(be, resolved, ratio, meta))
+
+    # Whether the whole plan is on the page is the one thing a caller cannot work out from the
+    # sheet, and the one it would otherwise discover from a plot with the building running off
+    # the edge: at 1:100 an A3 shows 19.5 x 26.7 m, so a 24 m wide bay does not fit and the reply
+    # has to say so. Reported, never raised — a sheet narrower than the building is a design
+    # choice, and a detail sheet is drawn that way on purpose.
+    extent = None
+    measurer = getattr(be, "plan_extent", None)
+    if measurer is not None:
+        extent = measurer()
+    if extent is not None:
+        report["plan_mm"] = [round(v, 3) for v in (extent[2] - extent[0], extent[3] - extent[1])]
+        report["fits"] = sheet.fits_on_sheet(resolved, ratio, extent)
+        if not report["fits"]:
+            report["note"] = (
+                f"the plan is {report['plan_mm'][0]:.0f} x {report['plan_mm'][1]:.0f} mm and "
+                f"{resolved.name} at {report['scale']} shows "
+                f"{' x '.join(f'{v:.0f}' for v in sheet.model_window(resolved, ratio))} mm, so "
+                f"the sheet holds a detail rather than all of it — the largest scale that holds "
+                f"it whole is {sheet.largest_scale_that_fits(resolved, extent)}"
+            )
+    return {"ok": True, "title_block": list(meta), **report}
 
 
 @mcp.tool(annotations=_DESTRUCTIVE_IDEMPOTENT)
@@ -738,6 +830,52 @@ def drawing_screenshot(
     if not inline:
         return {"ok": True, "path": out}
     return Image(path=out)
+
+
+@mcp.tool(annotations=_IDEMPOTENT)
+def drawing_plot_pdf(path: str | None = None, theme: str = "light") -> dict[str, Any]:
+    """Plot the sheet to a PDF, then read the paper size back out of the PDF itself.
+
+    `verified` answers one question — is the file the paper the sheet claims — and the size it
+    answers with is measured from the PDF's own `/MediaBox`, not from the paper that was asked
+    for, because the size a plot produced is what the file says it is. `mismatch_mm` gives how far
+    the two disagree, so a near miss is visible rather than rounded into a pass.
+
+    Needs a sheet: call `drawing_sheet` first, or open a drawing saved with one. The plan is drawn
+    at the sheet's plot scale inside the viewport, and `plan_span_mm` says how much of the model is
+    in shot. The com and plugin backends refuse by name — plotting a live drawing goes through
+    AutoCAD's own plotter, which is not wired up here.
+    """
+    be = _state.require()
+    if not getattr(be, "supports_sheet", False):
+        raise BackendError(
+            f"backend {be.name!r} cannot plot a sheet: only the dxf driver writes paperspace"
+        )
+    state = dict(getattr(be, "sheet", {}) or {})
+    if not state:
+        raise BackendError(
+            "this drawing has no sheet to plot: call drawing_sheet(paper=..., scale=...) first"
+        )
+    paper = sheet.resolve_paper(state["paper"], state.get("orientation", "landscape"))
+    ratio = sheet.resolve_scale(state["scale"])
+    target = Path(path) if path else Path(_default_screenshot_path()).with_suffix(".pdf")
+    be.plot_pdf(str(target), paper=paper, scale=ratio, theme=theme)
+
+    measured = sheet.read_pdf_mediabox_mm(target)
+    asked = (paper.width, paper.height)
+    mismatch = max(abs(measured[0] - asked[0]), abs(measured[1] - asked[1]))
+    plot = getattr(be, "last_plot", {}) or {}
+    return {
+        "ok": True,
+        "path": str(target),
+        "paper_mm": [round(v, 3) for v in measured],
+        "asked_for_mm": [round(v, 3) for v in asked],
+        "mismatch_mm": round(mismatch, 3),
+        "verified": bool(mismatch <= 0.5),
+        "scale": state["scale"],
+        "viewport_mm": plot.get("viewport_mm", []),
+        "plan_span_mm": plot.get("plan_span_mm", []),
+    }
 
 
 @mcp.tool(annotations=_READONLY)

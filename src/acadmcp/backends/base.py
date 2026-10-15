@@ -37,12 +37,62 @@ class Backend(Protocol):
     #: be decided before anything is drawn.
     supports_insert: bool
 
+    #: Whether this backend can put a sheet on the drawing: a named paper, a plot scale, a frame
+    #: and a title block on a paperspace layout. Declared for the same reason `supports_insert`
+    #: is — the refusal inside a step is deferred to the commit. The dxf driver writes the page
+    #: setup onto the file's own LAYOUT entity, which is where AutoCAD reads it, so a DXF saved
+    #: here opens with the sheet already configured. The live drivers have no paperspace path
+    #: and say so.
+    supports_sheet: bool
+
     # --- layers & document -------------------------------------------------
     def ensure_layer(
         self, name: str, color: int | None = None, linetype: str | None = None
     ) -> Any: ...
 
     def set_units_mm(self) -> None: ...
+
+    def set_page_setup(
+        self, paper: Any, scale: tuple[int, int], *, layout: str = "", style_sheet: str = ""
+    ) -> dict[str, Any]:
+        """Name a layout for this sheet and give it a paper, a plot scale and a style sheet.
+
+        `paper` is a :class:`acadmcp.sheet.Paper` and `scale` a ratio as
+        :func:`acadmcp.sheet.resolve_scale` returns it. Returns the sheet as a reportable dict:
+        `paper`, `orientation`, `width`, `height`, `scale`, `layout`, `style_sheet`.
+        """
+        ...
+
+    def paper_primitives(self, primitives: list[dict[str, Any]]) -> int:
+        """Record primitives as paperspace content of the open step, and return how many.
+
+        The same vocabulary :meth:`_apply` takes, so `ops` builds the frame and the title block
+        the way it builds everything else and only the destination differs — a primitive marked
+        `paper` is drawn on the sheet's layout at 1:1 in paper millimetres instead of into the
+        model. Counts rather than handles because a step defers its drawing to the commit, so
+        the handles do not exist yet; the commit's own `_apply` returns them like any other
+        step's, which is what makes a sheet one undoable step.
+        """
+        ...
+
+    def plan_extent(self) -> tuple[float, float, float, float] | None:
+        """``(min_x, min_y, max_x, max_y)`` of what the model holds, or None when it cannot say.
+
+        A read-back a sheet needs, to answer the one question a caller cannot work out from the
+        sheet's own reply: does the whole plan fit the page at this scale. A driver that cannot
+        measure its model without a round trip it has not got answers None rather than guessing.
+        """
+        ...
+
+    def plot_pdf(
+        self, path: str, *, paper: Any, scale: tuple[int, int], theme: str = "light"
+    ) -> str:
+        """Render the sheet — frame, title block, and the plan at the plot scale — to a PDF.
+
+        A PDF rather than a PNG because a PDF carries its own paper size, so what was plotted
+        can be measured against what was asked for instead of trusted.
+        """
+        ...
 
     def save(self, path: str | None = None) -> str: ...
 

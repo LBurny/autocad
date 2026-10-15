@@ -13,7 +13,7 @@ import math
 from collections.abc import Sequence
 from typing import Any
 
-from . import catalog, geom, layers, settings
+from . import catalog, geom, layers, settings, sheet
 from .backends.base import Backend
 from .catalog import Element
 from .geom import Point, Vec
@@ -1198,3 +1198,77 @@ def _run_direction(start: Point, end: Point) -> float:
     x0, y0 = geom.xy(start)
     x1, y1 = geom.xy(end)
     return math.degrees(math.atan2(y1 - y0, x1 - x0))
+
+
+# ---------------------------------------------------------------------------
+# the sheet
+# ---------------------------------------------------------------------------
+
+
+def sheet_primitives(
+    paper: sheet.Paper, scale: tuple[int, int], meta: dict[str, str]
+) -> list[dict[str, Any]]:
+    """The frame, the title block and the viewport, in paper millimetres.
+
+    Every primitive is marked `paper`, which is the whole of what makes a sheet a sheet: a
+    backend draws these on the drawing's layout instead of into the model, so the frame stays
+    1:1 with the paper while the plan inside it carries the plot scale.
+
+    The viewport states its own size in paper millimetres and its view height in model
+    millimetres — the two numbers whose ratio *is* the scale — and leaves where to look to the
+    backend, because only the drawing itself knows what it holds.
+    """
+    prims: list[dict[str, Any]] = []
+    for p1, p2 in sheet.frame_outline(paper):
+        prims.append({"kind": "line", "points": [p1, p2], "layer": "A-SHEET", "paper": True})
+    lines, texts = sheet.title_block(paper, meta)
+    for p1, p2 in lines:
+        prims.append({"kind": "line", "points": [p1, p2], "layer": "A-SHEET", "paper": True})
+    for pos, value, height, align in texts:
+        prims.append(
+            {
+                "kind": "text",
+                "points": [pos],
+                "text": value,
+                "height": height,
+                "rotation": 0.0,
+                "align": align,
+                "layer": "A-SHEET-TEXT",
+                "paper": True,
+            }
+        )
+    left, bottom, right, top = sheet.viewport_rect(paper)
+    prims.append(
+        {
+            "kind": "viewport",
+            "points": [((left + right) / 2.0, (bottom + top) / 2.0)],
+            "size": [right - left, top - bottom],
+            "view_height": sheet.view_height_model(paper, scale),
+            "paper": True,
+        }
+    )
+    return prims
+
+
+def draw_sheet(
+    be: Backend, paper: sheet.Paper, scale: tuple[int, int], meta: dict[str, str]
+) -> dict[str, Any]:
+    """Draw the sheet and frame the plan in one viewport. The page setup is the caller's.
+
+    The sheet's layers are ensured here rather than left to a drawing-wide setup, so a sheet
+    drawn onto a document that never ran one still has somewhere to land.
+    """
+    for layer in ("A-SHEET", "A-SHEET-TEXT"):
+        be.ensure_layer(layer, color=layers.LAYERS[layer][0], linetype=layers.LAYERS[layer][1])
+    prims = sheet_primitives(paper, scale, meta)
+    recorded = be.paper_primitives(prims)
+    return {
+        "lines": sum(1 for p in prims if p["kind"] == "line"),
+        "texts": sum(1 for p in prims if p["kind"] == "text"),
+        "viewports": sum(1 for p in prims if p["kind"] == "viewport"),
+        "recorded": recorded,
+        "viewport_mm": [
+            round(sheet.viewport_rect(paper)[2] - sheet.viewport_rect(paper)[0], 3),
+            round(sheet.viewport_rect(paper)[3] - sheet.viewport_rect(paper)[1], 3),
+        ],
+    }

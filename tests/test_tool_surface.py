@@ -22,7 +22,7 @@ def _tools() -> dict:
 
 def test_every_tool_carries_annotations():
     tools = _tools()
-    assert len(tools) == 47
+    assert len(tools) == 49
     missing = [name for name, t in tools.items() if t.annotations is None]
     assert not missing
 

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Iterator, Sequence
-from typing import Any
+from typing import Any, NoReturn
 
 from ..geom import Point, xy
 from ..journal import Journal, StepRecord
@@ -49,12 +49,49 @@ class RecordingBackend:
     #: is drawn, because inside a step the refusal is deferred to the commit.
     supports_insert = False
 
+    #: No backend here writes paperspace unless it says so. A sheet is a page setup on a layout
+    #: entity plus a frame drawn at 1:1 in paper millimetres, and only the dxf driver writes
+    #: that; the live drivers refuse by name rather than draw half a sheet. Declared for the
+    #: same reason `supports_insert` is: the refusal inside a step is deferred to the commit.
+    supports_sheet = False
+
     def __init__(self) -> None:
         self.journal = Journal()
         self._op = ""
         self._label: str | None = None
         self._params: dict[str, Any] = {}
         self._pending: list[dict[str, Any]] = []
+
+    # --- sheets ------------------------------------------------------------
+    def _no_sheet(self, what: str) -> NoReturn:
+        """Refuse a paperspace request by name, so the caller knows what to use instead."""
+        raise BackendError(
+            f"backend {self.name!r} cannot {what}: a sheet needs a paperspace layout, and only "
+            "the dxf driver writes one. Use drawing_new(backend='dxf') for a sheet, or set the "
+            "page setup in AutoCAD itself"
+        )
+
+    def set_page_setup(
+        self, paper: Any, scale: tuple[int, int], *, layout: str = "", style_sheet: str = ""
+    ) -> dict[str, Any]:
+        self._no_sheet("set a page setup")
+
+    def paper_primitives(self, primitives: list[dict[str, Any]]) -> int:
+        self._no_sheet("draw into paperspace")
+
+    def plan_extent(self) -> tuple[float, float, float, float] | None:
+        """(min_x, min_y, max_x, max_y) of what the model holds, or None.
+
+        A read-back a sheet needs to answer "does the plan fit the page at this scale", which is
+        the one thing a caller cannot work out from the sheet's own reply. `None` is the honest
+        answer for a driver that cannot measure its model without a round trip it has not got.
+        """
+        return None
+
+    def plot_pdf(
+        self, path: str, *, paper: Any, scale: tuple[int, int], theme: str = "light"
+    ) -> str:
+        self._no_sheet("plot a sheet")
 
     # --- steps -------------------------------------------------------------
 
