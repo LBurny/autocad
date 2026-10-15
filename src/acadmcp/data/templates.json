@@ -1,0 +1,41 @@
+{
+  "_comment": [
+    "The templates this package ships, as data. A template is a *specification* for a new",
+    "drawing — a standard, a paper, an orientation, a plot scale and the title block's fields",
+    "— not a drawing to copy. `drawing_new(template=...)` applies it; the committed",
+    "`templates/*.dxf` are the artefacts the same specification builds, and",
+    "`scripts/build_templates.py --check` rebuilds them and compares a geometry fingerprint.",
+    "",
+    "title_fields holds the title block's placeholder fields; the 比例 field is written from",
+    "`scale` at build time, so a sheet always states its scale (GB/T 10609.1). An empty string",
+    "is a field left for the draughtsman to fill in, which is what a template is for."
+  ],
+  "templates": [
+    {
+      "key": "gb_a3_arch",
+      "label": "A3 建筑平面（GB/T）",
+      "standard": "gbt50001",
+      "paper": "A3",
+      "orientation": "landscape",
+      "scale": "1:100",
+      "title_fields": {
+        "图名": "",
+        "图号": ""
+      },
+      "artefact": "templates/gb_a3_arch.dxf"
+    },
+    {
+      "key": "gb_a4_arch",
+      "label": "A4 建筑平面（GB/T）",
+      "standard": "gbt50001",
+      "paper": "A4",
+      "orientation": "portrait",
+      "scale": "1:50",
+      "title_fields": {
+        "图名": "",
+        "图号": ""
+      },
+      "artefact": "templates/gb_a4_arch.dxf"
+    }
+  ]
+}
