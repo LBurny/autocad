@@ -22,6 +22,34 @@ Three rules, all of them the catalogue loader's and the plugin journal's before 
   wrong-looking line that nothing catches — the discipline the element catalogue keeps for a
   named variant that does not exist, applied to a number.
 
+* **The checker reports, it never raises.** :func:`check` reads a *snapshot* of the drawing —
+  the unit, the layers in use, every text with its height, the sheet — as plain data, and
+  returns findings with a severity, the shape :mod:`acadmcp.critique` established. Five rules
+  this wave:
+
+  * ``units_not_mm`` (error) — the drawing's unit is not the millimetre this package draws in.
+  * ``layer_not_in_standard`` (warning) — an entity sits on a layer the standard's table does
+    not name. A warning, because a project's own layers are legitimate and the finding is that
+    the standard does not know the name, which is what a reviewer acts on. This wave checks
+    **which layer names are in use**, not the layer *table's* own colour, linetype or
+    lineweight: reading a layer definition needs a ``layer_table()`` read the plugin's RPC does
+    not yet have, and reconstructing it from entity rows would be a check of something else
+    wearing this rule's name. Deferred and named, never faked.
+  * ``text_height_off_series`` (error) — a text whose *paper* height (its model height times
+    the plot scale) is not in the standard's nominal series. This is the rule AutoCAD's own
+    CHECKSTANDARDS runs, and the reason the series is data. The nearest nominal height is named
+    in the finding, because a caller wants the number to move to. Text on the sheet's own
+    layers is already at 1:1 in paper millimetres, so it is measured as paper.
+  * ``no_sheet`` (warning) — the drawing carries no sheet at all.
+  * ``sheet_without_scale`` (error) — a sheet whose title block states no 比例. A plotted sheet
+    without its scale fails the sheet's own point (GB/T 10609.1).
+
+  A snapshot with no sheet makes the text-height rule assume :data:`DEFAULT_SCALE` and *say so*
+  in the finding, because a paper height cannot be judged without a denominator and a silent
+  assumption would be a verdict about a scale nobody stated. A standard that transcribes no
+  text-height series silences that rule rather than flagging every text, the same "refuse by
+  name rather than interpolate" discipline applied to a check that cannot judge.
+
 Pure module: it imports :mod:`acadmcp.layers` and :mod:`acadmcp.sheet` and no CAD library,
 and it reaches :mod:`acadmcp.settings` only lazily inside :func:`current` — the same shape
 :func:`acadmcp.catalog.current` uses, and for the same reason.
@@ -32,6 +60,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import math
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -446,15 +475,280 @@ def describe() -> dict[str, Any]:
     return current().describe()
 
 
+# ---------------------------------------------------------------------------
+# the conformance checker
+# ---------------------------------------------------------------------------
+#
+# `check` is pure over a snapshot the calling tool gathers, so it needs no CAD import and no
+# backend: the same discipline `critique.py` keeps, and the reason a drawing can be checked on
+# every driver and after a reopen. It reports, it never raises — a verdict a caller acts on is
+# worth more than a crash, so every unreadable row is skipped rather than guessed at.
+
+#: The rule codes `check` reports. Stable strings: a caller focuses on one and the tool's reply
+#: quotes them, so they are named here rather than typed at each use.
+RULE_UNITS = "units_not_mm"
+RULE_LAYER = "layer_not_in_standard"
+RULE_TEXT_HEIGHT = "text_height_off_series"
+RULE_NO_SHEET = "no_sheet"
+RULE_SHEET_SCALE = "sheet_without_scale"
+
+#: Every rule code, in the order :func:`check` reports them (units, layers, text heights, sheet).
+RULES = (RULE_UNITS, RULE_LAYER, RULE_TEXT_HEIGHT, RULE_NO_SHEET, RULE_SHEET_SCALE)
+
+#: The scale assumed to read a model text height when a drawing carries no sheet. GB/T 50001's
+#: commonest architectural plan scale and this package's own ``drawing_sheet`` default. Assumed
+#: *and reported*, never assumed silently: a paper height cannot be judged without a denominator,
+#: and a finding must not attribute a scale the drawing never stated.
+DEFAULT_SCALE = "1:100"
+
+#: How close a text's paper height must be to a nominal one to count as it, in millimetres. Tiny
+#: on purpose: a model height divided by an integer scale reproduces the nominal value's own IEEE
+#: double, so anything looser than arithmetic noise would forgive a real difference — a 2.6 mm
+#: text is an error, and 2.6 is only 0.1 mm from 2.5.
+HEIGHT_TOLERANCE = 1e-6
+
+#: Layers whose text is drawn on the sheet at 1:1 in paper millimetres. The frame and the title
+#: block are paper content — a sheet's frame is drawn at 1:1 in paper mm — so a title-block
+#: field's height is *already* a paper height, and dividing it by the plot scale would read the
+#: standard's own 5.0 mm field as 0.05 mm and flag every sheeted drawing with an error that is
+#: not one. A snapshot may also mark a text ``"paper": true`` for text this list does not know.
+SHEET_LAYERS = frozenset({"A-SHEET", "A-SHEET-TEXT"})
+
+#: Where a title block's fields sit in a snapshot, in the order tried. A caller that threads the
+#: fields through names the group one of these; absent, the sheet's own ``scale`` is taken as the
+#: evidence that 比例 was stated, which is how ``be.info()["sheet"]`` reports a sheet.
+_TITLE_FIELDS_KEYS = ("title_fields", "title_block", "fields")
+
+#: The field names that state the scale. 比例 first, because that is what the sheet writes.
+_SCALE_FIELD_KEYS = ("比例", "scale", "SCALE")
+
+
+def _number(value: Any) -> float | None:
+    """A finite number, or None. A missing value and a malformed or non-finite one read alike."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _finding(
+    rule: str, severity: str, detail: dict[str, Any], entities: list[Any] | None = None
+) -> dict[str, Any]:
+    """One issue, in the shape the tool reports: ``rule``, ``severity``, ``detail``, ``entities``.
+
+    ``entities`` names what the finding is about in the snapshot's own vocabulary — a layer name,
+    a text's content — because a snapshot is a plain-data projection with no handles in it; a
+    finding about the whole drawing (the unit, the sheet) carries none.
+    """
+    return {
+        "rule": rule,
+        "severity": severity,
+        "detail": detail,
+        "entities": list(entities or []),
+    }
+
+
+def _scale(snapshot: dict[str, Any]) -> tuple[int, int, bool]:
+    """``(numerator, denominator, assumed)`` for the snapshot's sheet.
+
+    Read through :func:`acadmcp.sheet.resolve_scale`, the one parser that also wrote the ratio, so
+    a ratio this accepts is a ratio ``drawing_sheet`` accepts. A sheet with no readable scale falls
+    back to :data:`DEFAULT_SCALE` and says so, rather than refusing to check heights at all.
+    """
+    block = snapshot.get("sheet")
+    label = str(block.get("scale") or "").strip() if isinstance(block, dict) else ""
+    if label:
+        with contextlib.suppress(ValueError):
+            numerator, denominator = sheet.resolve_scale(label)
+            return int(numerator), int(denominator), False
+    numerator, denominator = sheet.resolve_scale(DEFAULT_SCALE)
+    return int(numerator), int(denominator), True
+
+
+def _check_units(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    """Rule 1. Case- and padding-insensitive, because AutoCAD reports INSUNITS as ``"mm"`` and a
+    caller relaying it should not be failed for a stray space."""
+    units = snapshot.get("units")
+    if str(units or "").strip().lower() == "mm":
+        return []
+    return [_finding(RULE_UNITS, "error", {"units": units, "expected": "mm"})]
+
+
+def _check_layers(standard: Standard, snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    """Rule 2. A layer an entity is on that the standard does not name is a warning.
+
+    Only the *names* are compared — ``Standard.layers`` carries each row's colour, linetype and
+    lineweight too, but those describe the layer *table's* definition, which this snapshot does
+    not hold (see the module docstring: the ``layer_table()`` read is deferred). Names are
+    upper-cased the way AutoCAD stores them, so ``a-wall`` lands on the ``A-WALL`` row.
+    """
+    known = standard.layers
+    issues: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in snapshot.get("layers_in_use") or []:
+        name = str(raw or "").strip()
+        if not name:
+            continue
+        key = name.upper()
+        # One finding per layer, however many entities are on it, and a name the standard knows
+        # regardless of case is not a finding at all.
+        if key in known or key in seen:
+            continue
+        seen.add(key)
+        issues.append(_finding(RULE_LAYER, "warning", {"layer": name}, [name]))
+    return issues
+
+
+def _check_text_heights(
+    standard: Standard,
+    snapshot: dict[str, Any],
+    numerator: int,
+    denominator: int,
+    assumed: bool,
+) -> list[dict[str, Any]]:
+    """Rule 3, the one AutoCAD's CHECKSTANDARDS runs: a text's paper height is off the series.
+
+    A paper height is the model height times the plot scale — ``height * numerator / denominator``,
+    which for the ordinary ``1:N`` plan is the model height over N. Text on the sheet's layers (or
+    a text the snapshot marks ``paper``) is already at 1:1 in paper millimetres and is not scaled.
+    A blank text is skipped, and so is one whose height cannot be read: a check that cannot be sure
+    says nothing, the rule ``critique`` keeps, rather than making a verdict on a guess.
+    """
+    series = standard.text_heights
+    if not series:
+        # A standard that transcribes no series has no opinion on heights; flagging every text
+        # against an empty table would be a false verdict, which is worse than a missing one.
+        return []
+    raw_texts = snapshot.get("texts")
+    texts = raw_texts if isinstance(raw_texts, (list, tuple)) else []
+    issues: list[dict[str, Any]] = []
+    for text in texts:
+        if not isinstance(text, dict):
+            continue
+        content = text.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue  # nothing to size, so nothing to find
+        height = _number(text.get("height"))
+        if height is None or height <= 0:
+            continue
+        layer = str(text.get("layer") or "")
+        on_paper = bool(text.get("paper")) or layer.strip().upper() in SHEET_LAYERS
+        paper = height if on_paper else height * numerator / denominator
+        if any(abs(nominal - paper) <= HEIGHT_TOLERANCE for nominal in series):
+            continue
+        # The nearest nominal, ties to the smaller — a caller wants the number to move to, and a
+        # tie is arbitrary, so it is broken the same way every time.
+        nearest = min(series, key=lambda nominal: (abs(nominal - paper), nominal))
+        detail: dict[str, Any] = {
+            "height_mm": height,
+            "paper_height_mm": round(paper, 4),
+            "layer": layer,
+            "content": content,
+            "nearest_nominal_mm": nearest,
+        }
+        if assumed:
+            detail["assumed_scale"] = DEFAULT_SCALE
+        issues.append(_finding(RULE_TEXT_HEIGHT, "error", detail, [content]))
+    return issues
+
+
+def _title_fields(block: dict[str, Any]) -> dict[str, Any] | None:
+    """The title block's own fields, under whichever name the snapshot gave them, or None."""
+    for key in _TITLE_FIELDS_KEYS:
+        value = block.get(key)
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def _check_sheet(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    """Rule 4. A drawing with no sheet warns; a sheet whose title block states no 比例 errors.
+
+    When a snapshot gives the title block's fields, they are authoritative: a sheet carrying a
+    ``scale`` but a block without 比例 still fails, because the block is what a person reads off
+    the paper. When it gives no fields, the sheet's own ``scale`` is the evidence that 比例 was
+    written — which is how ``drawing_sheet`` records it and ``be.info()["sheet"]`` reports it.
+    """
+    block = snapshot.get("sheet")
+    if not isinstance(block, dict) or not block:
+        return [_finding(RULE_NO_SHEET, "warning", {"sheet": {}})]
+    fields = _title_fields(block)
+    if fields is not None:
+        stated = any(str(key).strip() in _SCALE_FIELD_KEYS for key in fields)
+    else:
+        stated = bool(str(block.get("scale") or "").strip())
+    if stated:
+        return []
+    return [
+        _finding(
+            RULE_SHEET_SCALE,
+            "error",
+            {
+                "paper": block.get("paper"),
+                "title_fields": dict(fields) if fields is not None else {},
+            },
+        )
+    ]
+
+
+def check(standard: Standard, snapshot: dict) -> list[dict[str, Any]]:
+    """Every conformance rule, over a snapshot of the drawing.
+
+    ``snapshot`` is what the calling tool gathers, as plain data in the shape the journal and the
+    backends already report, so this stays a pure function and needs no CAD import::
+
+        {
+          "units": "mm",                          # from be.info()
+          "layers_in_use": ["A-WALL", ...],       # the layers entities are actually on
+          "texts": [{"height": 350.0, "layer": "A-ROOM-NAME", "content": "生产车间"}, ...],
+          "sheet": {"scale": "1:100", ...},       # be.info()["sheet"], {} when there is none
+        }
+
+    Returns a list of ``{"rule", "severity", "detail", "entities"}`` — the shape
+    :mod:`acadmcp.critique` established — with ``severity`` either ``"error"`` (the drawing
+    breaks the standard) or ``"warning"`` (a reviewer should look). It never raises on a bad
+    snapshot and never draws: an unreadable row is skipped, a value it cannot judge is left
+    unchecked, and the caller counts the findings.
+
+    ``standard`` is the standard to check against; ``None`` is a caller mistake and is refused by
+    name — there is nothing to check against — so gather it with :func:`in_force` and handle its
+    ``None`` before calling.
+    """
+    if not isinstance(standard, Standard):
+        raise ValueError(
+            "check needs a Standard to check against; none was loaded — read "
+            "standards.in_force() and handle its None before calling"
+        )
+    data = snapshot if isinstance(snapshot, dict) else {}
+    numerator, denominator, assumed = _scale(data)
+    issues: list[dict[str, Any]] = []
+    issues.extend(_check_units(data))
+    issues.extend(_check_layers(standard, data))
+    issues.extend(_check_text_heights(standard, data, numerator, denominator, assumed))
+    issues.extend(_check_sheet(data))
+    return issues
+
+
 _current: Standards | None = None
 
 __all__ = [
+    "DEFAULT_SCALE",
     "DEFAULT_STANDARD",
+    "HEIGHT_TOLERANCE",
     "MAX_LINEWEIGHT_MM",
     "MIN_LINEWEIGHT_MM",
     "PACKAGE_STANDARDS",
+    "RULES",
+    "RULE_LAYER",
+    "RULE_NO_SHEET",
+    "RULE_SHEET_SCALE",
+    "RULE_TEXT_HEIGHT",
+    "RULE_UNITS",
+    "SHEET_LAYERS",
     "Standard",
     "Standards",
+    "check",
     "current",
     "describe",
     "get",

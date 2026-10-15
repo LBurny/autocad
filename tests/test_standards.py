@@ -479,3 +479,342 @@ def test_settings_reset_forgets_the_standard_as_well():
     settings.reset()
 
     assert standards.in_force("gbt50001").layers["A-WALL"][0] == 2, "back to the package's row"
+
+
+# ---------------------------------------------------------------------------
+# Phase B: check() — the conformance checker
+# ---------------------------------------------------------------------------
+#
+# The checker is pure over a *snapshot* of the drawing, so every case below is plain data and
+# no AutoCAD is involved. Each rule gets its own failing test first: units, the layers in use,
+# the text heights (the rule AutoCAD's own CHECKSTANDARDS runs), and the sheet.
+
+GB_SERIES = (2.5, 3.5, 5.0, 7.0, 10.0, 14.0, 20.0)
+
+
+def _heights(*values) -> dict:
+    return {str(value): {"height": value, "source": "test series"} for value in values}
+
+
+def _checking_standard(**tables) -> standards.Standard:
+    return standards.Standard(name="office", label="office", tables=tables)
+
+
+def _snapshot(**over) -> dict:
+    base = {"units": "mm", "layers_in_use": [], "texts": [], "sheet": {"scale": "1:100"}}
+    base.update(over)
+    return base
+
+
+def _by_rule(issues: list[dict], rule: str) -> list[dict]:
+    return [issue for issue in issues if issue["rule"] == rule]
+
+
+def _one(issues: list[dict], rule: str) -> dict:
+    found = _by_rule(issues, rule)
+    assert len(found) == 1, f"expected exactly one {rule!r} issue, got {issues}"
+    return found[0]
+
+
+# --- the shape of a finding -------------------------------------------------
+
+
+def test_every_issue_carries_exactly_the_four_documented_keys():
+    std = _checking_standard(layers={"A-WALL": _row(2)}, text_heights=_heights(*GB_SERIES))
+    snapshot = _snapshot(
+        units="m",
+        layers_in_use=["MY-LAYER"],
+        texts=[{"height": 260.0, "layer": "A-ANNO", "content": "注"}],
+        sheet={},
+    )
+
+    issues = standards.check(std, snapshot)
+
+    assert issues, "this snapshot breaks every rule, so it must produce findings"
+    for issue in issues:
+        assert set(issue) == {"rule", "severity", "detail", "entities"}
+        assert issue["severity"] in ("error", "warning")
+        assert isinstance(issue["entities"], list)
+        json.dumps(issue), "a finding travels to a client as JSON"
+
+
+def test_the_declared_rule_codes_are_the_ones_produced():
+    std = _checking_standard(layers={"A-WALL": _row(2)}, text_heights=_heights(*GB_SERIES))
+    breaking = _snapshot(
+        units="m",
+        layers_in_use=["MY-LAYER"],
+        texts=[{"height": 260.0, "layer": "A-ANNO", "content": "注"}],
+        sheet={"paper": "A3"},  # a sheet with no scale
+    )
+
+    produced = {issue["rule"] for issue in standards.check(std, breaking)}
+    produced |= {issue["rule"] for issue in standards.check(std, _snapshot(sheet={}))}
+
+    assert produced == set(standards.RULES)
+    assert standards.RULES == (
+        "units_not_mm",
+        "layer_not_in_standard",
+        "text_height_off_series",
+        "no_sheet",
+        "sheet_without_scale",
+    )
+
+
+def test_check_tolerates_a_junk_snapshot_and_never_raises():
+    std = _checking_standard()
+
+    # Missing keys, a None snapshot, a string where a list belongs: none of it may raise, the
+    # rule the journal reader and the catalogue loader keep.
+    assert standards.check(std, {}) is not None
+    assert standards.check(std, {"layers_in_use": "A-WALL", "texts": None}) is not None
+    assert standards.check(std, "not a snapshot") is not None
+
+
+def test_check_refuses_a_missing_standard_by_name():
+    # No standard loaded is a caller mistake, not a finding: there is nothing to check against.
+    with pytest.raises(ValueError, match="Standard"):
+        standards.check(None, _snapshot())
+
+
+# --- rule 1: units ----------------------------------------------------------
+
+
+def test_mm_units_are_clean_and_anything_else_is_an_error():
+    std = _checking_standard()
+
+    assert _by_rule(standards.check(std, _snapshot(units="mm")), "units_not_mm") == []
+
+    issue = _one(standards.check(std, _snapshot(units="m")), "units_not_mm")
+    assert issue["severity"] == "error"
+    assert issue["detail"]["units"] == "m"
+    assert issue["detail"]["expected"] == "mm"
+
+
+def test_mm_is_matched_regardless_of_case_and_padding():
+    std = _checking_standard()
+
+    assert _by_rule(standards.check(std, _snapshot(units=" MM ")), "units_not_mm") == []
+
+
+# --- rule 2: the layers in use ----------------------------------------------
+
+
+def test_a_layer_outside_the_standard_warns():
+    std = _checking_standard(layers={"A-WALL": _row(2), "A-DOOR": _row(4)})
+
+    issue = _one(
+        standards.check(std, _snapshot(layers_in_use=["A-WALL", "MY-LAYER", "a-door"])),
+        "layer_not_in_standard",
+    )
+
+    assert issue["severity"] == "warning"
+    assert issue["detail"]["layer"] == "MY-LAYER"
+    assert issue["entities"] == ["MY-LAYER"]
+
+
+def test_the_standards_own_layers_are_not_reported():
+    std = _checking_standard(layers={"A-WALL": _row(2)})
+
+    # A project that spells the layer the way AutoCAD shows it still lands on its row.
+    assert standards.check(std, _snapshot(layers_in_use=["A-WALL", "a-wall"])) == []
+
+
+def test_an_unknown_layer_is_reported_once_however_often_it_appears():
+    std = _checking_standard(layers={"A-WALL": _row(2)})
+
+    issues = standards.check(std, _snapshot(layers_in_use=["MY-LAYER", "my-layer"]))
+
+    assert len(_by_rule(issues, "layer_not_in_standard")) == 1
+
+
+# --- rule 3: text heights ---------------------------------------------------
+
+
+def test_a_text_height_off_the_series_is_an_error_naming_the_nearest():
+    std = _checking_standard(text_heights=_heights(*GB_SERIES))
+
+    issue = _one(
+        standards.check(
+            std,
+            _snapshot(texts=[{"height": 260.0, "layer": "A-ROOM-AREA", "content": "会议室"}]),
+        ),
+        "text_height_off_series",
+    )
+
+    assert issue["severity"] == "error"
+    assert issue["detail"]["paper_height_mm"] == 2.6
+    assert issue["detail"]["nearest_nominal_mm"] == 2.5
+    assert issue["entities"] == ["会议室"]
+
+
+def test_a_text_height_on_the_series_is_clean():
+    std = _checking_standard(text_heights=_heights(*GB_SERIES))
+
+    for height in (250.0, 350.0, 500.0):  # 2.5 / 3.5 / 5.0 mm at 1:100
+        issues = standards.check(
+            std, _snapshot(texts=[{"height": height, "layer": "A-ROOM-NAME", "content": "X"}])
+        )
+        assert _by_rule(issues, "text_height_off_series") == [], height
+
+
+def test_the_sheet_scale_sets_the_paper_height():
+    std = _checking_standard(text_heights=_heights(*GB_SERIES))
+    text = [{"height": 175.0, "layer": "A-ANNO", "content": "注"}]
+
+    clean = standards.check(std, _snapshot(texts=text, sheet={"scale": "1:50"}))
+    assert _by_rule(clean, "text_height_off_series") == []  # 175 / 50 = 3.5 mm
+
+    off = standards.check(std, _snapshot(texts=text, sheet={"scale": "1:100"}))
+    issue = _one(off, "text_height_off_series")
+    assert issue["detail"]["paper_height_mm"] == 1.75
+
+
+def test_a_blank_text_is_skipped():
+    std = _checking_standard(text_heights=_heights(*GB_SERIES))
+    texts = [
+        {"height": 260.0, "layer": "A-ANNO", "content": "   "},
+        {"height": 260.0, "layer": "A-ANNO", "content": ""},
+    ]
+
+    assert _by_rule(standards.check(std, _snapshot(texts=texts)), "text_height_off_series") == []
+
+
+def test_an_unreadable_text_height_is_skipped_not_guessed():
+    std = _checking_standard(text_heights=_heights(*GB_SERIES))
+    texts = [
+        {"height": None, "layer": "A-ANNO", "content": "a"},
+        {"height": "tall", "layer": "A-ANNO", "content": "b"},
+        {"layer": "A-ANNO", "content": "c"},
+        {"height": 0, "layer": "A-ANNO", "content": "d"},
+    ]
+
+    assert _by_rule(standards.check(std, _snapshot(texts=texts)), "text_height_off_series") == []
+
+
+def test_without_a_sheet_the_assumed_scale_is_named_in_the_finding():
+    std = _checking_standard(text_heights=_heights(*GB_SERIES))
+
+    issue = _one(
+        standards.check(
+            std,
+            _snapshot(texts=[{"height": 260.0, "layer": "A-ANNO", "content": "注"}], sheet={}),
+        ),
+        "text_height_off_series",
+    )
+
+    assert issue["detail"]["assumed_scale"] == "1:100"
+    # The same text at a height the assumed 1:100 does hold is clean, so the assumption is a
+    # stated denominator, not a licence to flag everything.
+    assert (
+        _by_rule(
+            standards.check(
+                std,
+                _snapshot(texts=[{"height": 250.0, "layer": "A-ANNO", "content": "注"}], sheet={}),
+            ),
+            "text_height_off_series",
+        )
+        == []
+    )
+
+
+def test_a_standard_with_no_text_height_series_says_nothing_about_heights():
+    std = _checking_standard()  # no text_heights table transcribed
+
+    issue = standards.check(
+        std, _snapshot(texts=[{"height": 260.0, "layer": "A-ANNO", "content": "注"}])
+    )
+
+    assert _by_rule(issue, "text_height_off_series") == []
+
+
+def test_the_sheets_own_text_is_paper_and_is_not_divided_by_the_scale():
+    std = _checking_standard(layers={"A-SHEET-TEXT": _row(7)}, text_heights=_heights(*GB_SERIES))
+
+    # A title-block field is drawn at 1:1 in paper mm: 5.0 is 5.0, not 0.05 — otherwise every
+    # sheeted drawing would carry a false error on the standard's own field.
+    texts = [{"height": 5.0, "layer": "A-SHEET-TEXT", "content": "比例 1:100"}]
+
+    assert _by_rule(standards.check(std, _snapshot(texts=texts)), "text_height_off_series") == []
+
+
+def test_a_text_flagged_paper_is_measured_at_one_to_one():
+    std = _checking_standard(text_heights=_heights(*GB_SERIES))
+    texts = [{"height": 5.0, "layer": "A-ANNO", "content": "x", "paper": True}]
+
+    assert _by_rule(standards.check(std, _snapshot(texts=texts)), "text_height_off_series") == []
+
+
+# --- rule 4: the sheet ------------------------------------------------------
+
+
+def test_a_drawing_with_no_sheet_warns():
+    std = _checking_standard()
+
+    issue = _one(standards.check(std, _snapshot(sheet={})), "no_sheet")
+
+    assert issue["severity"] == "warning"
+
+
+def test_a_sheet_stating_its_scale_is_clean():
+    std = _checking_standard()
+    sheet = {"paper": "A3", "orientation": "landscape", "scale": "1:100"}
+
+    assert _by_rule(standards.check(std, _snapshot(sheet=sheet)), "sheet_without_scale") == []
+
+
+def test_a_sheet_without_a_scale_is_an_error():
+    std = _checking_standard()
+
+    issue = _one(
+        standards.check(std, _snapshot(sheet={"paper": "A3", "orientation": "landscape"})),
+        "sheet_without_scale",
+    )
+
+    assert issue["severity"] == "error"
+
+
+def test_a_title_block_without_the_scale_field_is_an_error():
+    std = _checking_standard()
+    sheet = {"scale": "1:100", "title_fields": {"图名": "一层平面", "图号": "建施-01"}}
+
+    issue = _one(standards.check(std, _snapshot(sheet=sheet)), "sheet_without_scale")
+
+    assert issue["severity"] == "error"
+
+
+def test_a_title_block_stating_the_scale_is_clean():
+    std = _checking_standard()
+    sheet = {"scale": "1:100", "title_fields": {"图名": "一层平面", "比例": "1:100"}}
+
+    assert _by_rule(standards.check(std, _snapshot(sheet=sheet)), "sheet_without_scale") == []
+
+
+# --- the whole thing against the shipped data -------------------------------
+
+
+def test_a_conforming_drawing_reports_no_issues():
+    std = standards.current().get("gbt50001")
+    snapshot = _snapshot(
+        layers_in_use=["A-WALL", "A-ROOM-NAME", "A-DIM"],
+        texts=[
+            {"height": 250.0, "layer": "A-ROOM-AREA", "content": "办公室"},
+            {"height": 350.0, "layer": "A-ROOM-NAME", "content": "生产车间"},
+        ],
+        sheet={"paper": "A3", "orientation": "landscape", "scale": "1:100"},
+    )
+
+    assert standards.check(std, snapshot) == []
+
+
+def test_the_shipped_standard_flags_a_known_bad_height():
+    std = standards.current().get("gbt50001")
+
+    # layers.H_TEXT is 300 mm, which at 1:100 is 3.0 mm — off GB/T 50001's nominal series.
+    issue = _one(
+        standards.check(
+            std, _snapshot(texts=[{"height": 300.0, "layer": "A-ANNO", "content": "注"}])
+        ),
+        "text_height_off_series",
+    )
+
+    assert issue["detail"]["nearest_nominal_mm"] == 2.5
