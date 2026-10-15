@@ -75,6 +75,40 @@ def test_annotations_match_behaviour():
         assert t.annotations.open_world_hint is False, name
 
 
+def test_unknown_arguments_are_rejected():
+    """A misspelt parameter must fail validation, not be dropped silently.
+
+    The SDK builds the input models with extra="ignore"; server.py flips them
+    to forbid. A stale server answering a newer client is exactly the silent
+    failure this prevents.
+    """
+    tool = _tools()["drawing_status"]
+    with pytest.raises(Exception, match="bogus"):
+        tool.fn_metadata.validate_arguments({"bogus": 1})
+    tool.fn_metadata.validate_arguments({})  # a valid call still passes
+
+
+def test_backend_error_is_a_tool_error():
+    """The SDK masks every non-ToolError behind 'Error executing tool <name>'."""
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    from acadmcp.backends.base import BackendError
+
+    assert issubclass(BackendError, ToolError)
+
+
+def test_geometry_value_errors_keep_their_message(fresh_dxf):
+    """Bad input raises ValueError deep in geom/ops; the SDK would mask it
+    behind 'Error executing tool <name>' if server.py did not re-raise it as a
+    ToolError. The message is the only thing the model can correct itself
+    with, so it must survive."""
+    from acadmcp.backends.base import BackendError
+
+    draw_wall = _tools()["draw_wall"].fn  # the guarded wrapper, not the bare def
+    with pytest.raises(BackendError, match="at least two distinct points"):
+        draw_wall(points=[[0, 0]])
+
+
 @pytest.fixture
 def fresh_dxf():
     server._state.reset(server.make_backend("dxf"), "dxf")
@@ -93,6 +127,16 @@ def test_listing_entities_reports_has_more(fresh_dxf):
 
     whole = server.listing_entities(limit=50)
     assert whole["count"] == 3 and whole["has_more"] is False
+
+
+def test_listing_entities_tells_an_unknown_layer_from_an_empty_one(fresh_dxf):
+    server.layer_create("X-EMPTY")
+
+    empty = server.listing_entities(layer="X-EMPTY")
+    assert empty["count"] == 0 and empty["layer_known"] is True
+
+    typo = server.listing_entities(layer="X-EMTPY")
+    assert typo["count"] == 0 and typo["layer_known"] is False
 
 
 _BLOCKS = [{"name": f"BLOCK-{i}"} for i in range(4)]

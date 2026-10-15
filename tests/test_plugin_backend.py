@@ -46,7 +46,15 @@ class FakeClient:
                 if s["index"] > payload["index"] and s["state"] == "applied":
                     s["state"] = "planned"
             return {"result": {"ok": True, "message": "", "touched": []}}
-        if method in ("run_next", "run_to", "ensure_layer", "set_units_mm", "status", "info", "entities"):
+        if method in (
+            "run_next",
+            "run_to",
+            "ensure_layer",
+            "set_units_mm",
+            "status",
+            "info",
+            "entities",
+        ):
             return {"result": {"ok": True}, "entities": [], "ok": True}
         raise AssertionError(f"unexpected call {method}")
 

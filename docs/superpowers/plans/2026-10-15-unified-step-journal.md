@@ -348,7 +348,11 @@ def test_undo_erases_and_redo_redraws():
     report = be.undo(1)
     assert report["erased"] == 1 and be.drawn[1] is None
     report = be.redo(1)
-    assert report["redrawn"] == 1 and be.drawn[1] == {"kind": "circle", "points": [5.0, 5.0], "radius": 10.0}
+    assert report["redrawn"] == 1 and be.drawn[1] == {
+        "kind": "circle",
+        "points": [5.0, 5.0],
+        "radius": 10.0,
+    }
 
 
 def test_steps_do_not_nest():
@@ -462,7 +466,9 @@ class RecordingBackend:
                 "never be rolled back meaningfully"
             )
         handles = self._apply(list(self._pending))
-        record = self.journal.append(self._op, self._label or "", self._params, self._pending, handles)
+        record = self.journal.append(
+            self._op, self._label or "", self._params, self._pending, handles
+        )
         self._reset()
         return record
 
@@ -592,32 +598,63 @@ def _apply_primitive(self, prim: dict[str, Any]) -> Any:
     pts = unflatten_points(prim.get("points", []))
     kind = prim["kind"]
     if kind == "line":
-        return self._draw_line(pts[0], pts[1], layer=prim.get("layer", "0"), linetype=prim.get("linetype"))
+        return self._draw_line(
+            pts[0], pts[1], layer=prim.get("layer", "0"), linetype=prim.get("linetype")
+        )
     if kind == "polyline":
-        return self._draw_polyline(pts, closed=bool(prim.get("closed", False)),
-                                   layer=prim.get("layer", "0"), linetype=prim.get("linetype"))
+        return self._draw_polyline(
+            pts,
+            closed=bool(prim.get("closed", False)),
+            layer=prim.get("layer", "0"),
+            linetype=prim.get("linetype"),
+        )
     if kind == "circle":
         return self._draw_circle(pts[0], float(prim["radius"]), layer=prim.get("layer", "0"))
     if kind == "arc":
-        return self._draw_arc(pts[0], float(prim["radius"]), float(prim["start_angle"]),
-                              float(prim["end_angle"]), layer=prim.get("layer", "0"))
+        return self._draw_arc(
+            pts[0],
+            float(prim["radius"]),
+            float(prim["start_angle"]),
+            float(prim["end_angle"]),
+            layer=prim.get("layer", "0"),
+        )
     if kind == "text":
-        return self._draw_text(pts[0], str(prim["text"]), float(prim["height"]),
-                               layer=prim.get("layer", "0"), rotation=float(prim.get("rotation", 0.0)),
-                               align=str(prim.get("align", "left")))
+        return self._draw_text(
+            pts[0],
+            str(prim["text"]),
+            float(prim["height"]),
+            layer=prim.get("layer", "0"),
+            rotation=float(prim.get("rotation", 0.0)),
+            align=str(prim.get("align", "left")),
+        )
     if kind == "mtext":
-        return self._draw_mtext(pts[0], str(prim["text"]), float(prim["height"]),
-                                width=float(prim.get("width", 0.0)), layer=prim.get("layer", "0"),
-                                align=str(prim.get("align", "center")))
+        return self._draw_mtext(
+            pts[0],
+            str(prim["text"]),
+            float(prim["height"]),
+            width=float(prim.get("width", 0.0)),
+            layer=prim.get("layer", "0"),
+            align=str(prim.get("align", "center")),
+        )
     if kind == "hatch":
-        return self._draw_hatch(pts, str(prim.get("pattern", "ANSI31")),
-                                float(prim.get("scale", 1.0)), layer=prim.get("layer", "0"),
-                                angle=float(prim.get("angle", 0.0)), solid=bool(prim.get("solid", False)))
+        return self._draw_hatch(
+            pts,
+            str(prim.get("pattern", "ANSI31")),
+            float(prim.get("scale", 1.0)),
+            layer=prim.get("layer", "0"),
+            angle=float(prim.get("angle", 0.0)),
+            solid=bool(prim.get("solid", False)),
+        )
     if kind == "dimension":
         # text_height travels as 0.0 when unset; the drawer treats None as "default".
         height = float(prim.get("text_height") or 0.0) or None
-        return self._draw_linear_dimension(pts[0], pts[1], float(prim.get("offset", 0.0)),
-                                           layer=prim.get("layer", "0"), text_height=height)
+        return self._draw_linear_dimension(
+            pts[0],
+            pts[1],
+            float(prim.get("offset", 0.0)),
+            layer=prim.get("layer", "0"),
+            text_height=height,
+        )
     raise BackendError(
         f"the 'dxf' backend cannot apply primitive kind {kind!r}: it cannot read a "
         "library .dwg to copy a block definition from. Use backend='plugin'."
@@ -630,12 +667,13 @@ def _apply_primitive(self, prim: dict[str, Any]) -> Any:
 def _apply(self, primitives):
     return [self._apply_primitive(p).dxf.handle for p in primitives]
 
+
 def _erase(self, handles):
     erased = missing = 0
     for handle in handles:
         entity = self.doc.entitydb.get(handle)
         if entity is None or not entity.is_alive:
-            missing += 1   # a hand edit already removed it; count, don't fail
+            missing += 1  # a hand edit already removed it; count, don't fail
             continue
         self.msp.delete_entity(entity)
         erased += 1
@@ -800,7 +838,10 @@ def _write_journal(self) -> None:
     dictionary = self.doc.rootdict.get_required_dict(self.JOURNAL_DICT)
     xrecord = dictionary.get(self.JOURNAL_KEY) or dictionary.add_xrecord(self.JOURNAL_KEY)
     xrecord.tags = Tags(
-        [DXFTag(1, payload[i : i + self.JOURNAL_CHUNK]) for i in range(0, len(payload), self.JOURNAL_CHUNK)]
+        [
+            DXFTag(1, payload[i : i + self.JOURNAL_CHUNK])
+            for i in range(0, len(payload), self.JOURNAL_CHUNK)
+        ]
     )
 
 
@@ -867,7 +908,15 @@ class FakeClient:
                 if s["index"] > payload["index"] and s["state"] == "applied":
                     s["state"] = "planned"
             return {"result": {"ok": True, "message": "", "touched": []}}
-        if method in ("run_next", "run_to", "ensure_layer", "set_units_mm", "status", "info", "entities"):
+        if method in (
+            "run_next",
+            "run_to",
+            "ensure_layer",
+            "set_units_mm",
+            "status",
+            "info",
+            "entities",
+        ):
             return {"result": {"ok": True}, "entities": [], "ok": True}
         raise AssertionError(f"unexpected call {method}")
 ```
@@ -901,9 +950,13 @@ def undo(self, count: int = 1) -> dict[str, Any]:
     doomed = applied[-max(1, int(count)) :]
     response = self.client.call("rollback_to", index=doomed[0]["index"] - 1)
     return {
-        "undone": [{"index": s["index"], "op": s["op"], "label": s.get("label", "")} for s in reversed(doomed)],
+        "undone": [
+            {"index": s["index"], "op": s["op"], "label": s.get("label", "")}
+            for s in reversed(doomed)
+        ],
         "response": response.get("result", {}),
     }
+
 
 def redo(self, count: int = 1) -> dict[str, Any]:
     steps = self.client.call("get_steps", offset=0, limit=10000)["steps"]
@@ -913,14 +966,18 @@ def redo(self, count: int = 1) -> dict[str, Any]:
     chosen = planned[: max(1, int(count))]
     response = self.client.call("run_to", index=chosen[-1]["index"])
     return {
-        "redone": [{"index": s["index"], "op": s["op"], "label": s.get("label", "")} for s in chosen],
+        "redone": [
+            {"index": s["index"], "op": s["op"], "label": s.get("label", "")} for s in chosen
+        ],
         "response": response.get("result", {}),
     }
+
 
 def history(self) -> str:
     from ..steps import describe_steps
 
     return describe_steps(self.client.call("get_steps", offset=0, limit=10000)["steps"])
+
 
 def replay_step(self, record: StepRecord) -> dict[str, Any]:
     """Draw another journal's step here, as a real plugin step."""
@@ -988,9 +1045,7 @@ def test_drawing_undo_takes_back_only_the_last_call():
 
 
 def test_drawing_history_is_compact_text():
-    server.draw_room(
-        [[0, 0], [4000, 0], [4000, 3000], [0, 3000]], name="测试室"
-    )
+    server.draw_room([[0, 0], [4000, 0], [4000, 3000], [0, 3000]], name="测试室")
     out = server.drawing_history()
     assert out["ok"] and "draw_room" in out["rendered"] and "测试室" in out["rendered"]
 
@@ -1001,7 +1056,8 @@ def test_a_wrong_coordinate_costs_two_calls_not_a_redraw():
     server.drawing_undo()
     server.draw_wall([[5000, 0], [5000, 3000]], thickness=200)
     assert [s.op for s in server._state.backend.journal.steps] == [
-        "draw_wall", "draw_wall",
+        "draw_wall",
+        "draw_wall",
     ]
     assert server._state.backend.info()["entities"] == 8
 ```
@@ -1045,12 +1101,21 @@ Exemplar:
 def draw_wall(points, thickness=layers.WALL_THICKNESS, closed=False, hatch=False, layer="A-WALL"):
     """<unchanged docstring>"""
     pts = _pts(points)
-    params = {"points": pts, "thickness": float(thickness), "closed": closed,
-              "hatch": hatch, "layer": layer}
+    params = {
+        "points": pts,
+        "thickness": float(thickness),
+        "closed": closed,
+        "hatch": hatch,
+        "layer": layer,
+    }
     with _auto_step("draw_wall", params) as be:
         ops.draw_wall_run(be, pts, float(thickness), closed=closed, hatch=hatch, layer=layer)
-    return {"ok": True, "segments": len(pts) - 1, "thickness": float(thickness),
-            "length": round(geom.polyline_length(pts), 3)}
+    return {
+        "ok": True,
+        "segments": len(pts) - 1,
+        "thickness": float(thickness),
+        "length": round(geom.polyline_length(pts), 3),
+    }
 ```
 
 Do NOT wrap: `layer_create*`, `set_text_style`, `drawing_*` management, `listing_entities`, `plugin_*`, `step_*`, `place_*` (they self-step via `_placed`), `library_list`, `element_types`.

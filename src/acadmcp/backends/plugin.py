@@ -160,7 +160,13 @@ class PluginBackend(RecordingBackend):
         return self.client.call("zoom_extents")
 
     def entities(self, layer: str | None = None, limit: int = 200) -> list[dict]:
-        return self.client.call("entities", layer=layer, limit=limit)["entities"]
+        reply = self.client.call("entities", layer=layer, limit=limit)
+        if "entities" not in reply:
+            # A KeyError here would surface to the caller as a reasonless
+            # "Error executing tool listing_entities"; say what the plugin
+            # actually answered instead.
+            raise BackendError(f"plugin answered 'entities' without a list: {reply!r}")
+        return reply["entities"]
 
     # --- primitives: recorded, not drawn ------------------------------------
 

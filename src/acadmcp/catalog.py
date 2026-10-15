@@ -153,7 +153,9 @@ class Catalog:
 
         entries = payload.get("elements") if isinstance(payload, dict) else payload
         if not isinstance(entries, list):
-            self.skipped.append(f"{path}: expected a list of elements, under 'elements' or at the top")
+            self.skipped.append(
+                f"{path}: expected a list of elements, under 'elements' or at the top"
+            )
             return
 
         library = ""
@@ -204,7 +206,9 @@ class Catalog:
             if not element.source:
                 continue
             if element.source not in blocks:
-                problems.append(f"{key}: '{element.source}' was not read, so its block is unchecked")
+                problems.append(
+                    f"{key}: '{element.source}' was not read, so its block is unchecked"
+                )
             elif element.block not in blocks[element.source]:
                 problems.append(f"{key}: '{element.source}' has no block '{element.block}'")
         return problems
@@ -366,9 +370,7 @@ def positions_along(
     return points
 
 
-def positions_grid(
-    xs: list[float], ys: list[float]
-) -> list[tuple[float, float]]:
+def positions_grid(xs: list[float], ys: list[float]) -> list[tuple[float, float]]:
     """Every combination of the two lists — an axis grid, which is what a frame is."""
     return [(float(x), float(y)) for y in ys for x in xs]
 

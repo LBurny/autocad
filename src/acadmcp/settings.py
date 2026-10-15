@@ -116,8 +116,10 @@ def load(path: Path | None = None) -> Settings:
 
     return Settings(
         library=library,
-        catalogs=[str(Path(str(path)).parent / name) if not Path(name).is_absolute() else name
-                  for name in catalogs],
+        catalogs=[
+            str(Path(str(path)).parent / name) if not Path(name).is_absolute() else name
+            for name in catalogs
+        ],
         layers=layers,
         source=Path(path),
         skipped=skipped,

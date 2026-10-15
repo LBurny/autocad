@@ -88,3 +88,26 @@ def test_rect_corners_orders_them_around_the_ring():
 
 def test_dedupe_removes_repeats():
     assert geom.dedupe([(0, 0), (0, 0), (1, 1)]) == [(0.0, 0.0), (1.0, 1.0)]
+
+
+def test_ring_self_intersects_flags_a_bowtie():
+    bowtie = [(0, 0), (3000, 3000), (3000, 0), (0, 3000)]
+    assert geom.ring_self_intersects(bowtie)
+
+
+def test_ring_self_intersects_passes_simple_rings():
+    square = [(0, 0), (4000, 0), (4000, 3000), (0, 3000)]
+    l_shape = [(0, 0), (6000, 0), (6000, 3000), (3000, 3000), (3000, 1500), (0, 1500)]
+    triangle = [(0, 0), (1000, 0), (500, 800)]
+    assert not geom.ring_self_intersects(square)
+    assert not geom.ring_self_intersects(l_shape)
+    assert not geom.ring_self_intersects(triangle)
+    # A ring handed over with its first vertex repeated is the same ring.
+    assert not geom.ring_self_intersects([*square, square[0]])
+
+
+def test_ring_self_intersects_flags_a_ring_that_touches_itself():
+    # The last segment returns to a vertex lying on the first segment: no
+    # crossing, but no meaningful inside either.
+    touching = [(0, 0), (1000, 0), (1000, 1000), (500, 0)]
+    assert geom.ring_self_intersects(touching)

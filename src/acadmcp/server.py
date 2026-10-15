@@ -185,7 +185,12 @@ def drawing_help() -> dict[str, Any]:
 
 @mcp.tool(annotations=_READONLY)
 def drawing_status() -> dict[str, Any]:
-    """Report the active backend, document, entity count and layer list."""
+    """Report the active backend, document, entity count and layer list.
+
+    `entities` is what is in the drawing now; `ops` is a cumulative count of
+    draw calls since connect and does not go down on undo, so ops > entities
+    just means steps were taken back.
+    """
     be = _state.require()
     return _state.backend.info() if _state.backend else be.info()
 
@@ -194,14 +199,19 @@ def drawing_status() -> dict[str, Any]:
 def drawing_new(backend: str = "dxf", path: str | None = None) -> dict[str, Any]:
     """Start a new drawing on the chosen backend.
 
-    backend="dxf" builds a headless document (optionally at `path`);
-    backend="com" asks the running AutoCAD for a new drawing.
+    backend="dxf" builds a headless document (optionally at `path` — the file is
+    written on drawing_save, not read now); backend="com" asks the running
+    AutoCAD for a new drawing.
+
+    Starting a new drawing replaces the session's current one; when that one
+    had content, the reply carries a `note` saying so.
     """
+    dropped = _session_drawing()
     kind = backend.strip().lower()
     if kind == "com":
         be = make_backend("com", new_document=True)
     elif kind == "dxf":
-        be = make_backend("dxf", path=path)
+        be = make_backend("dxf", path=path, create=True)
     elif kind == "plugin":
         # The plugin draws into the AutoCAD drawing that is open: it cannot be told
         # to open a file the way the dxf backend can, so say that rather than ignore
@@ -216,15 +226,20 @@ def drawing_new(backend: str = "dxf", path: str | None = None) -> dict[str, Any]
         raise BackendError(f"unknown backend {backend!r}; expected 'dxf', 'com' or 'plugin'")
     _state.reset(be, kind)
     ops.setup_layers(be)
-    return {"ok": True, **be.info()}
+    return {"ok": True, **be.info(), **_switch_note(dropped)}
 
 
 @mcp.tool(annotations=_DESTRUCTIVE_IDEMPOTENT)
 def drawing_open(path: str) -> dict[str, Any]:
-    """Open an existing DXF file so further tools edit it."""
+    """Open an existing DXF file so further tools edit it.
+
+    Opening replaces the session's current drawing; when that one had content,
+    the reply carries a `note` saying so.
+    """
+    dropped = _session_drawing()
     be = make_backend("dxf", path=path)
     _state.reset(be, "dxf")
-    return {"ok": True, **be.info()}
+    return {"ok": True, **be.info(), **_switch_note(dropped)}
 
 
 @mcp.tool(annotations=_DESTRUCTIVE_IDEMPOTENT)
@@ -248,13 +263,19 @@ def acad_connect(
         raise BackendError(f"unknown mode {mode!r}; expected 'com' or 'plugin'")
     _state.reset(be, kind)
     ops.setup_layers(be)
-    out: dict[str, Any] = {"ok": True, **be.info()}
-    if dropped:
-        out["note"] = (
+    return {"ok": True, **be.info(), **_switch_note(dropped)}
+
+
+def _switch_note(dropped: str) -> dict[str, str]:
+    """The `note` a backend switch attaches when it discarded a drawing."""
+    if not dropped:
+        return {}
+    return {
+        "note": (
             f"this session was drawing {dropped}, which is now no longer the target; "
             "save it with drawing_save(path=...dxf) first if it is still wanted"
         )
-    return out
+    }
 
 
 def _session_drawing() -> str:
@@ -396,6 +417,7 @@ def drawing_replay(backend: str = "plugin", path: str | None = None) -> dict[str
             failed.append({"index": record.index, "op": record.op, "reason": str(exc)})
     if kind == "dxf":
         target.save(path)
+    dropped = _session_drawing()
     _state.reset(target, kind)
     return {
         "ok": True,
@@ -403,6 +425,7 @@ def drawing_replay(backend: str = "plugin", path: str | None = None) -> dict[str
         "replayed": len(applicable) - len(failed),
         "failed": failed,
         **({"path": path} if kind == "dxf" else {}),
+        **_switch_note(dropped),
     }
 
 
@@ -450,15 +473,24 @@ def listing_entities(layer: str | None = None, limit: int = 100) -> dict[str, An
     """List entities, optionally filtered to one layer.
 
     `has_more` tells you `limit` cut the list short; call again with a larger
-    limit for the rest.
+    limit for the rest. With a `layer` filter the answer also carries
+    `layer_known`: False means the layer name is not in the drawing at all,
+    which is how a typo is told apart from an empty layer.
     """
     be = _state.require()
+    if int(limit) < 1:
+        raise ValueError(f"limit must be at least 1, got {limit}")
     probe = be.entities(layer=layer, limit=int(limit) + 1)
-    return {
+    out: dict[str, Any] = {
         "count": min(len(probe), int(limit)),
         "has_more": len(probe) > int(limit),
         "entities": probe[: int(limit)],
     }
+    if layer is not None:
+        known = be.info().get("layers")
+        if known is not None:
+            out["layer_known"] = layer in known
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -547,6 +579,8 @@ def draw_circle(
 
     Angles are degrees, counter-clockwise from +X.
     """
+    if radius <= 0:
+        raise ValueError(f"a circle needs a positive radius, got {radius}")
     c = _pt(center)
     params = {
         "center": c,
@@ -591,11 +625,15 @@ def draw_wall(
     }
     with _auto_step("draw_wall", params) as be:
         ops.draw_wall_run(be, pts, float(thickness), closed=closed, hatch=hatch, layer=layer)
+    # A closed ring's closing edge is a segment too; len(pts) - 1 undercounts it,
+    # and the ring length is only a perimeter when the repeat leg is included.
+    ring = pts[:-1] if closed and geom.is_closed(pts) else pts
+    measured = [*ring, ring[0]] if closed else ring
     return {
         "ok": True,
-        "segments": len(pts) - 1,
+        "segments": len(measured) - 1,
         "thickness": float(thickness),
-        "length": round(geom.polyline_length(pts), 3),
+        "length": round(geom.polyline_length(measured), 3),
     }
 
 
@@ -618,6 +656,9 @@ def draw_wall_with_openings(
     are then mitred into each other. Drawing the envelope as four separate runs instead
     leaves a half-wall-thickness notch at every corner, because a run has two square-cut
     ends and each one lands on a corner.
+
+    The returned `symbols` counts every entity of every symbol, tag texts
+    included, so a tagged door counts more than an untagged one.
     """
     pts = _pts(points)
     params = {
@@ -649,7 +690,8 @@ def draw_room(
     `boundary` is the wall centreline ring as a list of points. Pass `bound_layer`
     (e.g. "A-ROOM-BOUND") to also draw the face the area is measured to. With
     walls=False only the label (and optional bound face) is drawn — for a room
-    whose walls exist already.
+    whose walls exist already. `thickness` must match the walls actually drawn:
+    the default 200 against a 120 mm partition ring silently shrinks the area.
     """
     pts = _pts(boundary)
     params = {
@@ -857,6 +899,8 @@ def draw_axis_grid(
     xs = [float(v) for v in x_positions]
     ys = [float(v) for v in y_positions]
     ex = [float(v) for v in extent]
+    if len(ex) != 4:
+        raise ValueError(f"extent needs [min_x, min_y, max_x, max_y], got {len(ex)} numbers")
     params = {
         "x_positions": xs,
         "y_positions": ys,
@@ -918,7 +962,11 @@ def add_leader_note(
     length: float = 1500.0,
     height: float = layers.H_TEXT,
 ) -> dict[str, Any]:
-    """Draw a one-segment leader from `anchor` with the note at its far end."""
+    """Draw a one-segment leader from `anchor` with the note at its far end.
+
+    Anchor on the boundary of what is being noted: an anchor inside a SOLID
+    hatch disappears under the fill.
+    """
     anchor_pt = _pt(anchor)
     params = {
         "anchor": anchor_pt,
@@ -944,7 +992,9 @@ def add_dimension(points: Any, offset: float = layers.DIM_OFFSET) -> dict[str, A
     """Add an aligned dimension, offset sideways by `offset` mm.
 
     Two points give a single dimension; three or more give a chain along the
-    run, plus the overall dimension.
+    run, plus the overall dimension. The dimension line lands on the LEFT of
+    the travel direction for a positive `offset` — so a south edge dimensioned
+    east-to-west needs a negative offset to fall outside the building.
     """
     pts = _pts(points)
     params = {"points": pts, "offset": float(offset)}
@@ -966,8 +1016,22 @@ def add_hatch(
     solid: bool = False,
     layer: str = "A-HATCH",
 ) -> dict[str, Any]:
-    """Hatch a closed boundary given as points (pattern, or solid fill)."""
+    """Hatch a closed boundary given as points (pattern, or solid fill).
+
+    `scale` multiplies the pattern's own base spacing, which differs per
+    pattern: ANSI31's base is ≈5 mm, so scale=40 gives the ≈130 mm pitch of a
+    wall poché, while AR-HBONE starts far larger and wants a single-digit
+    scale. `angle` is added to the pattern's own angle — ANSI31 is already
+    45°, so angle=45 makes it vertical. `pattern` must be one of the standard
+    acad.pat names (ANSI31…ANSI38, AR-*, NET, …); a misspelt name raises
+    rather than drawing a pattern that does not exist.
+    """
     pts = _pts(points)
+    if not solid and pattern.upper() not in layers.HATCH_PATTERNS:
+        raise ValueError(
+            f"unknown hatch pattern {pattern!r}; the standard names are "
+            "ANSI31…ANSI38, AR-*, NET, SOLID and the rest of acad.pat"
+        )
     params = {
         "points": pts,
         "pattern": pattern,
@@ -1243,6 +1307,8 @@ def library_list(source: str | None = None, limit: int = 500) -> dict[str, Any]:
     `has_more` tells you `limit` cut the list short; call again with a larger
     limit for the rest.
     """
+    if int(limit) < 1:
+        raise ValueError(f"limit must be at least 1, got {limit}")
     try:
         result = _client().call("blocks", source=source, limit=int(limit) + 1)
     except (PluginError, PluginUnavailable) as exc:
@@ -1436,6 +1502,53 @@ def _positions(start: Any, end: Any, count: int | None, spacing: float | None, i
     return catalog.positions_along(
         geom.xy(start), geom.xy(end), count=count, spacing=spacing, inset=float(inset)
     )
+
+
+def _strict_tool_arguments() -> None:
+    """Reject unknown tool arguments instead of dropping them silently.
+
+    The SDK builds each tool's pydantic input model with the default
+    extra="ignore", so a misspelt parameter is discarded and the tool runs on
+    defaults — a stale server answering a newer client fails exactly that way,
+    and the drawing comes out wrong with ok=True. Forbidding extras turns it
+    into a validation error that names the field.
+    """
+    for tool in mcp._tool_manager.list_tools():
+        model = getattr(getattr(tool, "fn_metadata", None), "arg_model", None)
+        if model is None:
+            continue
+        model.model_config["extra"] = "forbid"
+        model.model_rebuild(force=True)
+
+
+_strict_tool_arguments()
+
+
+def _surface_input_errors() -> None:
+    """Let a tool's ValueError reach the client with its message intact.
+
+    Bad geometry input — one distinct point for a wall, a room ring that
+    self-intersects — is raised by geom/ops as a plain ValueError, and the SDK
+    masks anything that is not a ToolError behind "Error executing tool
+    <name>", so the model never learns what was wrong with its own arguments.
+    Re-raising as BackendError (a ToolError) keeps the message after that
+    prefix — the SDK re-wraps even ToolError, so the tool name appears twice
+    on the wire, which is cosmetic and not worth fighting. Wrapped here, once,
+    rather than in 44 tool bodies.
+    """
+    for tool in mcp._tool_manager.list_tools():
+        fn = tool.fn
+
+        def guarded(*args: Any, _fn: Any = fn, **kwargs: Any) -> Any:
+            try:
+                return _fn(*args, **kwargs)
+            except ValueError as exc:
+                raise BackendError(str(exc)) from exc
+
+        tool.fn = guarded
+
+
+_surface_input_errors()
 
 
 def main() -> None:

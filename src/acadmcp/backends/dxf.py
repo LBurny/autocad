@@ -7,8 +7,8 @@ testable without a CAD installation.
 
 from __future__ import annotations
 
-import contextlib
 import json
+import math
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -19,6 +19,7 @@ from ezdxf.enums import TextEntityAlignment
 from ezdxf.lldxf.tags import Tags
 from ezdxf.lldxf.types import DXFTag
 
+from .. import layers
 from ..geom import Point, xy
 from ..journal import Journal
 from .base import BackendError
@@ -46,6 +47,160 @@ DEFAULT_MTEXT_WIDTH = 6000.0
 DIM_TEXT_HEIGHT = 250.0
 
 
+def _has_cjk(text: str) -> bool:
+    """Whether `text` contains a character ezdxf's glyph pipeline may mangle."""
+    return any(ord(ch) > 0x2E7F for ch in text)
+
+
+def _text_placement(entity: Any) -> tuple[str, float, float, str, float]:
+    """(align name, x, y, text, height) for a TEXT or MTEXT entity.
+
+    TEXT carries the alignment in its ``halign``/``valign``; MTEXT carries it
+    in its attachment point, which is a single enum covering both axes.
+    """
+    if entity.dxftype() == "MTEXT":
+        attach = entity.dxf.get("attachment_point", 1)
+        name = _MTEXT_ALIGN.get(attach, "TOP_LEFT")
+        point = entity.dxf.insert
+        return name, point.x, point.y, entity.plain_text(), float(entity.dxf.char_height)
+    align, p1, p2 = entity.get_placement()
+    name = align.name if hasattr(align, "name") else str(align)
+    if p2 is None or name in ("LEFT", "ALIGNED"):
+        x, y = p1.x, p1.y
+    else:
+        x, y = p2.x, p2.y
+    return name, x, y, entity.dxf.text, float(entity.dxf.height)
+
+
+#: MTEXT attachment point -> the same names TXT alignment uses.
+_MTEXT_ALIGN = {
+    1: "TOP_LEFT",
+    2: "TOP_CENTER",
+    3: "TOP_RIGHT",
+    4: "MIDDLE_LEFT",
+    5: "MIDDLE_CENTER",
+    6: "MIDDLE_RIGHT",
+    7: "BOTTOM_LEFT",
+    8: "BOTTOM_CENTER",
+    9: "BOTTOM_RIGHT",
+}
+
+
+def _text_frame(entity: Any) -> list[tuple[float, float]]:
+    """The box a text occupies in drawing units, for framing the render.
+
+    Approximate on purpose: it only has to be good enough that a title below
+    the plan is not cropped out of a full shot.
+    """
+    name, x, y, text, height = _text_placement(entity)
+    if entity.dxftype() == "MTEXT":
+        box_w, box_h = float(entity.dxf.width), float(entity.dxf.height)
+    else:
+        box_w, box_h = layers.text_width(text, height), height * 1.4
+    if name.endswith("LEFT"):
+        left = x
+    elif name.endswith("RIGHT"):
+        left = x - box_w
+    else:
+        left = x - box_w / 2.0
+    bottom = y - box_h if name.startswith("TOP") else y
+    rot = math.radians(entity.dxf.get("rotation", 0.0))
+    corners = ((0, 0), (box_w, 0), (box_w, box_h), (0, box_h))
+    if abs(rot) < 1e-9:
+        return [(left + dx, bottom + dy) for dx, dy in corners]
+    cos, sin = math.cos(rot), math.sin(rot)
+    return [(left + dx * cos - dy * sin, bottom + dx * sin + dy * cos) for dx, dy in corners]
+
+
+_H_ALIGN = {
+    "LEFT": "left",
+    "MIDDLE_LEFT": "left",
+    "BOTTOM_LEFT": "left",
+    "TOP_LEFT": "left",
+    "ALIGNED": "left",
+    "RIGHT": "right",
+    "MIDDLE_RIGHT": "right",
+    "BOTTOM_RIGHT": "right",
+    "TOP_RIGHT": "right",
+    "CENTER": "center",
+    "MIDDLE_CENTER": "center",
+    "BOTTOM_CENTER": "center",
+    "TOP_CENTER": "center",
+    "MIDDLE": "center",
+}
+
+_V_ALIGN = {
+    "LEFT": "baseline",
+    "RIGHT": "baseline",
+    "ALIGNED": "baseline",
+    "MIDDLE_LEFT": "center",
+    "MIDDLE_RIGHT": "center",
+    "MIDDLE_CENTER": "center",
+    "MIDDLE": "center",
+    "BOTTOM_LEFT": "bottom",
+    "BOTTOM_RIGHT": "bottom",
+    "BOTTOM_CENTER": "bottom",
+    "TOP_LEFT": "top",
+    "TOP_RIGHT": "top",
+    "TOP_CENTER": "top",
+    "CENTER": "baseline",
+}
+
+
+def _draw_cjk_texts(texts: Sequence[Any], ax: Any, color: str, points_per_unit: float) -> None:
+    """Draw the CJK texts matplotlib-natively, in the theme's foreground colour.
+
+    `points_per_unit` is points per *vertical* data unit; the axes fills the
+    figure, so a text of height h in drawing units is h * points_per_unit
+    points tall on the page — which is what keeps a caption the same size
+    relative to the plan as it was through the ezdxf path.
+    """
+    font = _cjk_font_properties()
+    if font is None:
+        # No CJK face installed at all: leaving the texts to the ezdxf path is
+        # better than drawing nothing.
+        return
+    for entity in texts:
+        name, x, y, text, height = _text_placement(entity)
+        if not text.strip() or height <= 0:
+            continue
+        size = height * points_per_unit
+        if not math.isfinite(size) or size < 0.1:
+            continue
+        ax.text(
+            x,
+            y,
+            text,
+            color=color,
+            fontsize=size,
+            rotation=entity.dxf.get("rotation", 0.0),
+            rotation_mode="anchor",
+            ha=_H_ALIGN.get(name, "center"),
+            va=_V_ALIGN.get(name, "center"),
+            fontproperties=font,
+            zorder=10,
+        )
+
+
+def _cjk_font_properties() -> Any:
+    """Matplotlib FontProperties for an installed CJK face, or None.
+
+    By file, not by family name: matplotlib's family lookup resolves a
+    collection like msyh.ttc to a face it then cannot pull a CJK glyph out of
+    ("failed to get glyph"), while an explicit file renders the same string
+    correctly.
+    """
+    import matplotlib.font_manager as fm
+
+    for name in ("Microsoft YaHei", "SimSun", "SimHei", "Noto Sans CJK SC", "Noto Sans SC"):
+        try:
+            path = fm.findfont(fm.FontProperties(family=name), fallback_to_default=False)
+        except Exception:  # noqa: BLE001 - not installed is the normal case
+            continue
+        return fm.FontProperties(fname=path)
+    return None
+
+
 class DxfBackend(RecordingBackend):
     """Renders into an in-memory DXF document that can be saved and reopened."""
 
@@ -60,16 +215,20 @@ class DxfBackend(RecordingBackend):
     #: so chunk by characters with margin.
     JOURNAL_CHUNK = 1900
 
-    def __init__(self, path: str | None = None, template: str = "R2010", **_: Any) -> None:
+    def __init__(
+        self, path: str | None = None, template: str = "R2010", create: bool = False, **_: Any
+    ) -> None:
         super().__init__()
         # Set before any read so a backend with no path still reports the field.
         self.journal_unreadable = ""
-        if path:
+        if path and not create:
             try:
                 self.doc = ezdxf.readfile(path)
             except OSError as exc:
                 raise BackendError(f"cannot open DXF {path!r}: {exc}") from exc
         else:
+            # create=True starts an empty document that *will live at* path: the
+            # file is written on save, not read now — that is drawing_new's job.
             self.doc = ezdxf.new(template, setup=True)
             self.doc.units = ezdxf.units.MM
         self.text_style = CJK_STYLE
@@ -175,6 +334,7 @@ class DxfBackend(RecordingBackend):
             matplotlib.rcParams["axes.unicode_minus"] = False
             import matplotlib.pyplot as plt
             from ezdxf.addons.drawing import Frontend, RenderContext
+            from ezdxf.addons.drawing.config import ColorPolicy, Configuration
             from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
         except ImportError as exc:  # pragma: no cover - optional dependency
             raise BackendError("screenshot needs matplotlib: uv sync --extra preview") from exc
@@ -185,11 +345,49 @@ class DxfBackend(RecordingBackend):
         ax = fig.add_axes((0.0, 0.0, 1.0, 1.0))
         ax.set_axis_off()
         context = RenderContext(self.doc)
-        # The drawing's own colours assume a light background, so on a dark theme
-        # everything is forced to the foreground colour instead.
-        with contextlib.suppress(Exception):
-            context.current_layout_properties.set_colors(fg)
-        Frontend(context, MatplotlibBackend(ax)).draw_layout(self.msp, finalize=True)
+        # Every entity is forced to the foreground colour: the layer palette is a
+        # drafting convention, not data, and either background makes half of it
+        # illegible (yellow on white, dark blue on dark). The render is for
+        # eyeballing, so legibility wins over colour fidelity.
+        policy = ColorPolicy.WHITE if theme == "dark" else ColorPolicy.BLACK
+        # pdsize=1 only pre-answers a question the Frontend would otherwise warn
+        # about ("relative point size is not supported") on every render.
+        config = Configuration(color_policy=policy, pdsize=1)
+
+        class _Frontend(Frontend):
+            """Defers CJK text instead of letting ezdxf tessellate its glyphs.
+
+            ezdxf converts every glyph to a filled path, and that pipeline
+            corrupts some CJK outlines — SimSun's 图, the commonest character
+            in a drawing title, comes out as an ink blob at some canvas scales
+            (the font, matplotlib and AutoCAD all render the same glyph fine).
+            CJK texts are drawn natively afterwards; everything else stays on
+            the ezdxf path.
+            """
+
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                self.cjk_texts: list[Any] = []
+
+            def draw_text_entity(self, entity: Any, properties: Any) -> None:
+                if _has_cjk(entity.dxf.get("text", "")):
+                    self.cjk_texts.append(entity)
+                    return
+                super().draw_text_entity(entity, properties)
+
+            def draw_mtext_entity(self, entity: Any, properties: Any) -> None:
+                if _has_cjk(entity.plain_text()):
+                    self.cjk_texts.append(entity)
+                    return
+                super().draw_mtext_entity(entity, properties)
+
+        frontend = _Frontend(context, MatplotlibBackend(ax), config=config)
+        frontend.draw_layout(self.msp, finalize=True)
+        if frontend.cjk_texts:
+            # The deferred texts must still count towards the framing, or a
+            # title sitting below the plan gets cropped out of a full shot.
+            ax.update_datalim([pt for ent in frontend.cjk_texts for pt in _text_frame(ent)])
+            ax.autoscale(True)
         if window:
             xs = [float(window[0]), float(window[2])]
             ys = [float(window[1]), float(window[3])]
@@ -213,6 +411,13 @@ class DxfBackend(RecordingBackend):
         fig.set_size_inches(fig_w / dpi, fig_h / dpi)
         fig.set_facecolor(bg)
         ax.set_facecolor(bg)
+        if frontend.cjk_texts:
+            # Only now is the data-to-points mapping known (it depends on the
+            # figure size and the limits), so the deferred texts can be sized.
+            # The axes fills the figure, so the whole vertical span is
+            # fig_h points tall and one drawing unit is that divided by span_y.
+            axis_points = (fig_h / dpi) * 72.0
+            _draw_cjk_texts(frontend.cjk_texts, ax, fg, points_per_unit=axis_points / span_y)
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(path, facecolor=bg, dpi=dpi)
         plt.close(fig)

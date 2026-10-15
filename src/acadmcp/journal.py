@@ -95,8 +95,7 @@ class Journal:
         # The op is always shown — it is what was drawn; a label is optional
         # human decoration on top of it, so the pair reads "draw_room 车间".
         return "\n".join(
-            f"{s.index:>3}  {s.state:<8} {f'{s.op} {s.label}'.strip()} "
-            f"({len(s.handles)} entities)"
+            f"{s.index:>3}  {s.state:<8} {f'{s.op} {s.label}'.strip()} ({len(s.handles)} entities)"
             for s in self._steps
         )
 

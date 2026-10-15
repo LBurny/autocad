@@ -92,7 +92,9 @@ class RecordingBackend:
         except BaseException:
             self._reset()
             raise
-        record = self.journal.append(self._op, self._label or "", self._params, self._pending, handles)
+        record = self.journal.append(
+            self._op, self._label or "", self._params, self._pending, handles
+        )
         self._reset()
         return record
 

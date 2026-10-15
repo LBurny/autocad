@@ -74,7 +74,11 @@ def test_undo_erases_and_redo_redraws():
     report = be.undo(1)
     assert report["erased"] == 1 and be.drawn[1] is None
     report = be.redo(1)
-    assert report["redrawn"] == 1 and be.drawn[-1] == {"kind": "circle", "points": [5.0, 5.0], "radius": 10.0}
+    assert report["redrawn"] == 1 and be.drawn[-1] == {
+        "kind": "circle",
+        "points": [5.0, 5.0],
+        "radius": 10.0,
+    }
 
 
 def test_steps_do_not_nest():

@@ -28,18 +28,30 @@ tests/                  test_geom.py, test_backends.py, test_journal.py, test_re
                         test_dxf_journal.py, test_plugin_backend.py, test_server_journal.py,
                         test_plugin_client.py, test_catalog.py, test_element_tools.py,
                         test_tool_surface.py (annotations, naming, pagination),
+                        test_dxf_create_render.py (drawing_new create, theme colours, glyphs),
+                        test_input_validation.py (caller mistakes surface as readable errors),
+                        sandbox_driver.py (fresh-server sandbox for live drawing exercises),
                         live_rpc_check.py (needs AutoCAD, so pytest never runs it)
 ```
 
 ## Commands
 
 ```bash
-uv run pytest -q                      # 179 tests, ~7s, no AutoCAD required
+uv run pytest -q                      # 207 tests, ~8s, no AutoCAD required
 uv run ruff check . --output-format concise
 uv run ruff format .
 uv run python examples/floor_plan_demo.py           # DXF + PNG into examples/output/
 uv run python examples/floor_plan_demo.py --com     # draw into a NEW AutoCAD drawing
+.venv/Scripts/python.exe tests/sandbox_driver.py path/to/script.py   # sandbox run, see below
 ```
+
+`sandbox_driver.py` is how a live drawing exercise stays honest: it launches a
+fresh `python -m acadmcp.server` from the current working tree for every run
+(never a stale server started before the last edit), prints the git HEAD and
+dirty-file count so a report can prove which code it tested, and gives each
+runner its own process so concurrent exercises never share drawing state. The
+script file defines `async def draw(tools)`; `await tools.call(tool, **args)`
+returns parsed JSON and raises `ToolFailed` with the server's full error text.
 
 The preview extra (matplotlib) is needed for any PNG output:
 `uv sync --extra preview`.
@@ -144,6 +156,9 @@ The split is deliberate; keep it when editing.
 - Room boundaries always mean the **wall centreline ring**; reported areas are
   measured to the inner face, so a 4000×3000 ring with 200 mm walls reports
   3.8×2.8 m. `geom.inner_boundary` is winding-independent — do not "fix" it.
+- Room names and area labels are **shrunk to fit the room** (`layers.fit_text_height`
+  against the ring's inner width), the same rule the equipment and shaft captions
+  follow. A fixed height ran a six-character 无障碍卫生间 through three rooms.
 - Layers follow GB/T 50001: `A-WALL`, `A-DOOR`, `A-WINDOW`, `A-ROOM-NAME`,
   `A-DIM`, `A-AXIS`, `A-STAIR`, `A-LIFT`, `A-SHAFT`.
 - Comments explain constraints the code cannot show. Match the existing density:
@@ -215,10 +230,54 @@ interactive desktop session.
 **PNG canvas sizing.** ezdxf's `finalize()` resets the figure to its own 6.3×4.8
 default, so `fig.set_size_inches` must run *after* `draw_layout`. The canvas is
 then fitted to the framed region's aspect rather than a fixed rectangle, because
-letterboxing a portrait plan shrinks it until labels are unreadable.
+letterboxing a portrait plan shrinks it until labels are unreadable. Both themes
+force every entity to the theme's foreground colour (`ColorPolicy.WHITE` /
+`BLACK`) — the layer palette is a drafting convention, and either background
+makes half of it illegible; the earlier `LayoutProperties.set_colors(fg)` call
+passed the colour into the *background* slot and never forced anything.
 
 **MCP SDK version.** `FastMCP` was renamed `MCPServer` in mcp 2.x. `server.py`
 imports whichever is present; keep that compat shim if you touch the imports.
+Two more SDK behaviours are load-bearing, both found by driving the tools as a
+client: the SDK masks any exception that is not a `ToolError` behind a bare
+`Error executing tool <name>`, which is why `BackendError` subclasses
+`ToolError` (the message is the recovery signal, so it must survive); and its
+input models default to `extra="ignore"`, so a misspelt parameter used to be
+dropped silently — `_strict_tool_arguments()` flips every tool's arg model to
+`forbid` at import, and a stale server answering a newer client now fails
+validation instead of drawing the wrong thing with `ok: true`.
+
+**Caller mistakes raise ValueError, never a raw KeyError/IndexError/ZeroDivisionError.**
+geom/ops validate at the boundary (enum values like `swing`/`axis`/`align`,
+opening dicts without `start`/`width`, a coincident dimension pair, a
+self-intersecting room ring — `geom.ring_self_intersects`, which the room tools
+run before labelling because a bowtie's centroid lands outside its walls), and
+`_surface_input_errors()` wraps every tool so the ValueError re-raises as
+`BackendError` and its message reaches the client. Only ValueError gets that
+conversion: anything else escaping a tool body is a programming bug, and it
+*should* come back masked and loud. Validations were all born from sandbox
+exercises — `tests/test_input_validation.py` pins each one.
+
+**The preview renders CJK natively, not through ezdxf's glyph pipeline.** ezdxf
+turns every glyph into a filled path (`draw_filled_paths(..., detect_holes=True)`),
+and that conversion corrupts some CJK outlines: SimSun's U+56FE (图) comes out as
+an ink blob — in drawing titles, the commonest character there is. The font,
+matplotlib's own text engine, and AutoCAD all render the same glyph correctly, and
+the corruption shows only at *some* canvas scales, which is why it survived a
+first round of testing. `DxfBackend.screenshot` therefore subclasses `Frontend`
+and keeps any text containing a character above U+2E7F out of the ezdxf path
+(`_has_cjk`), drawing those with matplotlib instead (`_draw_cjk_texts`). Two
+things that bit on the way: matplotlib resolves a font *collection* by family
+name to a face it then cannot pull a CJK glyph from ("failed to get glyph"), so
+the font is chosen by file (`_cjk_font_properties`); and the deferred texts still
+have to contribute to the data limits, or a title below the plan is cropped out
+of a full shot. The sizing is `points = height_mm * (figure_height_points /
+span_y)` — the axes fills the figure, so data units convert through the vertical
+span, not through the DPI. `tests/test_dxf_create_render.py` asserts the
+mechanism (CJK never reaches `Frontend.draw_text_entity`, ASCII still does),
+because a pixel threshold could not separate the blob from a stroke reliably:
+measured ink density of the densest title cell was 37-45% across scales and the
+two ranges overlapped.
 
 **Tests do not need AutoCAD.** They cover the DXF backend and `geom`. The one COM
 test skips itself when a live session is present. Do not add tests that require

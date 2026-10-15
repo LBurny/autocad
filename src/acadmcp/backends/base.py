@@ -12,9 +12,19 @@ from typing import Any, Protocol, runtime_checkable
 
 from ..geom import Point
 
+try:  # mcp 2.x renamed the package path; the class is the same.
+    from mcp.server.mcpserver.exceptions import ToolError as _ToolError
+except ImportError:  # pragma: no cover - mcp 1.x
+    from mcp.server.fastmcp.exceptions import ToolError as _ToolError
 
-class BackendError(RuntimeError):
-    """Raised when a backend cannot carry out a drawing request."""
+
+class BackendError(_ToolError, RuntimeError):
+    """Raised when a backend cannot carry out a drawing request.
+
+    Subclassing the SDK's ToolError keeps the message visible to the client:
+    the SDK masks any other exception behind a bare "Error executing tool
+    <name>", and for an AI caller the message is the recovery signal.
+    """
 
 
 @runtime_checkable

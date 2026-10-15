@@ -127,6 +127,20 @@ def draw_wall_with_openings(
     if closed and len(ring) < 3:
         raise ValueError("a closed wall run needs at least three corners")
 
+    for i, op in enumerate(openings):
+        if "start" not in op or "width" not in op:
+            raise ValueError(
+                f"opening {i} needs 'start' and 'width' (mm along the run); got {sorted(op)}"
+            )
+        kind = op.get("kind", "door")
+        if kind not in ("door", "window", "opening"):
+            raise ValueError(
+                f"opening {i}: kind must be 'door', 'window' or 'opening', got {kind!r}"
+            )
+        swing = op.get("swing", "left")
+        if swing not in ("left", "right"):
+            raise ValueError(f"opening {i}: swing must be 'left' or 'right', got {swing!r}")
+
     total = geom.polyline_length([*ring, ring[0]]) if closed else geom.polyline_length(ring)
     ops = sorted(openings, key=lambda o: float(o["start"]))
 
@@ -296,6 +310,10 @@ def draw_door(
     side), which is how you keep tags legible in a tight room cluster.
     """
     h = geom.xy(hinge)
+    if swing not in ("left", "right"):
+        raise ValueError(f"swing must be 'left' or 'right', got {swing!r}")
+    if width <= 0:
+        raise ValueError(f"a door needs a positive width, got {width}")
     made: list[Any] = []
 
     leaf_dir = rotation + open_angle if swing == "left" else rotation - open_angle
@@ -339,6 +357,8 @@ def draw_window(
     tag_layer: str = "A-ANNO",
 ) -> list[Any]:
     """A window symbol: four parallel lines spanning the opening, plus jambs."""
+    if width <= 0:
+        raise ValueError(f"a window needs a positive width, got {width}")
     s = geom.xy(start)
     n = geom.left_normal(geom.polar((0, 0), rotation, 1.0))
     end = geom.polar(s, rotation, width)
@@ -390,6 +410,22 @@ def draw_column(
 # ---------------------------------------------------------------------------
 
 
+def _check_room_ring(boundary: Sequence[Point]) -> None:
+    """Reject rings a label cannot be trusted on.
+
+    A two-point "room" has area zero, and a self-intersecting (bowtie) ring has
+    no meaningful inside — the area is winding-dependent and the centroid can
+    land outside the walls. Both used to be drawn without a word.
+    """
+    ring = [geom.xy(p) for p in boundary]
+    if geom.is_closed(ring):
+        ring = ring[:-1]
+    if len(geom.dedupe(ring)) < 3:
+        raise ValueError("a room boundary needs at least three distinct corners")
+    if geom.ring_self_intersects(ring):
+        raise ValueError("the room boundary crosses itself — the label could land outside the room")
+
+
 def draw_room(
     be: Backend,
     boundary: Sequence[Point],
@@ -412,6 +448,7 @@ def draw_room(
     `boundary` is the wall *centreline* ring; the area reported excludes the
     walls themselves.
     """
+    _check_room_ring(boundary)
     draw_wall_run(
         be,
         boundary,
@@ -435,26 +472,45 @@ def draw_room(
         # plan.
         be.polyline(inner, closed=True, layer=bound_layer)
 
-    if name:
-        be.text(c, name, layers.H_ROOM_NAME, layer=name_layer, align="center")
-    if name and show_area:
-        be.text(
-            (c[0], c[1] - layers.H_ROOM_NAME * 1.4),
-            f"{area_m2:.2f}{layers.AREA_UNIT}",
-            layers.H_ROOM_AREA,
-            layer=area_layer,
-            align="center",
-        )
-    elif show_area and not name:
-        be.text(
-            c,
-            f"{area_m2:.2f}{layers.AREA_UNIT}",
-            layers.H_ROOM_AREA,
-            layer=area_layer,
-            align="center",
-        )
-
+    _label_room(be, inner, name, area_m2, name_layer, area_layer, show_area, label_offset)
     return {"name": name, "area_m2": round(area_m2, 3), "centroid": c}
+
+
+def _label_room(
+    be: Backend,
+    inner: Sequence[Point],
+    name: str | None,
+    area_m2: float,
+    name_layer: str,
+    area_layer: str,
+    show_area: bool,
+    label_offset: float = 0.0,
+) -> None:
+    """The name and area, sized to sit inside the room they describe.
+
+    A fixed text height spills a long name over the walls of a small room — a
+    six-character 无障碍卫生间 across a 2 m toilet ran through three rooms. The
+    same shrink-to-fit the equipment and shaft captions use applies here.
+    """
+    x_lo, _, x_hi, _ = geom.bbox(inner)
+    room_w = x_hi - x_lo
+    c = geom.centroid(inner)
+    if label_offset:
+        c = (c[0], c[1] + label_offset)
+    name_h = layers.H_ROOM_NAME
+    if name:
+        name_h = layers.fit_text_height(name, room_w, layers.H_ROOM_NAME)
+        be.text(c, name, name_h, layer=name_layer, align="center")
+    if show_area:
+        area_text = f"{area_m2:.2f}{layers.AREA_UNIT}"
+        area_h = layers.fit_text_height(area_text, room_w, layers.H_ROOM_AREA)
+        be.text(
+            (c[0], c[1] - name_h * 1.4) if name else c,
+            area_text,
+            area_h,
+            layer=area_layer,
+            align="center",
+        )
 
 
 def add_room_label(
@@ -469,21 +525,13 @@ def add_room_label(
     bound_layer: str | None = None,
 ) -> dict[str, Any]:
     """Label an existing room ring without redrawing its walls."""
+    _check_room_ring(boundary)
     inner = geom.inner_boundary(boundary, thickness)
     c = geom.centroid(inner)
     area_m2 = geom.area(inner) / 1_000_000.0
     if bound_layer:
         be.polyline(inner, closed=True, layer=bound_layer)
-    if name:
-        be.text(c, name, layers.H_ROOM_NAME, layer=name_layer, align="center")
-    if show_area:
-        be.text(
-            (c[0], c[1] - layers.H_ROOM_NAME * 1.4),
-            f"{area_m2:.2f}{layers.AREA_UNIT}",
-            layers.H_ROOM_AREA,
-            layer=area_layer,
-            align="center",
-        )
+    _label_room(be, inner, name, area_m2, name_layer, area_layer, show_area)
     return {"name": name, "area_m2": round(area_m2, 3), "centroid": c}
 
 
@@ -522,6 +570,8 @@ def draw_stair(
     toward and `down_label` the end it starts from, both set to one side of the arrow
     where they read without covering it.
     """
+    if axis not in ("x", "y"):
+        raise ValueError(f"axis must be 'x' or 'y', got {axis!r}")
     ring = geom.rect_corners(corner1, corner2)
     made: list[Any] = [be.polyline(ring, closed=True, layer=border_layer or layer)]
     x1, y1, x2, y2 = geom.bbox(ring)
@@ -694,6 +744,12 @@ def draw_axis_grid(
     min_x, min_y, max_x, max_y = extent
     x_labels = list(x_labels) if x_labels else [str(i + 1) for i in range(len(x_positions))]
     y_labels = list(y_labels) if y_labels else [_alpha(i) for i in range(len(y_positions))]
+    if len(x_labels) != len(x_positions) or len(y_labels) != len(y_positions):
+        # zip would truncate silently, leaving the last axes unlabelled.
+        raise ValueError(
+            f"labels must match positions one-to-one: {len(x_positions)} x positions got "
+            f"{len(x_labels)} labels, {len(y_positions)} y positions got {len(y_labels)}"
+        )
 
     for pos, label in zip(x_positions, x_labels, strict=False):
         be.line((pos, min_y), (pos, max_y), layer=layer, linetype="CENTER")
@@ -730,6 +786,10 @@ def dimension_between(
     *,
     layer: str = "A-DIM",
 ) -> Any:
+    if geom.dist(p1, p2) < 1e-9:
+        # The dimension line's direction is the point span itself; a coincident
+        # pair divides by it and the backend answers ZeroDivisionError.
+        raise ValueError("a dimension needs two distinct points")
     return be.linear_dimension(p1, p2, offset, layer=layer, text_height=layers.H_DIM)
 
 
@@ -760,6 +820,8 @@ def annotate(
     layer: str = "A-ANNO",
     align: str = "left",
 ) -> Any:
+    if align not in ("left", "center", "right", "top-center"):
+        raise ValueError(f"align must be 'left', 'center', 'right' or 'top-center', got {align!r}")
     return be.text(pos, text, height, layer=layer, rotation=rotation, align=align)
 
 

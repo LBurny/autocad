@@ -141,9 +141,7 @@ def test_a_later_file_replaces_an_entry_of_the_same_key(tmp_path):
 
 
 def test_a_bare_variant_value_becomes_its_parameter(tmp_path):
-    path = _write(
-        tmp_path, {"elements": [{"key": "k", "block": "B", "variants": {"900": 900}}]}
-    )
+    path = _write(tmp_path, {"elements": [{"key": "k", "block": "B", "variants": {"900": 900}}]})
 
     variant = Catalog.load([path]).elements["k"].variants["900"]
 

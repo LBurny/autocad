@@ -154,6 +154,45 @@ def line_intersection(a1: Point, a2: Point, b1: Point, b2: Point) -> Vec | None:
     return (a1[0] + d1[0] * t, a1[1] + d1[1] * t)
 
 
+def ring_self_intersects(points: Sequence[Point]) -> bool:
+    """True when the closed ring crosses or touches itself.
+
+    A ring that fails this has no meaningful inside: the area depends on the
+    winding and the centroid can land outside the walls, so callers that label
+    rooms must reject it rather than draw a plausible-looking lie. Adjacent
+    segments share a vertex by construction and are not tested against each
+    other.
+    """
+    ring = dedupe(points)
+    if is_closed(ring):
+        ring = ring[:-1]
+    n = len(ring)
+    if n < 4:  # a triangle cannot cross itself
+        return False
+    for i in range(n):
+        for j in range(i + 1, n):
+            if (i + 1) % n == j or (j + 1) % n == i:
+                continue
+            if _segments_meet(ring[i], ring[(i + 1) % n], ring[j], ring[(j + 1) % n]):
+                return True
+    return False
+
+
+def _segments_meet(a1: Point, a2: Point, b1: Point, b2: Point) -> bool:
+    """Segment intersection including endpoint touches (a self-touching ring counts)."""
+    d1 = cross(sub(a2, a1), sub(b1, a1))
+    d2 = cross(sub(a2, a1), sub(b2, a1))
+    d3 = cross(sub(b2, b1), sub(a1, b1))
+    d4 = cross(sub(b2, b1), sub(a2, b1))
+    if d1 == d2 == d3 == d4 == 0:
+        # Collinear: the straddle test degenerates to always-true, so test
+        # overlap on the axes instead.
+        return max(min(a1[0], a2[0]), min(b1[0], b2[0])) <= min(
+            max(a1[0], a2[0]), max(b1[0], b2[0])
+        ) and max(min(a1[1], a2[1]), min(b1[1], b2[1])) <= min(max(a1[1], a2[1]), max(b1[1], b2[1]))
+    return d1 * d2 <= 0 and d3 * d4 <= 0
+
+
 def _offset_segment(a: Point, b: Point, d: float) -> tuple[Vec, Vec]:
     n = left_normal(sub(b, a))
     return (add(a, mul(n, d)), add(b, mul(n, d)))

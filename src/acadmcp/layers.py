@@ -47,6 +47,67 @@ H_AXIS = 500.0
 #: renders under all of them.
 AREA_UNIT = "m²"
 
+#: Hatch pattern names every backend knows — the classic acad.pat set plus SOLID.
+#: Validated against before a hatch is drawn: a misspelt name is otherwise accepted
+#: silently (ezdxf builds a one-line stub pattern), which is exactly the "named
+#: variant that does not exist" failure the element catalogue refuses to allow.
+HATCH_PATTERNS: frozenset[str] = frozenset(
+    [
+        "SOLID",
+        "ANGLE",
+        "ANSI31",
+        "ANSI32",
+        "ANSI33",
+        "ANSI34",
+        "ANSI35",
+        "ANSI36",
+        "ANSI37",
+        "ANSI38",
+        "AR-B816",
+        "AR-B816C",
+        "AR-B88",
+        "AR-BRELM",
+        "AR-BRSTD",
+        "AR-CONC",
+        "AR-HBONE",
+        "AR-PARQ1",
+        "AR-RROOF",
+        "AR-RSHKE",
+        "AR-SAND",
+        "BOX",
+        "BRASS",
+        "BRICK",
+        "BRSTONE",
+        "CLAY",
+        "CORK",
+        "CROSS",
+        "DASH",
+        "DOLMIT",
+        "DOTS",
+        "EARTH",
+        "ESCHER",
+        "FLEX",
+        "GOST_GLASS",
+        "GRND",
+        "HOUND",
+        "INSUL",
+        "LINE",
+        "MUDST",
+        "NET",
+        "NET3",
+        "PLAST",
+        "PLASTI",
+        "SACNCR",
+        "SQUARE",
+        "STARS",
+        "STEEL",
+        "SWAMP",
+        "TRANS",
+        "TRIANG",
+        "ZIGZAG",
+    ]
+)
+
 #: Advance width of a character as a multiple of the text height. Measured rather than
 #: assumed: "生产车间" at height 350 is 1991 mm wide in AutoCAD and 1973 mm in the PNG
 #: preview, so a Chinese character takes 1.42 x the height, not 1.0. Anything that sizes
