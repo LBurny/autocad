@@ -129,3 +129,30 @@ def test_dist_point_segment_clamps_past_both_ends():
 
 def test_dist_point_segment_handles_a_degenerate_segment():
     assert geom.dist_point_segment((3, 4), (1, 1), (1, 1)) == math.hypot(2, 3)
+
+
+# --- xy: a point is exactly two numbers -------------------------------------
+
+
+def test_xy_takes_any_two_item_sequence():
+    assert geom.xy([1, 2]) == (1.0, 2.0)
+    assert geom.xy((1, 2)) == (1.0, 2.0)
+
+
+def test_xy_refuses_a_point_that_is_not_exactly_two_coordinates():
+    """A z silently dropped is a wrong-looking point nothing catches. `xy` is where a
+    placement's `at` lands (server.py calls `geom.xy(at)`), so a 3-tuple must refuse."""
+    import pytest
+
+    for bad in ([0, 0, 0], (0, 0, 5), [0], []):
+        with pytest.raises(ValueError, match="two numbers"):
+            geom.xy(bad)
+
+
+def test_xy_refuses_a_member_that_is_not_a_number():
+    import pytest
+
+    with pytest.raises(ValueError, match="numbers"):
+        geom.xy([0, "y"])
+    with pytest.raises(ValueError, match="numbers"):
+        geom.xy([None, 0])

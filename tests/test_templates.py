@@ -67,6 +67,16 @@ def test_resolve_template_refuses_an_unknown_key_by_name():
     )
 
 
+def test_a_template_key_is_case_forgiving_like_the_catalogue():
+    """`Templates.get` lower-cases a key, exactly as `Catalog.get` resolves an element key
+    (`self.elements.get(key.strip().lower())`). The consistency check (F20) found the two
+    registries keep one rule, so `GB_A3_ARCH` reaching the same spec is deliberate, not a bug."""
+    a3 = templates.resolve_template("gb_a3_arch")
+
+    assert templates.resolve_template("GB_A3_ARCH") is a3
+    assert templates.current().get(" Gb_A3_Arch ") is a3
+
+
 def test_the_shipped_specs_are_the_named_gbt_templates():
     a3 = templates.resolve_template("gb_a3_arch")
     a4 = templates.resolve_template("gb_a4_arch")

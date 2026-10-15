@@ -38,18 +38,25 @@ row that is not a step row at all or records no ``op``. Everything else is appli
 Python journal writes ``applied`` and the plugin's in-DWG journal writes ``done`` for the
 same fact, so both count rather than making the plugin backend find nothing.
 
+**Ops whose repetition earns nothing** are named in :data:`IGNORED_OPS` and dropped before
+grouping, and they are *not* counted in ``skipped`` — a row that read fine is not a row that
+could not be read. A placement (``place_element``/``place_along``/``place_grid``) drew a
+catalogue element and an ``element_capture`` made one, so both are already reusable: the
+derived key would be the placed element's own key, and the printed ``element_capture`` call
+would fail verbatim. Only the primitive tools that drew ad-hoc geometry are mined.
+
 **The answer.** ``{"suggestions": [...], "skipped": int}``, the groups ordered by count
 descending (ties in the order they first appeared). Each group is ``{"op", "count", "params",
 "steps", "hint"}`` — the shared parameters canonicalised, the step indices, and a ``hint`` of
 the literal ``element_capture`` call and the ``element_publish`` that would sediment them.
 
 **The suggested key is derived, never stored** (the rule `catalog.next_tag` follows). The
-name is the step's own subject — a catalogue ``type`` when the op placed one
-(``place_element(type="door")`` drew a door, not an "element"), else the op with its verb
-dropped (``draw_door`` → ``door``, ``add_text`` → ``text``) — and a size token is appended
-from the first of :data:`SIZE_PARAMS` the parameters carry, so five 900 mm doors suggest
-``door_900`` and a 600 column suggests ``column_600``. The whole thing is slugged to
-``[a-z0-9_]``.
+name is the step's own subject — the ``type`` when the parameters name one, else the op with
+its verb dropped (``draw_door`` → ``door``, ``add_text`` → ``text``) — and a size token is
+appended from the first of :data:`SIZE_PARAMS` the parameters carry, so five 900 mm doors
+suggest ``door_900`` and a 600 column suggests ``column_600``. The whole thing is slugged to
+``[a-z0-9_]``. The hint says the derived key may already be taken, because a name this module
+invents cannot know what the catalogue holds.
 
 `min_count` is at least 2: the premise is repetition, and a single step is not a repeat.
 """
@@ -64,6 +71,13 @@ from typing import Any
 #: Param keys that describe a step's bookkeeping rather than the geometry it drew. Named so
 #: the decision is one place to change; the module docstring argues each one.
 IGNORED_PARAM_KEYS = frozenset({"label", "steps"})
+
+#: Ops whose repetition earns no suggestion, because the thing they drew is *already* reusable.
+#: ``place_element``/``place_along``/``place_grid`` placed a catalogue element, and
+#: ``element_capture`` made one — repeating either needs no capture, and the key a capture would
+#: derive is the placed element's own key, so the printed hint call would fail verbatim. Only the
+#: primitive tools that drew ad-hoc geometry (``draw_door``, ``draw_window``) are worth mining.
+IGNORED_OPS = frozenset({"place_element", "place_along", "place_grid", "element_capture"})
 
 #: Step states that mean the drawing does not contain the step, so it is not a repeat. The
 #: vocabulary `critique.py` keeps: the Python journal writes "applied"/"undone", the plugin's
@@ -100,7 +114,9 @@ def _canonical(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_canonical(item) for item in value]
     if isinstance(value, (int, float)):
-        return round(float(value), _MM)
+        # `+ 0.0` folds a negative zero into a positive one: round(-0.0, 1) stays -0.0, and
+        # json.dumps prints the sign, so two windows at x=-0.0 and x=0.0 would never group.
+        return round(float(value), _MM) + 0.0
     return value
 
 
@@ -132,7 +148,7 @@ def _size_token(params: dict[str, Any]) -> str:
         if value is None or isinstance(value, bool):
             continue
         if isinstance(value, (int, float)):
-            return f"{round(float(value), _MM):g}"
+            return f"{round(float(value), _MM) + 0.0:g}"
         token = _slug(value)
         if token:
             return token
@@ -167,7 +183,8 @@ def _report(op: str, params: dict[str, Any], steps: list[int]) -> dict[str, Any]
     hint = (
         f"these {count} steps drew the same {noun} — "
         f"element_capture(steps={steps}, key={key!r}) makes it a library element; "
-        f"element_publish puts it in the project catalogue"
+        f"element_publish puts it in the project catalogue — pick another key if that one "
+        f"is taken"
     )
     return {"op": op, "count": count, "params": params, "steps": steps, "hint": hint}
 
@@ -202,6 +219,10 @@ def suggestions(step_rows: Sequence[dict], min_count: int = 3) -> dict[str, Any]
             skipped += 1
             continue
         op = op.strip()
+        if op in IGNORED_OPS:
+            # Already reusable: a placement drew a catalogue element, a capture made one. No
+            # suggestion — and not counted in `skipped`, which is for rows that cannot be read.
+            continue
         params = raw.get("params")
         if params is None:
             params = {}

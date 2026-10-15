@@ -519,6 +519,15 @@ SHEET_LAYERS = frozenset({"A-SHEET", "A-SHEET-TEXT"})
 #: evidence that 比例 was stated, which is how ``be.info()["sheet"]`` reports a sheet.
 _TITLE_FIELDS_KEYS = ("title_fields", "title_block", "fields")
 
+#: Layers AutoCAD itself creates for its own machinery, exempt from ``layer_not_in_standard``.
+#: ``VIEWPORTS`` carries the paper-space VIEWPORT entity the sheet tools draw (a viewport is not
+#: drawing content and is not on a layer this package chose), and ``DEFPOINTS`` is created the
+#: first time anything is dimensioned. Neither is one the draughtsman drew on, so flagging them
+#: makes every drawing this package makes fail its own standard — which kills the checker as a
+#: signal. Layer ``"0"`` is deliberately *not* here: drawing directly on 0 is exactly what a
+#: drafting standard advises against, so it stays a finding.
+RESERVED_LAYERS = frozenset({"DEFPOINTS", "VIEWPORTS"})
+
 #: The field names that state the scale. 比例 first, because that is what the sheet writes.
 _SCALE_FIELD_KEYS = ("比例", "scale", "SCALE")
 
@@ -592,8 +601,9 @@ def _check_layers(standard: Standard, snapshot: dict[str, Any]) -> list[dict[str
             continue
         key = name.upper()
         # One finding per layer, however many entities are on it, and a name the standard knows
-        # regardless of case is not a finding at all.
-        if key in known or key in seen:
+        # regardless of case is not a finding at all. AutoCAD's own machinery layers (VIEWPORTS,
+        # DEFPOINTS) are exempt for the same reason: the drawing did not choose them.
+        if key in known or key in RESERVED_LAYERS or key in seen:
             continue
         seen.add(key)
         issues.append(_finding(RULE_LAYER, "warning", {"layer": name}, [name]))
@@ -665,19 +675,35 @@ def _title_fields(block: dict[str, Any]) -> dict[str, Any] | None:
 def _check_sheet(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     """Rule 4. A drawing with no sheet warns; a sheet whose title block states no 比例 errors.
 
+    "Has a sheet" is *evidence the frame is drawn*, not the page setup alone. The page setup is
+    document state and outlives a ``drawing_undo``, by design (a sheet is a setting, like a block
+    definition): after undoing the ``drawing_sheet`` step a drawing still carries a page setup
+    while its frame, title block and viewport are gone. Deriving "has a sheet" from the setup
+    alone would call that drawing properly sheeted, which is the lie the checker exists to catch.
+    So the rule also requires a sheet layer (``SHEET_LAYERS``) to be *in use* — a drawing whose
+    ``A-SHEET`` is empty is not sheeted, whatever the setup says.
+
     When a snapshot gives the title block's fields, they are authoritative: a sheet carrying a
     ``scale`` but a block without 比例 still fails, because the block is what a person reads off
     the paper. When it gives no fields, the sheet's own ``scale`` is the evidence that 比例 was
     written — which is how ``drawing_sheet`` records it and ``be.info()["sheet"]`` reports it.
     """
     block = snapshot.get("sheet")
-    if not isinstance(block, dict) or not block:
-        return [_finding(RULE_NO_SHEET, "warning", {"sheet": {}})]
-    fields = _title_fields(block)
+    has_setup = isinstance(block, dict) and bool(block)
+    layers = {str(raw or "").strip().upper() for raw in snapshot.get("layers_in_use") or []}
+    frame_drawn = bool(layers & SHEET_LAYERS)
+    if not frame_drawn:
+        # The setup, if it exists at all, is document state that survives the frame's undo — so it
+        # is reported as the distinction rather than mistaken for the sheet itself.
+        detail: dict[str, Any] = {"sheet": dict(block) if has_setup else {}}
+        if has_setup:
+            detail["reason"] = "page setup exists, frame not drawn"
+        return [_finding(RULE_NO_SHEET, "warning", detail)]
+    fields = _title_fields(block) if has_setup else None
     if fields is not None:
         stated = any(str(key).strip() in _SCALE_FIELD_KEYS for key in fields)
     else:
-        stated = bool(str(block.get("scale") or "").strip())
+        stated = bool(str(block.get("scale") or "").strip()) if has_setup else False
     if stated:
         return []
     return [
@@ -685,7 +711,7 @@ def _check_sheet(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
             RULE_SHEET_SCALE,
             "error",
             {
-                "paper": block.get("paper"),
+                "paper": block.get("paper") if has_setup else None,
                 "title_fields": dict(fields) if fields is not None else {},
             },
         )
@@ -745,6 +771,7 @@ __all__ = [
     "RULE_SHEET_SCALE",
     "RULE_TEXT_HEIGHT",
     "RULE_UNITS",
+    "RESERVED_LAYERS",
     "SHEET_LAYERS",
     "Standard",
     "Standards",

@@ -58,6 +58,21 @@ def test_floats_round_to_a_tenth_of_a_millimetre_before_grouping():
     assert out["suggestions"][0]["params"]["width"] == 900.0
 
 
+def test_negative_zero_groups_with_positive_zero():
+    """round(-0.0, 1) stays -0.0 and json.dumps prints the sign, so two windows at x=-0.0 and
+    x=0.0 would land in different buckets without normalising the zero."""
+    rows = [
+        _step(1, "draw_window", {"start": [-0.0, 0], "width": 900}),
+        _step(2, "draw_window", {"start": [0.0, 0], "width": 900}),
+        _step(3, "draw_window", {"start": [-0.0, 0], "width": 900}),
+    ]
+    out = suggest.suggestions(rows)
+
+    assert len(out["suggestions"]) == 1
+    assert out["suggestions"][0]["count"] == 3
+    assert str(out["suggestions"][0]["params"]["start"][0]) == "0.0"
+
+
 def test_nested_parameters_are_canonicalised_by_key_order():
     a = _step(
         1,
@@ -130,15 +145,16 @@ def test_the_label_is_decoration_not_geometry():
 
 
 def test_the_capture_step_list_is_not_geometry():
-    """Two captures over different spans of identical geometry are the same element."""
+    """A capture made an element that is already reusable, so repeating captures earns no
+    suggestion at all — the derived key would be the captured element's own key."""
     rows = [
         _step(1, "element_capture", {"steps": [1], "key": "door_900"}),
         _step(2, "element_capture", {"steps": [2], "key": "door_900"}),
         _step(3, "element_capture", {"steps": [3], "key": "door_900"}),
     ]
     out = suggest.suggestions(rows)
-    assert out["suggestions"][0]["count"] == 3
-    assert "steps" not in out["suggestions"][0]["params"]
+    assert out["suggestions"] == []
+    assert out["skipped"] == 0, "a row that read fine is not a row that could not be read"
 
 
 # --- state: what the drawing actually contains -----------------------------
@@ -231,15 +247,51 @@ def test_the_suggested_key_names_the_element_and_its_size():
     assert "the same door" in group["hint"]
 
 
-def test_a_placed_element_key_comes_from_its_type_and_variant():
+def test_the_hint_says_the_derived_key_may_already_be_taken():
+    """The name is derived and the catalogue is not consulted, so the hint has to admit the
+    key may collide — a caller pasting it verbatim must be told to try another."""
+    group = suggest.suggestions([_door(1), _door(2), _door(3)])["suggestions"][0]
+    assert isinstance(group["hint"], str)
+    assert "pick another key" in group["hint"]
+
+
+def test_a_placed_element_earns_no_suggestion():
+    """A placement drew a catalogue element, so repeating it needs no capture — and the key a
+    capture would derive is the placed element's own key, so the hint call would fail verbatim."""
     rows = [
         _step(i, "place_element", {"type": "door", "at": [0, 0], "variant": "900", "params": {}})
         for i in (1, 2, 3)
     ]
-    group = suggest.suggestions(rows)["suggestions"][0]
-    assert "key='door_900'" in group["hint"]
-    # "door", not "element": the type says what was placed.
-    assert "the same door" in group["hint"]
+    out = suggest.suggestions(rows)
+    assert out["suggestions"] == []
+    assert out["skipped"] == 0
+
+
+def test_every_ignored_op_is_left_out():
+    rows = [
+        _step(1, "place_element", {"type": "door", "at": [0, 0]}),
+        _step(2, "place_element", {"type": "door", "at": [0, 0]}),
+        _step(3, "place_element", {"type": "door", "at": [0, 0]}),
+        _step(4, "place_along", {"type": "column", "start": [0, 0], "end": [6000, 0]}),
+        _step(5, "place_along", {"type": "column", "start": [0, 0], "end": [6000, 0]}),
+        _step(6, "place_along", {"type": "column", "start": [0, 0], "end": [6000, 0]}),
+        _step(7, "place_grid", {"type": "column", "xs": [0], "ys": [0]}),
+        _step(8, "place_grid", {"type": "column", "xs": [0], "ys": [0]}),
+        _step(9, "place_grid", {"type": "column", "xs": [0], "ys": [0]}),
+        _step(10, "element_capture", {"key": "x"}),
+        _step(11, "element_capture", {"key": "x"}),
+        _step(12, "element_capture", {"key": "x"}),
+    ]
+    assert suggest.suggestions(rows) == {"suggestions": [], "skipped": 0}
+
+
+def test_the_primitive_draw_ops_still_group():
+    """The ignored set is the placements and the capture only: draw_door/draw_window still
+    group, which tests/sandbox_library_check.py depends on."""
+    rows = [_door(1), _door(2), _door(3)]
+    rows += [_step(i, "draw_window", {"start": [0, 0], "width": 1200}) for i in (4, 5, 6)]
+    out = suggest.suggestions(rows)
+    assert sorted(g["op"] for g in out["suggestions"]) == ["draw_door", "draw_window"]
 
 
 def test_a_column_size_is_the_key_when_no_width_or_variant_is_recorded():

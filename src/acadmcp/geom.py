@@ -16,8 +16,27 @@ EPS = 1e-9
 
 
 def xy(p: Point) -> Vec:
-    """Normalise any point-like input to a plain (x, y) float tuple."""
-    return (float(p[0]), float(p[1]))
+    """Normalise any point-like input to a plain (x, y) float tuple.
+
+    A point is *exactly* two coordinates, and anything else is refused by name rather
+    than truncated: a caller that passed ``[x, y, z]`` used to have its z quietly
+    dropped and be told it succeeded, which is the failure the tool surface cannot
+    repair because it never learns the value was wrong. The ValueError travels out as a
+    readable message (``server._surface_input_errors``), since the SDK masks anything
+    else behind "Error executing tool <name>".
+    """
+    try:
+        x, y = p  # a two-item unpack: a longer or shorter sequence lands in the except
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"a point is exactly two numbers [x, y] in millimetres, got {p!r}"
+        ) from exc
+    try:
+        return (float(x), float(y))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"a point's coordinates must be numbers in millimetres, got {p!r}"
+        ) from exc
 
 
 def sub(a: Point, b: Point) -> Vec:

@@ -194,3 +194,63 @@ def test_a_column_smaller_than_a_stud_is_refused():
 def test_a_wall_too_thin_to_draw_is_refused():
     with pytest.raises(BackendError):
         _tool("draw_wall")(points=[[0, 0], [5000, 0]], thickness=0.2)
+
+
+# --- F2: a malformed point is refused by name, not masked --------------------
+#
+# `_pt` used to index p[0]/p[1] straight, so a short list raised IndexError and a mapping
+# missing a key raised KeyError — neither of which `_surface_input_errors` converts, so the
+# client received the bare "Error executing tool <name>" the SDK emits for anything that is
+# not a ToolError. Each case below must surface its own readable message.
+
+
+def test_a_short_point_list_names_what_a_point_is():
+    with pytest.raises(BackendError) as caught:
+        _tool("draw_line")(p1=[0], p2=[1000, 0])
+    text = str(caught.value)
+    assert "[0]" in text, "the message must show what was received"
+    assert "point" in text and "millimetres" in text
+
+
+def test_a_point_of_none_is_refused_readably():
+    with pytest.raises(BackendError, match="point"):
+        _tool("draw_line")(p1=None, p2=[1000, 0])
+
+
+def test_a_point_mapping_missing_a_key_names_the_key():
+    with pytest.raises(BackendError, match="'y'"):
+        _tool("draw_line")(p1={"x": 0}, p2=[1000, 0])
+
+
+def test_a_point_with_a_non_numeric_member_is_refused_readably():
+    with pytest.raises(BackendError, match="numbers"):
+        _tool("draw_line")(p1=[0, "a"], p2=[1000, 0])
+
+
+@pytest.mark.parametrize(
+    ("tool", "kwargs"),
+    [
+        ("draw_line", {"p1": [0], "p2": [1000, 0]}),
+        ("draw_rect", {"corner1": [0], "corner2": [1000, 1000]}),
+        ("draw_circle", {"center": [0], "radius": 100}),
+        ("add_text", {"pos": [0], "text": "x"}),
+        ("add_leader_note", {"anchor": [0], "text": "x"}),
+        ("draw_door", {"hinge": [0]}),
+        ("draw_window", {"start": [0]}),
+        ("draw_column", {"center": [0]}),
+        ("draw_stair", {"corner1": [0], "corner2": [2600, 5000]}),
+        ("draw_lift", {"corner1": [0], "corner2": [2600, 5000]}),
+        ("draw_equipment", {"corner1": [0], "corner2": [2600, 5000]}),
+    ],
+)
+def test_every_point_tool_refuses_a_short_point_readably(tool, kwargs):
+    """All fifteen measured call sites: each must surface a message, never a masked crash."""
+    with pytest.raises(BackendError, match="point"):
+        _tool(tool)(**kwargs)
+
+
+def test_place_element_refuses_a_three_item_at():
+    """`at` reaches geom.xy, not _pt — a z silently dropped would place at the wrong point,
+    so this pins the second half of the fix (geom.xy refuses a non-2 sequence)."""
+    with pytest.raises(BackendError, match="two numbers"):
+        _tool("place_element")(type="door", at=[0, 0, 0])

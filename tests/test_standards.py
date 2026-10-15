@@ -543,7 +543,7 @@ def test_the_declared_rule_codes_are_the_ones_produced():
     std = _checking_standard(layers={"A-WALL": _row(2)}, text_heights=_heights(*GB_SERIES))
     breaking = _snapshot(
         units="m",
-        layers_in_use=["MY-LAYER"],
+        layers_in_use=["MY-LAYER", "A-SHEET"],
         texts=[{"height": 260.0, "layer": "A-ANNO", "content": "注"}],
         sheet={"paper": "A3"},  # a sheet with no scale
     )
@@ -614,10 +614,16 @@ def test_a_layer_outside_the_standard_warns():
 
 
 def test_the_standards_own_layers_are_not_reported():
-    std = _checking_standard(layers={"A-WALL": _row(2)})
+    std = _checking_standard(layers={"A-WALL": _row(2), "A-SHEET": _row(7)})
 
     # A project that spells the layer the way AutoCAD shows it still lands on its row.
-    assert standards.check(std, _snapshot(layers_in_use=["A-WALL", "a-wall"])) == []
+    assert (
+        _by_rule(
+            standards.check(std, _snapshot(layers_in_use=["A-WALL", "a-wall", "A-SHEET"])),
+            "layer_not_in_standard",
+        )
+        == []
+    )
 
 
 def test_an_unknown_layer_is_reported_once_however_often_it_appears():
@@ -756,18 +762,43 @@ def test_a_drawing_with_no_sheet_warns():
     assert issue["severity"] == "warning"
 
 
+def test_a_page_setup_without_a_drawn_frame_is_not_a_sheet():
+    """`drawing_sheet` then `drawing_undo` leaves the page setup (document state) but erases
+    the frame, so the drawing carries a setup and no sheet. Deriving "has a sheet" from the
+    setup alone would call that properly sheeted — the lie the checker exists to catch."""
+    std = _checking_standard()
+    snapshot = _snapshot(sheet={"paper": "A3", "scale": "1:100"}, layers_in_use=["A-WALL"])
+
+    issue = _one(standards.check(std, snapshot), "no_sheet")
+    assert issue["severity"] == "warning"
+    assert issue["detail"]["reason"] == "page setup exists, frame not drawn"
+
+
+def test_a_drawn_sheet_layer_is_what_makes_a_sheet_reported():
+    std = _checking_standard()
+    snapshot = _snapshot(sheet={"paper": "A3", "scale": "1:100"}, layers_in_use=["A-SHEET"])
+
+    assert _by_rule(standards.check(std, snapshot), "no_sheet") == []
+
+
 def test_a_sheet_stating_its_scale_is_clean():
     std = _checking_standard()
     sheet = {"paper": "A3", "orientation": "landscape", "scale": "1:100"}
 
-    assert _by_rule(standards.check(std, _snapshot(sheet=sheet)), "sheet_without_scale") == []
+    issues = standards.check(std, _snapshot(sheet=sheet, layers_in_use=["A-SHEET"]))
+
+    assert _by_rule(issues, "sheet_without_scale") == []
+    assert _by_rule(issues, "no_sheet") == []
 
 
 def test_a_sheet_without_a_scale_is_an_error():
     std = _checking_standard()
 
     issue = _one(
-        standards.check(std, _snapshot(sheet={"paper": "A3", "orientation": "landscape"})),
+        standards.check(
+            std,
+            _snapshot(layers_in_use=["A-SHEET"], sheet={"paper": "A3", "orientation": "landscape"}),
+        ),
         "sheet_without_scale",
     )
 
@@ -778,7 +809,10 @@ def test_a_title_block_without_the_scale_field_is_an_error():
     std = _checking_standard()
     sheet = {"scale": "1:100", "title_fields": {"图名": "一层平面", "图号": "建施-01"}}
 
-    issue = _one(standards.check(std, _snapshot(sheet=sheet)), "sheet_without_scale")
+    issue = _one(
+        standards.check(std, _snapshot(sheet=sheet, layers_in_use=["A-SHEET"])),
+        "sheet_without_scale",
+    )
 
     assert issue["severity"] == "error"
 
@@ -787,7 +821,10 @@ def test_a_title_block_stating_the_scale_is_clean():
     std = _checking_standard()
     sheet = {"scale": "1:100", "title_fields": {"图名": "一层平面", "比例": "1:100"}}
 
-    assert _by_rule(standards.check(std, _snapshot(sheet=sheet)), "sheet_without_scale") == []
+    assert _by_rule(
+        standards.check(std, _snapshot(sheet=sheet, layers_in_use=["A-SHEET"])),
+        "sheet_without_scale",
+    ) == []
 
 
 # --- the whole thing against the shipped data -------------------------------
@@ -796,7 +833,7 @@ def test_a_title_block_stating_the_scale_is_clean():
 def test_a_conforming_drawing_reports_no_issues():
     std = standards.current().get("gbt50001")
     snapshot = _snapshot(
-        layers_in_use=["A-WALL", "A-ROOM-NAME", "A-DIM"],
+        layers_in_use=["A-WALL", "A-ROOM-NAME", "A-DIM", "A-SHEET"],
         texts=[
             {"height": 250.0, "layer": "A-ROOM-AREA", "content": "办公室"},
             {"height": 350.0, "layer": "A-ROOM-NAME", "content": "生产车间"},
@@ -805,6 +842,46 @@ def test_a_conforming_drawing_reports_no_issues():
     )
 
     assert standards.check(std, snapshot) == []
+
+
+# --- rule 2: AutoCAD's own machinery layers are exempt ----------------------
+
+
+def test_autocads_own_machinery_layers_are_not_flagged():
+    """A VIEWPORT sits on AutoCAD's reserved VIEWPORTS layer and dimensioning creates
+    DEFPOINTS; a drawing this package drew must not fail its own standard because of them."""
+    std = _checking_standard(layers={"A-WALL": _row(2)})
+
+    issues = standards.check(
+        std, _snapshot(layers_in_use=["A-WALL", "VIEWPORTS", "DEFPOINTS"])
+    )
+
+    assert _by_rule(issues, "layer_not_in_standard") == []
+
+
+def test_layer_zero_is_still_flagged_no_matter_how_the_rule_reads():
+    """Drawing directly on layer 0 is exactly what a drafting standard advises against, so 0
+    is deliberately not in RESERVED_LAYERS — the exemption is for the CAD's own layers only."""
+    std = _checking_standard(layers={"A-WALL": _row(2)})
+
+    issue = _one(standards.check(std, _snapshot(layers_in_use=["0"])), "layer_not_in_standard")
+    assert issue["detail"]["layer"] == "0"
+
+
+def test_a_sheeted_snapshot_with_viewports_yields_no_layer_warning_but_a_bogus_one_still_does():
+    """The exact F10 repro: VIEWPORTS exempt, BOGUS_LAYER still warns."""
+    std = standards.current().get("gbt50001")
+    snapshot = _snapshot(
+        layers_in_use=["A-WALL", "A-SHEET", "VIEWPORTS", "BOGUS_LAYER"],
+        sheet={"paper": "A3", "orientation": "landscape", "scale": "1:100"},
+    )
+
+    issues = standards.check(std, snapshot)
+    warned = [i["detail"]["layer"] for i in _by_rule(issues, "layer_not_in_standard")]
+
+    assert "VIEWPORTS" not in warned
+    assert "BOGUS_LAYER" in warned
+    assert set(standards.RESERVED_LAYERS) == {"DEFPOINTS", "VIEWPORTS"}
 
 
 def test_the_shipped_standard_flags_a_known_bad_height():
@@ -849,3 +926,26 @@ def test_drawing_check_standard_reports_an_off_series_text(_tool_session):
 def test_drawing_check_standard_refuses_an_unknown_standard_by_name(_tool_session):
     with pytest.raises(BackendError, match="no standard"):
         server.drawing_check_standard(standard="nope")
+
+
+def test_a_template_drawn_drawing_passes_the_layer_rule(_tool_session):
+    """F10 tool level: the sheet machinery's own VIEWPORTS layer must not make a drawing this
+    package drew fail its own standard."""
+    server.drawing_new(backend="dxf", template="gb_a3_arch")
+
+    report = server.drawing_check_standard()
+
+    warned = [i["detail"]["layer"] for i in report["issues"] if i["rule"] == "layer_not_in_standard"]
+    assert warned == []
+
+
+def test_undoing_the_frame_leaves_a_sheetless_drawing_the_checker_reports(_tool_session):
+    """F11 tool level: the page setup survives the undo (document state, by design), so the
+    checker has to read the frame — not the setup — as the sheet."""
+    server.drawing_sheet(paper="A3", scale="1:100")
+    server.drawing_undo(count=1)
+
+    report = server.drawing_check_standard()
+
+    assert any(i["rule"] == "no_sheet" for i in report["issues"])
+    assert report["counts"]["warning"] >= 1

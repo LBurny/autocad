@@ -293,10 +293,33 @@ def _auto_step(op: str, params: dict[str, Any], label: str | None = None) -> Ite
 
 
 def _pt(p: Any) -> tuple[float, float]:
-    """Accept [x, y], (x, y) or {"x": .., "y": ..} from the client."""
+    """Accept [x, y], (x, y) or {"x": .., "y": ..} from the client, refusing the rest by name.
+
+    Every way a point can be malformed raises a ValueError that names what was received and
+    what a point is, because the SDK masks anything but a ToolError behind a bare "Error
+    executing tool <name>" — a short list, a dict missing a key, None or a member that is not
+    a number all used to reach the model as nothing at all, leaving it unable to correct
+    itself. ``_surface_input_errors`` turns this ValueError back into a readable message.
+    """
     if isinstance(p, dict):
-        return (float(p["x"]), float(p["y"]))
-    return (float(p[0]), float(p[1]))
+        try:
+            x, y = p["x"], p["y"]
+        except KeyError as exc:
+            raise ValueError(
+                "a point is {'x': x, 'y': y} in millimetres, got a mapping without "
+                f"{exc.args[0]!r}: {p!r}"
+            ) from exc
+    else:
+        try:
+            x, y = p[0], p[1]
+        except (TypeError, IndexError, KeyError) as exc:
+            raise ValueError(f"a point is [x, y] in millimetres, got {p!r}") from exc
+    try:
+        return (float(x), float(y))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"a point's coordinates must be numbers in millimetres, got {p!r}"
+        ) from exc
 
 
 def _pts(points: Any) -> list[tuple[float, float]]:
@@ -2227,7 +2250,15 @@ def place_element(
         be,
         "place_element",
         f"{element.label} {variant or element.default_variant}".strip(),
-        {"type": element.key, "at": geom.xy(at), "variant": variant, "params": params or {}},
+        {
+            "type": element.key,
+            "at": geom.xy(at),
+            "variant": variant,
+            "params": params or {},
+            "rotation": float(rotation),
+            "scale": float(scale),
+            "tag": tag,
+        },
         work,
     )
 
@@ -2264,6 +2295,8 @@ def place_along(
             "end": geom.xy(end),
             "count": count,
             "spacing": spacing,
+            "rotation": None if rotation is None else float(rotation),
+            "tag": tag,
         },
         lambda: ops.place_along(
             be,
@@ -2302,7 +2335,7 @@ def place_grid(
         be,
         "place_grid",
         f"{len(xs) * len(ys)} x {element.label}",
-        {"type": element.key, "xs": list(xs), "ys": list(ys)},
+        {"type": element.key, "xs": list(xs), "ys": list(ys), "rotation": float(rotation), "tag": tag},
         lambda: ops.place_grid(
             be,
             element,
