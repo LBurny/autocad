@@ -54,6 +54,18 @@ from .backends import make_backend
 from .backends.base import Backend, BackendError
 from .backends.plugin import PluginBackend
 from .catalog import Element
+from .replies import (
+    CheckStandardReply,
+    CritiqueReply,
+    ElementTypesReply,
+    EntitiesReply,
+    HistoryReply,
+    StatusReply,
+    SuggestReply,
+    SummaryReply,
+    TemplateListReply,
+    VerifyReply,
+)
 from .steps import StepSession, describe_steps
 
 log = logging.getLogger("acadmcp")
@@ -457,7 +469,7 @@ def drawing_help(term: str | None = None) -> dict[str, Any]:
 
 
 @mcp.tool(annotations=_READONLY)
-def drawing_status() -> dict[str, Any]:
+def drawing_status() -> StatusReply:
     """Report the active backend, document, entity count and layer list.
 
     `entities` is what is in the drawing now; `ops` is a cumulative count of
@@ -575,7 +587,7 @@ def _start_from_template(be: Backend, spec: templates.TemplateSpec) -> dict[str,
 
 
 @mcp.tool(annotations=_READONLY)
-def template_list() -> dict[str, Any]:
+def template_list() -> TemplateListReply:
     """List the templates a drawing can start from, with the sheet each one builds.
 
     Each row names the key `drawing_new(template=...)` takes, the standard the template
@@ -833,7 +845,7 @@ def drawing_redo(count: int = 1) -> dict[str, Any]:
 
 
 @mcp.tool(annotations=_READONLY)
-def drawing_history() -> dict[str, Any]:
+def drawing_history() -> HistoryReply:
     """What has been drawn, one line per step — much cheaper than a screenshot.
 
     Read this to know the drawing's state before deciding what to undo or add;
@@ -857,7 +869,7 @@ def drawing_history() -> dict[str, Any]:
 
 
 @mcp.tool(annotations=_READONLY)
-def drawing_summary() -> dict[str, Any]:
+def drawing_summary() -> SummaryReply:
     """What the drawing contains, as data: rooms with areas, openings, elements, layers.
 
     Derived from the journal, which records each step's op and arguments, so it needs no
@@ -870,7 +882,7 @@ def drawing_summary() -> dict[str, Any]:
 
 
 @mcp.tool(annotations=_READONLY)
-def drawing_verify(limit: int = 20000) -> dict[str, Any]:
+def drawing_verify(limit: int = 20000) -> VerifyReply:
     """Check the drawing against the journal's own account of what it drew.
 
     `verdict` is "matches" when every applied step's entities are there, "unaccounted" when
@@ -912,7 +924,7 @@ def drawing_verify(limit: int = 20000) -> dict[str, Any]:
 
 
 @mcp.tool(annotations=_READONLY)
-def drawing_critique(focus: str = "") -> dict[str, Any]:
+def drawing_critique(focus: str = "") -> CritiqueReply:
     """Check the drawing's components against the journal's own record of them.
 
     `drawing_verify` asks "is everything the journal recorded still there"; this asks
@@ -975,7 +987,7 @@ def _standard_snapshot(be: Backend) -> dict[str, Any]:
 
 
 @mcp.tool(annotations=_READONLY)
-def drawing_check_standard(standard: str = "") -> dict[str, Any]:
+def drawing_check_standard(standard: str = "") -> CheckStandardReply:
     """Check the drawing against the drafting standard in force.
 
     `standard` names one of the loaded GB/T standards; empty uses the standard in force
@@ -1208,7 +1220,7 @@ def drawing_plot_pdf(path: str | None = None, theme: str = "light") -> dict[str,
 
 
 @mcp.tool(annotations=_READONLY)
-def listing_entities(layer: str | None = None, limit: int = 100, offset: int = 0) -> dict[str, Any]:
+def listing_entities(layer: str | None = None, limit: int = 100, offset: int = 0) -> EntitiesReply:
     """List entities, optionally filtered to one layer.
 
     Pages with `limit` and `offset`: `has_more` says the page was cut short and
@@ -2150,7 +2162,7 @@ def library_list(source: str | None = None, limit: int = 500, offset: int = 0) -
 
 
 @mcp.tool(annotations=_READONLY)
-def element_types(category: str | None = None, check_library: bool = True) -> dict[str, Any]:
+def element_types(category: str | None = None, check_library: bool = True) -> ElementTypesReply:
     """What the element catalogue offers, and whether the library still matches it.
 
     The catalogue is a plain JSON file naming, for each element, which library block stands
@@ -2469,7 +2481,7 @@ def element_publish(key: str, path: str = "") -> dict[str, Any]:
 
 
 @mcp.tool(annotations=_READONLY)
-def catalog_suggest(min_count: int = 3) -> dict[str, Any]:
+def catalog_suggest(min_count: int = 3) -> SuggestReply:
     """Point at the repetition in this drawing, and the capture worth making of it.
 
     A plan drawn twice — five doors of one size, four identical runs — is a library element

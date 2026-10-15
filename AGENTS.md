@@ -28,6 +28,10 @@ src/acadmcp/
                         fields a drawing starts from. Pure, no CAD.
   suggest.py            repetition mining over the step rows: what was drawn the same way
                         twice is a library element waiting to be captured. Pure, no CAD.
+  replies.py            the output schemas: one TypedDict per high-frequency read tool,
+                        which the SDK publishes as outputSchema and validates the wire's
+                        structuredContent against — an undeclared key is dropped silently.
+                        Annotations only; no imports.
   data/                 the shipped data: elements.json (the catalogue), standards.json
                         (GB/T tables) and templates.json (the two template specifications)
   terms.py              the tool vocabulary: the AutoCAD command and the Chinese phrase for
@@ -82,6 +86,8 @@ tests/                  test_geom.py, test_backends.py, test_journal.py, test_re
                         test_replay.py (sheet and published-element steps replayed dxf→dxf),
                         test_placement_params.py (rotation/scale/tag recorded on placement steps),
                         test_live_screenshot.py (no restore, no rename on export),
+                        test_output_schemas.py (the read tools' published schemas, and
+                        no key lost between the reply and the wire),
                         sandbox_driver.py (fresh-server sandbox for live drawing exercises),
                         sandbox_library_check.py (draw → check → suggest → capture → publish
                         → place in a fresh drawing, over the wire),
@@ -95,7 +101,7 @@ tests/                  test_geom.py, test_backends.py, test_journal.py, test_re
 ## Commands
 
 ```bash
-uv run pytest -q                      # 689 tests, ~14s, no AutoCAD required
+uv run pytest -q                      # 702 tests, ~14s, no AutoCAD required
 uv run pytest tests/test_terms.py -q  # adding a tool without a vocabulary entry fails here
 uv run pytest tests/test_prompts.py -q  # a prompt naming a tool that does not exist fails here
 uv run python scripts/check_doc_numbers.py   # docs and evaluation answers vs the tree
@@ -227,7 +233,11 @@ The split is deliberate; keep it when editing.
   Every tool also picks one of the five annotation sets (`_READONLY` …
   `_DESTRUCTIVE_IDEMPOTENT`) defined under the server object — the client reads
   them to decide what it may auto-approve, and `test_tool_surface.py` fails on a
-  tool without them.
+  tool without them. A high-frequency read tool also names its reply shape in
+  `replies.py`: the SDK publishes that TypedDict as the tool's `outputSchema` and
+  validates `structuredContent` against it, **dropping any key the TypedDict does
+  not declare** — so a new reply key is added to the TypedDict in the same edit,
+  and `test_output_schemas.py` fails the round trip if it is not.
 - **All three backends journal.** `backends/recording.py` owns the step
   lifecycle (record primitives → apply as one batch → keep the handles);
   `journal.py` owns the undo bookkeeping. A backend implements only
