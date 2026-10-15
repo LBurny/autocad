@@ -11,16 +11,31 @@ the file, and the COM sidecar is plain file writing.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from acadmcp import catalog  # noqa: E402
+from acadmcp import catalog, settings  # noqa: E402
 from acadmcp.backends import make_backend  # noqa: E402
 from acadmcp.backends.com import read_sidecar, sidecar_path, write_sidecar  # noqa: E402
 from acadmcp.catalog import Element, Variant  # noqa: E402
 from acadmcp.journal import Journal  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _fresh_catalogue():
+    """Every test gets the catalogue and settings as shipped. Adopting a drawing merges its
+    entries into the catalogue in force, so a test that left one behind would report it to the
+    next file's tests."""
+    catalog.reset()
+    settings.reset()
+    yield
+    catalog.reset()
+    settings.reset()
 
 
 def _element(**over):
@@ -106,6 +121,70 @@ def test_adopt_of_nonsense_is_empty_rather_than_an_error():
 def test_adopt_also_reads_a_report_shaped_payload():
     payload = {"categories": {"opening": [{"key": "door", "op": "door_symbol"}]}}
     assert catalog.Catalog.adopt(payload).get("door").op == "door_symbol"
+
+
+# --- what a drawing carries that the catalogue in force has not got --------
+# A project's own files win the precedence, and they should. But the drawing also carries the
+# elements it was drawn with, and one captured in it and never published was unreachable the
+# moment the project had a catalogue of its own — while its block definition stayed in the file,
+# so it could be neither placed nor captured again under that name.
+
+
+def _project(tmp_path: Path, entries: list[dict]) -> None:
+    (tmp_path / "elements.json").write_text(json.dumps({"elements": entries}), encoding="utf-8")
+    (tmp_path / "acadmcp.json").write_text(
+        json.dumps({"catalog": ["elements.json"]}), encoding="utf-8"
+    )
+
+
+def test_adopt_merges_the_drawings_entries_into_the_one_in_force(tmp_path, monkeypatch):
+    _project(tmp_path, [{"key": "project_door", "block": "P", "source": "ours.dwg"}])
+    monkeypatch.chdir(tmp_path)
+    settings.reset()
+    catalog.reset()
+    drawing = catalog.Catalog({"orphan_door": _element(key="orphan_door")}).identity()
+
+    adopted = catalog.Catalog.adopt(drawing)  # what drawing_open does, via embedded_catalog
+
+    assert adopted.get("orphan_door") is not None  # the rebuild still returns the drawing's own
+    in_force = catalog.current()
+    assert in_force.get("project_door") is not None  # the project's entry stands
+    assert in_force.get("orphan_door") is not None  # ...and the drawing's is reachable
+    # Adopted, exactly like the existing path: no catalogue file behind it, so a
+    # `geometry_file` cannot be resolved for it and the caller is told by name.
+    assert in_force.source_file("orphan_door") is None
+
+
+def test_a_colliding_key_keeps_the_entry_in_force(tmp_path, monkeypatch):
+    """The local standard wins: a drawing's copy of an element the project also defines is not
+    adopted over it, and the key is reported so the difference is visible."""
+    _project(tmp_path, [{"key": "door", "block": "OURS", "source": "ours.dwg"}])
+    monkeypatch.chdir(tmp_path)
+    settings.reset()
+    catalog.reset()
+    drawing = catalog.Catalog({"door": _element(key="door", block="THEIRS")}).identity()
+
+    catalog.Catalog.adopt(drawing)
+
+    assert catalog.current().get("door").block == "OURS"
+    assert catalog.current().adopt_missing(catalog.Catalog({"door": _element()})) == ["door"]
+
+
+def test_the_drawing_carrying_the_same_catalogue_leaves_the_digest_alone(tmp_path, monkeypatch):
+    """The warning is a digest comparison, so adopting a drawing that carries exactly the
+    catalogue in force must change nothing it can see — or every reopen of a drawing this
+    office drew reports a mismatch."""
+    _project(tmp_path, [{"key": "project_door", "block": "P", "source": "ours.dwg"}])
+    monkeypatch.chdir(tmp_path)
+    settings.reset()
+    catalog.reset()
+    before = catalog.current()
+
+    catalog.Catalog.adopt(before.identity())
+
+    after = catalog.current()
+    assert after.digest() == before.digest()
+    assert after.skipped == before.skipped
 
 
 # --- the drawing remembers it ----------------------------------------------

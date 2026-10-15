@@ -219,6 +219,30 @@ def test_capture_refuses_a_step_that_is_not_applied(be):
         capture_ops.capture(be, steps=[99], key="x")
 
 
+def test_capture_refuses_a_step_listed_twice(be):
+    """A repeated index concatenates the step's primitives twice, so the block holds every
+    entity twice — invisible in the model, and the fingerprint then refuses the honest
+    single-copy capture as a duplicate of it."""
+    _door_steps(be)
+
+    with pytest.raises(ValueError, match="step 1 is listed twice"):
+        _capture(be, [1, 1], key="doubled")
+    with pytest.raises(ValueError, match="step 2 is listed twice"):
+        _capture(be, [1, 2, 2], key="doubled")
+    assert "ACADMCP_DOUBLED" not in be.doc.blocks
+    assert catalog.current().get("doubled") is None
+
+
+def test_capture_accepts_the_same_steps_in_another_order(be):
+    """The refusal is about a repeated index, not about order: which step is gathered first is
+    the caller's choice, and the fingerprint is order-free on purpose."""
+    steps = _door_steps(be)
+
+    out = _capture(be, list(reversed(steps)), key="reordered")
+
+    assert out["entities"] == len(be.step_primitives(steps)) == 8
+
+
 # ---------------------------------------------------------------------------
 # the contract underneath
 # ---------------------------------------------------------------------------
@@ -341,6 +365,68 @@ def test_the_fingerprint_separates_different_geometry():
     )
 
 
+def test_the_fingerprint_carries_every_geometric_field():
+    """Points and text were not the whole of a primitive: two concentric circles that differ
+    only in radius used to fingerprint alike, so a genuinely different element was refused as
+    a duplicate of the first."""
+    base = {
+        "kind": "arc",
+        "layer": "A-WALL",
+        "points": [0.0, 0.0],
+        "radius": 500.0,
+        "start_angle": 0.0,
+        "end_angle": 90.0,
+    }
+    distinct = {
+        "radius": 800.0,
+        "start_angle": 10.0,
+        "end_angle": 180.0,
+        "rotation": 45.0,
+        "linetype": "DASHED",
+        "text": "M-1",
+        "height": 350.0,
+        "width": 900.0,
+        "align": "center",
+        "pattern": "ANSI31",
+        "scale": 40.0,
+        "angle": 45.0,
+        "closed": True,
+        "solid": True,
+        "offset": 500.0,
+        "text_height": 250.0,
+        "scale_x": 2.0,
+        "scale_y": 3.0,
+        "block": "门 - 公制",
+    }
+    for field, value in distinct.items():
+        other = {**base, field: value}
+        assert capture_ops.fingerprint_primitives([base]) != capture_ops.fingerprint_primitives(
+            [other]
+        ), field
+
+    # A field this kind does not carry is neutral, not a different shape: the wire omits a
+    # key rather than nulling it, and the two must hash the same.
+    assert capture_ops.fingerprint_primitives([base]) == capture_ops.fingerprint_primitives(
+        [{**base, "closed": False, "pattern": "", "scale": 0.0}]
+    )
+
+
+def test_two_concentric_circles_of_different_radii_are_two_elements(be):
+    """The whole failure the radius was dropped for: a 500 and an 800 circle were 'the same
+    geometry', so the second was refused as a duplicate and the element was unreachable."""
+    with be.step("draw_circle"):
+        be.circle((0, 0), 500)
+    with be.step("draw_circle"):
+        be.circle((0, 0), 800)
+
+    small = _capture(be, [1], key="ring_small")
+    large = _capture(be, [2], key="ring_large")
+
+    assert small["fingerprint"] != large["fingerprint"]
+    assert catalog.current().get("ring_small") is not None
+    assert catalog.current().get("ring_large") is not None
+
+
 # ---------------------------------------------------------------------------
 # provenance stamped at capture time
 # ---------------------------------------------------------------------------
@@ -366,3 +452,16 @@ def test_capture_refuses_geometry_the_library_already_holds(be):
 
     with pytest.raises(ValueError, match="already holds this geometry as 'first'"):
         _capture(be, _door_steps(be), key="second")
+
+
+def test_the_duplicate_refusal_names_the_fingerprint_it_matched(be):
+    """A successful capture replies with its fingerprint, so the refusal has to say which
+    geometry was collided with — the same string in the same shape — or the caller cannot see
+    whether the two are really the same element."""
+    first = _capture(be, _door_steps(be), key="first")
+
+    with pytest.raises(ValueError) as caught:
+        _capture(be, _door_steps(be), key="second")
+
+    assert first["fingerprint"].startswith("sha256:")
+    assert first["fingerprint"] in str(caught.value)

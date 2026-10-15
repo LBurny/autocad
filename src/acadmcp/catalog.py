@@ -290,19 +290,29 @@ class Catalog:
         reported rather than raised. Entries come flat, under `elements`, and a payload
         grouped under `categories` (the report's own shape) is accepted too, so a reader
         never has to know which of the two it was handed.
+
+        The rebuilt entries are also merged into the catalogue **in force**: a drawing carries
+        the elements it was drawn with, and one captured in it but not yet published is
+        otherwise unreachable the moment a project has a catalogue of its own — the project's
+        files win the precedence, the drawing's own entry is dropped, and its block definition
+        stays in the file, so the element can be neither placed nor captured again under that
+        name. A key the catalogue in force already has is left as its own, so the local
+        standard still wins and there is one entry per key. This runs before the caller reads
+        the catalogue in force (`drawing_open` reaches it through the backend's
+        `embedded_catalog`), which is what makes the merge visible to that read.
         """
         catalog = cls()
-        if not isinstance(payload, dict):
-            return catalog
-        entries = payload.get("elements")
-        if not isinstance(entries, list):
-            entries = [
-                item
-                for items in (payload.get("categories") or {}).values()
-                if isinstance(items, list)
-                for item in items
-            ]
-        catalog.add_entries(entries, library=str(payload.get("library", "")), where="<drawing>")
+        if isinstance(payload, dict):
+            entries = payload.get("elements")
+            if not isinstance(entries, list):
+                entries = [
+                    item
+                    for items in (payload.get("categories") or {}).values()
+                    if isinstance(items, list)
+                    for item in items
+                ]
+            catalog.add_entries(entries, library=str(payload.get("library", "")), where="<drawing>")
+            current().adopt_missing(catalog)
         return catalog
 
     def add_file(self, path: Path) -> None:
@@ -356,6 +366,26 @@ class Catalog:
                 self.elements[element.key] = element
                 if source_file is not None:
                     self._files[element.key] = source_file
+
+    def adopt_missing(self, other: Catalog) -> list[str]:
+        """Take on the entries `other` carries that this catalogue has not got.
+
+        One entry per key: a key both catalogues have is left as this one's, because the
+        catalogue in force is the local standard and quietly redrawing with a drawing's copy
+        of it is the failure the precedence rule exists to prevent. A collided key is returned
+        so the caller can report it — the entries in force also differ, so the drawing's
+        recorded digest disagrees with this catalogue's and the mismatch is reported there
+        too, which is the same warning a differing catalogue has always produced.
+
+        An adopted entry has no catalogue file behind it, exactly like one `add_entries` reads
+        from a drawing: `source_file` says by name that a `geometry_file` cannot be resolved
+        for it rather than guessing a path.
+        """
+        collisions = [key for key in other.elements if key in self.elements]
+        for key, element in other.elements.items():
+            if key not in self.elements:
+                self.elements[key] = element
+        return collisions
 
     def register(self, payload: dict[str, Any]) -> Element:
         """Add one entry at runtime — a captured element — strictly, or not at all.
@@ -493,7 +523,12 @@ class Catalog:
     # --- publishing into the project library -------------------------------
 
     def publish_to(
-        self, path: str | Path | None, element: Element, fragment: dict[str, Any] | None
+        self,
+        path: str | Path | None,
+        element: Element,
+        fragment: dict[str, Any] | None,
+        *,
+        capture_undone: bool = False,
     ) -> dict[str, Any]:
         """Write `element` and its geometry fragment into the project catalogue at `path`.
 
@@ -514,6 +549,12 @@ class Catalog:
         and what was created is reported. The target file is **appended to, never
         overwritten or re-sorted**, its ``_comment`` and any other key preserved, and the
         write is atomic (tmp + `os.replace`).
+
+        `capture_undone` is the caller's answer to "does this drawing hold the capture of
+        `element`, but undone". The finder reads applied steps only, so an undone capture and
+        a definition this drawing never had both arrive here as no fragment — and they have
+        different recoveries, so the refusal has to say which. Left at its default it says
+        nothing about an undo, because this module cannot see the drawing.
 
         Returns ``{ok, file, fragment, created, key, digest}``. Refuses, by name: a key not
         in the catalogue in force, a key the target file already has, and a missing
@@ -540,6 +581,12 @@ class Catalog:
         primitives = list((fragment or {}).get("primitives") or [])
         base_point = list((fragment or {}).get("base_point") or [0.0, 0.0])
         if not block or not primitives:
+            if capture_undone:
+                raise ValueError(
+                    f"the capture step that made '{key}' is undone, so this drawing no longer "
+                    "holds the geometry to publish — drawing_redo restores that step, or "
+                    "capture the element again"
+                )
             raise ValueError(
                 f"the definition for '{key}' lives in the drawing that captured it — open that "
                 "drawing and publish from there"
@@ -576,14 +623,27 @@ class Catalog:
         payload["elements"].append(entry)
         _atomic_write_json(Path(target), payload)
 
-        # The project's catalogue files now differ from what was loaded: forget it, so the
-        # next lookup reads the file that was just written.
+        # The project's catalogue files now differ from what was loaded, so the settings cache
+        # is dropped and a later load walks the tree afresh. This object, though, is the
+        # session's catalogue and it holds captures no file has: resetting on its own would
+        # leave `catalog.current()` reloading from files alone, losing every runtime capture —
+        # and the entry just published, whenever the target is not in the search path — while
+        # the tool still reported ok. So it is put back as the one in force, with the file's own
+        # copy of this entry in place of its runtime twin: one key, and the copy that resolves
+        # on the next machine.
         from . import settings as _settings
 
         _settings.reset()
+        use(self)
 
         written = Catalog()
         written.add_file(Path(target))
+        published = written.get(key)
+        if published is not None:
+            self.elements[key] = published
+            source_file = written.source_file(key)
+            if source_file is not None:
+                self._files[key] = source_file
         return {
             "ok": True,
             "file": str(target),

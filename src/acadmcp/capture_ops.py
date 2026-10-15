@@ -44,19 +44,42 @@ def _round_tenth(value: Any) -> float:
 def _canonical_primitive(prim: dict[str, Any]) -> tuple:
     """One primitive in the shape the fingerprint hashes.
 
-    `(kind, layer, points, text, height)` with the points sorted and rounded — the parts of a
-    primitive that are the *geometry*. Radius, pattern and rotation are deliberately not here
-    yet: this wave fingerprints what a capture reliably carries, and a richer canonical form
-    can land later without invalidating the entries this one stamps.
+    Every geometric field a primitive can carry is here, each read with a default so the
+    tuple's shape is the same for every kind and a wire that omits a field hashes as its
+    neutral value rather than as a different shape. The points and the text are not enough on
+    their own: two concentric circles that differ only in radius used to fingerprint alike, so
+    a genuinely different element was refused as a duplicate of the first and its message said
+    so wrongly.
+
+    This changes what a capture hashes whenever it changes, so an entry stamped by an earlier
+    scheme stops matching a new capture of the same geometry — which costs one re-capture,
+    never a wrong placement.
     """
     flat = [_round_tenth(v) for v in (prim.get("points") or [])]
     points = tuple(sorted((flat[i], flat[i + 1]) for i in range(0, len(flat) - 1, 2)))
     return (
         str(prim.get("kind", "")),
         str(prim.get("layer", "")),
+        str(prim.get("linetype", "")),
         points,
         str(prim.get("text", "")),
         _round_tenth(prim.get("height", 0.0)),
+        _round_tenth(prim.get("width", 0.0)),
+        str(prim.get("align", "")),
+        _round_tenth(prim.get("radius", 0.0)),
+        _round_tenth(prim.get("start_angle", 0.0)),
+        _round_tenth(prim.get("end_angle", 0.0)),
+        _round_tenth(prim.get("rotation", 0.0)),
+        _round_tenth(prim.get("scale_x", 0.0)),
+        _round_tenth(prim.get("scale_y", 0.0)),
+        _round_tenth(prim.get("offset", 0.0)),
+        _round_tenth(prim.get("text_height", 0.0)),
+        str(prim.get("pattern", "")),
+        _round_tenth(prim.get("scale", 0.0)),
+        _round_tenth(prim.get("angle", 0.0)),
+        bool(prim.get("solid", False)),
+        bool(prim.get("closed", False)),
+        str(prim.get("block", "")),
     )
 
 
@@ -102,15 +125,27 @@ def capture(
     rectangle's lower-left.
 
     Returns the definition's name, the key it was registered under, how many primitives it
-    holds and the base point as placed. Refuses, loudly and by name: an empty gathering, a step
-    that is missing or undone, sheet furniture (paper millimetres are not model geometry), a
-    key the catalogue already has, and a backend that cannot write a definition at all.
+    holds and the base point as placed. Refuses, loudly and by name: an empty gathering, a
+    step index repeated (it would draw that geometry into the block twice), a step that is
+    missing or undone, sheet furniture (paper millimetres are not model geometry), geometry
+    the library already holds under another key, a key the catalogue already has, and a
+    backend that cannot write a definition at all.
     """
     wanted = [int(step) for step in (steps or [])]
     if not wanted:
         raise ValueError(
             "a capture needs at least one step to gather geometry from; none was given"
         )
+    seen: set[int] = set()
+    for step in wanted:
+        if step in seen:
+            # Gathered twice, the step's primitives are concatenated twice and the block
+            # holds each entity twice — invisible in the model, and the fingerprint then
+            # refuses the honest single-copy capture as a duplicate of it.
+            raise ValueError(
+                f"step {step} is listed twice — each step contributes its geometry once"
+            )
+        seen.add(step)
     key = str(key or "").strip().lower()
     if not key:
         raise ValueError("a capture needs a key: it is the name the element is placed by")
@@ -147,11 +182,13 @@ def capture(
     fingerprint = fingerprint_primitives(primitives)
     for other in loaded.elements.values():
         if other.origin.get("fingerprint") == fingerprint:
-            # The same geometry under another name is the same element, not a new one. Naming
-            # the existing key lets the caller reuse it, or rename only if it really differs.
+            # The same geometry under another name is the same element, not a new one. Both the
+            # existing key and the fingerprint are named, so the caller can reuse the entry —
+            # or see which geometry it collided with, since the reply of a successful capture
+            # carries the same string.
             raise ValueError(
-                f"the library already holds this geometry as '{other.key}' — capture refused; "
-                "rename only if it is genuinely a different element"
+                f"the library already holds this geometry as '{other.key}' ({fingerprint}) — "
+                "capture refused; rename only if it is genuinely a different element"
             )
 
     points = [p for prim in primitives for p in unflatten_points(prim.get("points", []))]

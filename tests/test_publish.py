@@ -60,6 +60,16 @@ def _fragment(be, element) -> dict:
     return {**found, "fingerprint": element.origin["fingerprint"]}
 
 
+def _draw_another_door(be) -> list[int]:
+    """A second element with geometry of its own — a wall and a 700 door on it — and the steps
+    it drew, so a test captures two distinct elements into one session."""
+    with be.step("draw_wall"):
+        ops.draw_wall_run(be, [(0, 5000), (6000, 5000)], 200)
+    with be.step("draw_door"):
+        ops.draw_door(be, (1000, 5000), 700, 200)
+    return [step.index for step in be.journal.steps[-2:]]
+
+
 # ---------------------------------------------------------------------------
 # what a publish writes
 # ---------------------------------------------------------------------------
@@ -191,6 +201,39 @@ def test_publish_refuses_when_the_drawing_has_no_definition_record(tmp_path):
         catalog.current().publish_to(str(tmp_path / "elements.json"), entry, None)
 
 
+def test_publish_says_the_capture_step_is_undone(tmp_path):
+    """Undo the capture and the finder stops seeing the record, so this arrives as the same
+    missing fragment as a drawing that never had the definition. The caller knows which it was
+    — the drawing still records the capture, undone — and the recovery is different."""
+    be = make_backend("dxf")
+    _capture_door(be)
+    entry = catalog.current().get(KEY)
+    assert _fragment(be, entry)  # the record is there while the capture step stands
+
+    be.undo(1)
+
+    assert be.find_block_primitives(entry.params["block"]) is None
+    with pytest.raises(ValueError, match="capture step that made 'rollup_door' is undone"):
+        catalog.current().publish_to(
+            str(tmp_path / "elements.json"), entry, None, capture_undone=True
+        )
+
+
+def test_publish_does_not_claim_an_undo_it_cannot_see(tmp_path):
+    """Without the caller saying an undo is what took the definition away, the message must not
+    invent one: another drawing's capture is not this drawing's undone step."""
+    catalog.current().register(
+        {"key": "elsewhere", "op": "insert_captured", "params": {"block": "ACADMCP_ELSEWHERE"}}
+    )
+    entry = catalog.current().get("elsewhere")
+
+    with pytest.raises(ValueError) as caught:
+        catalog.current().publish_to(str(tmp_path / "elements.json"), entry, None)
+
+    assert "drawing that captured it" in str(caught.value)
+    assert "undone" not in str(caught.value)
+
+
 def test_publishing_the_same_key_twice_is_refused(tmp_path):
     be = make_backend("dxf")
     _capture_door(be)
@@ -205,6 +248,66 @@ def test_publishing_the_same_key_twice_is_refused(tmp_path):
 
     with pytest.raises(ValueError, match="already has an entry"):
         catalog.current().publish_to(target, entry, _fragment(be, entry))
+
+
+# ---------------------------------------------------------------------------
+# what a publish must not take away
+# ---------------------------------------------------------------------------
+
+
+def test_publish_keeps_the_captures_the_session_has_not_written_anywhere(tmp_path):
+    """Publishing forgets the settings cache so the next load reads the file just written —
+    but the catalogue in force is the *session's*, and it holds captures no file has. Dropping
+    it lost every one of them, and the entry just published too whenever the target was not in
+    the search path — while the tool still reported ok."""
+    be = make_backend("dxf")
+    _capture_door(be)
+    steps = _draw_another_door(be)
+    with be.step("element_capture", params={"key": "other_door"}):
+        capture_ops.capture(be, steps=steps, key="other_door", layer="A-DOOR")
+    entry = catalog.current().get(KEY)
+
+    report = catalog.current().publish_to(
+        str(tmp_path / "elements.json"), entry, _fragment(be, entry)
+    )
+
+    assert report["ok"] is True
+    loaded = catalog.current()
+    assert loaded.get(KEY) is not None
+    assert loaded.get("other_door") is not None
+    # The published key now resolves to the file's own copy — the one that travels — in place
+    # of its runtime twin, so one key holds one entry and not two.
+    assert loaded.source_file(KEY) == Path(report["file"])
+    assert loaded.get(KEY).origin["geometry_file"] == f"library/{KEY}.dxf"
+    assert not loaded.get("other_door").origin.get("geometry_file")
+
+
+def test_publishing_into_the_project_file_replaces_the_runtime_copy(tmp_path):
+    """The other half of the same rule: when the target *is* in the search path the file's
+    entry and the session's are the same key, so the file's wins outright."""
+    (tmp_path / "acadmcp.json").write_text(
+        json.dumps({"catalog": ["elements.json"]}), encoding="utf-8"
+    )
+    (tmp_path / "elements.json").write_text(
+        json.dumps({"_comment": "ours", "elements": []}), encoding="utf-8"
+    )
+    settings.reset()
+    catalog.use(Catalog.load([tmp_path / "elements.json"]))
+    be = make_backend("dxf")
+    _capture_door(be)
+
+    report = catalog.current().publish_to(
+        "", catalog.current().get(KEY), _fragment(be, catalog.current().get(KEY))
+    )
+
+    assert report["file"] == str(tmp_path / "elements.json")
+    payload = json.loads((tmp_path / "elements.json").read_text(encoding="utf-8"))
+    assert [e["key"] for e in payload["elements"]] == [KEY]  # one entry, not two
+    loaded = catalog.current()
+    assert [key for key in loaded.elements if key == KEY] == [KEY]
+    assert loaded.source_file(KEY) == Path(report["file"])
+    # A fresh load of that file agrees, so nothing was only ever in memory.
+    assert Catalog.load([report["file"]]).get(KEY).origin["geometry_file"] == f"library/{KEY}.dxf"
 
 
 # ---------------------------------------------------------------------------
@@ -345,3 +448,39 @@ def test_element_publish_refuses_a_key_this_drawing_never_captured(_tool_session
 
     with pytest.raises(ValueError, match="lives in the drawing that captured it"):
         server.element_publish(key="elsewhere")
+
+
+def test_a_capture_the_project_catalogue_lacks_survives_a_reopen(tmp_path, _tool_session):
+    """Two processes: capture in a project that has a catalogue of its own, never publish, save,
+    reopen. The project's files win the precedence — and the drawing's own capture is still
+    placeable, because the entries it carries that the project has not got are adopted on open.
+    Without that they were dropped while their block definition stayed in the file, so the
+    element could be neither placed nor captured again."""
+    (tmp_path / "acadmcp.json").write_text(
+        json.dumps({"catalog": ["elements.json"]}), encoding="utf-8"
+    )
+    (tmp_path / "elements.json").write_text(
+        json.dumps({"elements": [{"key": "project_door", "block": "P", "source": "ours.dwg"}]}),
+        encoding="utf-8",
+    )
+    settings.reset()
+    catalog.reset()
+    server.drawing_new(backend="dxf")
+    server.draw_wall(points=[[0, 0], [6000, 0]], thickness=200)
+    server.draw_door(hinge=[1000, 0], width=900)
+    server.element_capture(steps=[1, 2], key="orphan_door", layer="A-DOOR")
+    path = str(tmp_path / "plan.dxf")
+    server.drawing_save(path=path)
+
+    # A second process: nothing loaded, and the file reopened inside the project.
+    catalog.reset()
+    server._state.backend = None
+    report = server.drawing_open(path)
+
+    assert report["catalog_source"] == "project"
+    assert catalog.current().get("project_door") is not None  # the local standard still wins
+    assert catalog.current().get("orphan_door") is not None
+    placed = server.place_element(type="orphan_door", at=[0, 0], tag=False)
+    assert placed["ok"] is True
+    be = server._state.backend
+    assert [e.dxf.name for e in be.msp if e.dxftype() == "INSERT"] == ["ACADMCP_ORPHAN_DOOR"]
