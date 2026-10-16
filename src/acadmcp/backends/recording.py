@@ -20,7 +20,7 @@ from collections.abc import Iterator, Sequence
 from typing import Any, NoReturn
 
 from ..geom import Point, xy
-from ..journal import Journal, StepRecord
+from ..journal import IN_DRAWING_STATES, Journal, StepRecord
 from .base import BackendError
 
 
@@ -323,7 +323,7 @@ class RecordingBackend:
                     f"{len(by_index) or len(rows)} step(s), so there is nothing to capture there"
                 )
             state = row.get("state") if row is not None else step.state
-            if str(state) not in ("applied", "accepted"):
+            if str(state) not in IN_DRAWING_STATES:
                 raise ValueError(
                     f"step {wanted} is {state}, not applied; only geometry that is on the "
                     "drawing can be captured"
@@ -369,7 +369,7 @@ class RecordingBackend:
             row = rows.get(index)
             step = by_index.get(index)
             state = row.get("state") if row is not None else (step.state if step else None)
-            if str(state) not in ("applied", "accepted"):
+            if str(state) not in IN_DRAWING_STATES:
                 continue
             primitives = row.get("primitives") if isinstance(row, dict) else None
             if not isinstance(primitives, list):

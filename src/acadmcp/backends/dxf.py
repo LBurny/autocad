@@ -984,7 +984,10 @@ class DxfBackend(RecordingBackend):
         align: str = "center",
     ) -> Any:
         self._ops += 1
-        attach = {"center": 5, "left": 7, "top-center": 3}.get(align, 5)
+        # 2 is TOP_CENTER. 3 is TOP_RIGHT, which is what "top-center" used to be written as —
+        # an mtext anchored by its top-right corner where the caller asked for its top middle.
+        # "left" is 7 (BOTTOM_LEFT), the nearest corner to the baseline a TEXT's LEFT means.
+        attach = {"center": 5, "left": 7, "top-center": 2}.get(align, 5)
         m = self.msp.add_mtext(
             str(content),
             dxfattribs={

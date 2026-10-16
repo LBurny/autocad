@@ -564,6 +564,14 @@ public sealed class StepsControl : UserControl
     /// A cheap fingerprint of everything the list shows. Rebuilding on every poll
     /// would reset the selection and the scroll position once a second.
     /// </summary>
+    /// <remarks>
+    /// The note and the params are part of it on purpose. Both are editable from outside
+    /// this panel — <c>step_control(action='update')</c> writes either — and while they were
+    /// left out, such an edit changed nothing the fingerprint could see, so the poll skipped
+    /// the rebuild and the detail pane went on showing the params it was last rebuilt with.
+    /// Lengths alone would not do either: a same-length rewrite is exactly the edit a person
+    /// makes to a number.
+    /// </remarks>
     private static string Signature(Journal journal)
     {
         var text = new StringBuilder(journal.Count * 24);
@@ -573,9 +581,11 @@ public sealed class StepsControl : UserControl
                 .Append((int)record.State).Append(record.Accepted ? 'A' : '.')
                 .Append(record.Drifted ? 'D' : '.')
                 .Append(record.Handles.Count).Append('/')
-                .Append(record.Label.Length).Append('/')
-                .Append(record.Error.Length).Append('/')
-                .Append(record.Result.Length).Append(';');
+                .Append(record.Label).Append('/')
+                .Append(record.Error).Append('/')
+                .Append(record.Result).Append('/')
+                .Append(record.Note).Append('/')
+                .Append(record.Params?.ToJsonString() ?? "").Append(';');
         }
         return text.ToString();
     }

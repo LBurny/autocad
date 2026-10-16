@@ -30,7 +30,12 @@ public sealed class IdleQueueBlockedException : System.Exception
 /// </para>
 /// <para>
 /// A caller that gives up marks its work abandoned, so a request that timed out
-/// can never execute later and change the drawing behind the client's back.
+/// <em>before it started</em> can never execute later and change the drawing behind
+/// the client's back. Work that has already started is a different matter and is
+/// waited out instead of abandoned: a synchronous function on the main thread does not
+/// stop halfway, so it will finish, and telling the caller it was blocked would be a lie
+/// about a drawing that is being changed in front of it. The two decisions are made under
+/// one lock, so there is no window in which both sides think they won.
 /// </para>
 /// </remarks>
 public static class IdleQueue
@@ -101,12 +106,25 @@ public static class IdleQueue
         }
 
         var completion = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var abandoned = 0;
+
+        // 0 = still queued, 1 = running on the main thread, 2 = abandoned by its caller.
+        // Read and written under one lock from both threads, so the item cannot start at the
+        // same moment the caller decides to give up. The previous version read a bare flag
+        // once, which left exactly that window: the main thread would be inside work() when
+        // the wait timed out, the work would run to completion, and the caller would be told
+        // `blocked` — a step applied while the client was told nothing had changed.
+        var gate = new object();
+        var phase = 0;
+
         Pending.Enqueue(() =>
         {
-            if (Volatile.Read(ref abandoned) == 1)
+            lock (gate)
             {
-                return;
+                if (phase != 0)
+                {
+                    return;
+                }
+                phase = 1;
             }
             try
             {
@@ -124,7 +142,24 @@ public static class IdleQueue
         }
         catch (TimeoutException)
         {
-            Volatile.Write(ref abandoned, 1);
+            var running = false;
+            lock (gate)
+            {
+                running = phase == 1;
+                if (!running)
+                {
+                    phase = 2;
+                }
+            }
+
+            if (running)
+            {
+                // Already on AutoCAD's main thread and past its first statement: it will
+                // finish, so the wait is now bounded by the work rather than by AutoCAD's
+                // idleness. Keep waiting for the real answer.
+                return await completion.Task.WaitAsync(cancel).ConfigureAwait(false);
+            }
+
             throw new IdleQueueBlockedException(DescribeStall());
         }
     }
@@ -147,6 +182,14 @@ public static class IdleQueue
     /// </summary>
     public static string DescribeStall()
     {
+        // Detached first: a request already waiting when the plugin was unloaded gets no
+        // answer from the queue, and "AutoCAD has not been idle for 30s" would send its caller
+        // looking at AutoCAD for something that is not there.
+        if (!_attached)
+        {
+            return "the plugin has been unloaded, so it will not run this";
+        }
+
         var command = Volatile.Read(ref _command);
         if (command.Length > 0)
         {

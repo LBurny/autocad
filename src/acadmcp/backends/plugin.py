@@ -23,16 +23,17 @@ from typing import Any
 
 from ..acad_plugin_client import PluginClient
 from ..geom import Point
-from ..journal import StepRecord
+from ..journal import IN_DRAWING_STATES, StepRecord
 from ..standards import lineweight_centimm
 from .base import BackendError
 from .recording import RecordingBackend
 
-#: Step states on the wire that mean "in the drawing". The plugin serialises
-#: StepState.Done as "done" (RpcServer.Row lowercases the enum name), while the Python
-#: journal says "applied" — filtering wire rows for "applied" alone matched nothing,
-#: and an undo over a live plugin reported ok while erasing nothing.
-_APPLIED_WIRE_STATES = frozenset({"applied", "done"})
+#: The same table the undo path filters on, under the name this module has used for it.
+_APPLIED_WIRE_STATES = IN_DRAWING_STATES
+
+#: How many step rows one read asks the plugin for. The plugin bounds a reply of its own
+#: (100000), so this is a page size rather than a ceiling: a longer journal is read in pages.
+STEP_PAGE = 10_000
 
 
 class StepResult:
@@ -187,7 +188,14 @@ class PluginBackend(RecordingBackend):
     def info(self) -> dict[str, Any]:
         drawing = self.client.call("info")
         status = self.client.call("status")
-        return {**drawing, "journal": {k: v for k, v in status.items() if k != "unrecoverable"}}
+        # Every other backend names itself here, and `drawing_status`'s reply declares the
+        # key, so leaving it to the plugin's own `info` made `status["backend"]` a KeyError
+        # on a live drawing while both headless backends answered it.
+        return {
+            **drawing,
+            "backend": "plugin",
+            "journal": {k: v for k, v in status.items() if k != "unrecoverable"},
+        }
 
     def zoom_extents(self) -> dict[str, Any]:
         """Frame the whole drawing. Synchronous, so a screenshot taken next shows it."""
@@ -476,8 +484,21 @@ class PluginBackend(RecordingBackend):
         carries the entity *count*. Deriving it here rather than leaving it to each reader
         is what keeps `drawing_verify` a read-back written once — a reader that had to know
         which backend spells the number how would be one reader per backend.
+
+        Read in pages, because the plugin bounds a single reply: a journal longer than that
+        bound used to come back as its *oldest* prefix with nothing said about it, and `undo`
+        computes its target from these rows — so past the bound a one-step undo named a step
+        hundreds back. `total` is what tells a short page from the whole journal.
         """
-        rows = self.client.call("get_steps", offset=0, limit=10000)["steps"]
+        rows: list[dict[str, Any]] = []
+        while True:
+            page = self.client.call("get_steps", offset=len(rows), limit=STEP_PAGE)
+            steps = page.get("steps") or []
+            rows.extend(steps)
+            total = page.get("total")
+            if not steps or not isinstance(total, int) or len(rows) >= total:
+                break
+
         for row in rows:
             if "entities" not in row:
                 handles = row.get("handles")

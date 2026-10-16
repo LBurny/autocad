@@ -374,7 +374,7 @@ public class JournalTests
     {
         var journal = Applied(3);
 
-        var (handles, removed) = journal.PlanReject(2);
+        var (handles, removed) = journal.PlanReject(2)!.Value;
 
         Assert.Equal(["H2", "H3"], handles);
         Assert.Equal([2, 3], removed);
@@ -389,7 +389,7 @@ public class JournalTests
         var journal = Applied(2);
         journal.SetAccepted(2, true);
 
-        var (handles, _) = journal.PlanReject(2);
+        var (handles, _) = journal.PlanReject(2)!.Value;
 
         Assert.Equal(["H2"], handles);
     }
@@ -397,7 +397,7 @@ public class JournalTests
     [Fact]
     public void RejectFromTheFirstStepEmptiesTheJournal()
     {
-        var (handles, removed) = Applied(2).PlanReject(1);
+        var (handles, removed) = Applied(2).PlanReject(1)!.Value;
 
         Assert.Equal(["H1", "H2"], handles);
         Assert.Equal([1, 2], removed);
@@ -410,7 +410,7 @@ public class JournalTests
         journal.AddExecuted(Done("shared"));
         journal.AddExecuted(Done("shared"));
 
-        var (handles, _) = journal.PlanReject(2);
+        var (handles, _) = journal.PlanReject(2)!.Value;
 
         Assert.Empty(handles);
     }
@@ -599,6 +599,77 @@ public class JournalTests
         Assert.Equal(StepState.Planned, record.State);
         Assert.Equal("draw_room lab", record.Label);
         Assert.True(record.IsRunnable);
+    }
+
+    // ---------------------------------------------------------------- the fixes
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(4)]
+    public void RejectingANonExistentStepIsRefusedRatherThanThrowing(int index)
+    {
+        // RemoveRange raised ArgumentOutOfRangeException for every one of these, so the caller
+        // saw "Non-negative number required" instead of a refusal. Index 0 is the value that
+        // made it likely: `rollback_to` accepts and documents it as "before every step", and
+        // reject takes the same argument. Unlike a rollback there is no safe reading of 0 for
+        // an erase that cannot be taken back, so it is refused by name.
+        var journal = Applied(3);
+
+        Assert.Null(journal.PlanReject(index));
+        Assert.Equal(3, journal.Count);
+    }
+
+    [Fact]
+    public void RejectingTheLastStepIsAllowed()
+    {
+        var journal = Applied(3);
+
+        var plan = journal.PlanReject(3);
+
+        Assert.NotNull(plan);
+        Assert.Equal([3], plan.Value.Removed);
+        Assert.Equal(2, journal.Count);
+    }
+
+    [Fact]
+    public void ASnapshotIsNotReportedAsSomethingARollbackCannotRecreate()
+    {
+        // The baseline is stored Executable = false, Mutated = false precisely because it owns
+        // no geometry — and `Mutated && Executable` read that as "cannot be re-created", so
+        // every rollback past a baseline warned about a step that never drew anything.
+        var journal = Applied(1);
+        journal.AddExecuted(new StepRecord
+        {
+            State = StepState.Done,
+            Op = "snapshot",
+            Mutated = false,
+            Executable = false,
+        });
+        journal.AddExecuted(Done("H2"));
+
+        var plan = journal.PlanRollback(0);
+
+        Assert.True(plan.Allowed);
+        Assert.False(plan.Partial);
+        Assert.Empty(plan.Unrecoverable);
+        Assert.DoesNotContain("partial", plan.Describe());
+    }
+
+    [Fact]
+    public void UpdateLeavesTheCallersPatchAlone()
+    {
+        var journal = Applied(1);
+        var patch = Patch(("label", "renamed"), ("note", "checked"), ("width", 900));
+
+        journal.Update(1, patch);
+
+        // Applying a patch used to empty it, which a caller that built one patch and reused
+        // it would find out about only on the second step.
+        Assert.Equal(["label", "note", "width"], patch.Select(pair => pair.Key));
+        Assert.Equal("renamed", journal.At(1)!.Label);
+        Assert.Equal("checked", journal.At(1)!.Note);
+        Assert.Equal(900, journal.At(1)!.Params!["width"]!.GetValue<int>());
     }
 
     private static System.Text.Json.Nodes.JsonObject Patch(

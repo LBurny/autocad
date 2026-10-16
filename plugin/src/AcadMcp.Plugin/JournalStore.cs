@@ -91,7 +91,7 @@ public sealed class JournalStore
 
         var dictionary = OpenDictionary(tr, create: false);
         var meta = ReadText(dictionary, tr, MetaKey);
-        var count = 0;
+        var version = JournalJson.Version;
         if (meta is not null)
         {
             try
@@ -99,42 +99,55 @@ public sealed class JournalStore
                 if (JsonNode.Parse(meta) is JsonObject metaObject)
                 {
                     journal.Description = metaObject["description"]?.GetValue<string>() ?? "";
-                    count = metaObject["count"]?.GetValue<int>() ?? 0;
+                    version = metaObject["version"]?.GetValue<int>() ?? JournalJson.Version;
                 }
             }
             catch (Exception)
             {
-                // A corrupt meta block costs the header, not the steps: the count
-                // falls back to zero and the caller re-derives it below.
-                count = 0;
+                // A corrupt meta block costs the header, not the steps: the records below
+                // are self-describing, so the header is all that is lost.
             }
         }
 
-        // Trust the records over the count. A drawing whose meta was lost should
-        // still yield its steps rather than appear empty.
-        var present = CountStepKeys(dictionary);
-        if (present > count)
+        // A journal written by a newer build is not read at all. Every field reader in
+        // JournalJson is tolerant by design, which means a renamed or re-typed field would
+        // load as its default: the steps would come back looking whole while describing
+        // something this build cannot interpret. Saying so is better than pretending.
+        var bound = HighestStepIndex(dictionary);
+        if (version > JournalJson.Version)
         {
-            count = present;
+            PluginLog.Write(
+                $"journal: this drawing's journal is version {version} and this build writes "
+                + $"{JournalJson.Version}; leaving its records up to step {bound} unread, because "
+                + "a newer field would load as a default and the steps would read as intact");
+            journal.Unreadable = bound;
+            return journal;
         }
 
-        var payloads = new List<string?>(count);
-        for (var index = 1; index <= count; index++)
-        {
-            payloads.Add(ReadStep(dictionary, tr, index));
-        }
-
-        // Numbering and the unreadable count are Core's job, so they can be tested
-        // without AutoCAD; the loop above is only the I/O.
-        journal.Unreadable = JournalJson.AppendOrdered(journal, payloads);
+        // The walk is bounded by the highest step number present, not by the meta's `count`.
+        // The count is a distinct-key total, so a journal with a hole — a truncated chunk
+        // chain, a hand-edited dictionary — has a count smaller than its highest step number,
+        // and reading 1..count would silently drop every step above the hole while their
+        // geometry stayed in the drawing. A hand-edited count of two billion is the same bug
+        // from the other side: it turned the loop into a multi-gigabyte allocation that no
+        // reader here can catch.
+        journal.Unreadable = JournalJson.AppendOrdered(journal, ReadPayloads(dictionary, tr, bound));
         if (journal.Unreadable > 0)
         {
             PluginLog.Write(
-                $"journal: {journal.Unreadable} of {count} record(s) could not be read; "
+                $"journal: {journal.Unreadable} of {bound} record(s) could not be read; "
                 + "those steps can neither be replayed nor rolled back, and their geometry "
                 + "is now owned by nothing");
         }
         return journal;
+    }
+
+    private IEnumerable<string?> ReadPayloads(DBDictionary dictionary, Transaction tr, int bound)
+    {
+        for (var index = 1; index <= bound; index++)
+        {
+            yield return ReadStep(dictionary, tr, index);
+        }
     }
 
     /// <summary>Write the whole journal, dropping any step records the journal no longer has.</summary>
@@ -211,12 +224,27 @@ public sealed class JournalStore
         }
     }
 
-    /// <summary>How many distinct step records are present, ignoring chunk suffixes.</summary>
-    private static int CountStepKeys(DBDictionary dictionary) =>
-        StepKeys(dictionary)
-            .Select(key => key.Split('.')[0])
-            .Distinct(StringComparer.Ordinal)
-            .Count();
+    /// <summary>
+    /// The highest step number present, ignoring chunk suffixes, or 0 for none.
+    /// </summary>
+    /// <remarks>
+    /// This is the read walk's bound rather than the meta block's count, because it is the
+    /// one number that cannot disagree with the records: a missing step in the middle must
+    /// not truncate everything above it.
+    /// </remarks>
+    private static int HighestStepIndex(DBDictionary dictionary)
+    {
+        var highest = 0;
+        foreach (var key in StepKeys(dictionary))
+        {
+            var head = key.Split('.')[0];
+            if (int.TryParse(head.AsSpan(StepPrefix.Length), out var index) && index > highest)
+            {
+                highest = index;
+            }
+        }
+        return highest;
+    }
 
     private static IEnumerable<string> StepKeys(DBDictionary dictionary)
     {
@@ -242,7 +270,10 @@ public sealed class JournalStore
         }
 
         var chunks = new List<string>();
-        for (var start = 0; start < json.Length; start += ChunkChars)
+        // The advance is the length actually emitted, not the nominal chunk size: cutting a
+        // surrogate pair short by one character and then stepping past it by the full chunk
+        // drops that character entirely, which the guard above is there to prevent.
+        for (var start = 0; start < json.Length;)
         {
             var length = Math.Min(ChunkChars, json.Length - start);
             // Never cut a surrogate pair in half: a lone half encodes to a
@@ -252,6 +283,7 @@ public sealed class JournalStore
                 length--;
             }
             chunks.Add(json.Substring(start, length));
+            start += length;
         }
         return chunks;
     }
@@ -298,11 +330,18 @@ public sealed class JournalStore
 
     private static void Trash(Transaction tr, ObjectId id)
     {
-        if (id.IsNull || !id.IsValid)
+        // IsErased is checked before opening: asking to open an erased object with
+        // openErased false raises eWasErased rather than answering null, so a stale id here
+        // would abort the transaction instead of being skipped.
+        if (id.IsNull || !id.IsValid || id.IsErased)
         {
             return;
         }
         var obj = tr.GetObject(id, OpenMode.ForWrite, openErased: false, forceOpenOnLockedLayer: false);
-        obj?.Erase();
+        if (obj is null || obj.IsErased)
+        {
+            return;
+        }
+        obj.Erase();
     }
 }

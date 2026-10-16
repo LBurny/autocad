@@ -243,20 +243,33 @@ public sealed class StepEngine
         if (!planned.Executable)
         {
             // Nothing to re-create; mark it done so the cursor moves past it
-            // rather than retrying it forever.
-            using var docLock = _doc.LockDocument();
-            using var tr = _db.TransactionManager.StartTransaction();
-            Replace(planned with
+            // rather than retrying it forever. The transaction and the catch are the same
+            // shape as the branch below because this one mutates the journal too: without
+            // them a failed save left memory saying "done" while the drawing still said
+            // "planned", and nothing on the RPC path re-reads to find out.
+            try
             {
-                State = StepState.Done,
-                Mutated = false,
-                Atomic = false,
-                Transaction = "",
-                ObjectsAfter = [],
-                Result = "skipped: not re-executable",
-            });
-            _store.Save(tr, _journal);
-            tr.Commit();
+                using var docLock = _doc.LockDocument();
+                using var tr = _db.TransactionManager.StartTransaction();
+                Replace(planned with
+                {
+                    State = StepState.Done,
+                    Mutated = false,
+                    Atomic = false,
+                    Transaction = "",
+                    ObjectsAfter = [],
+                    Result = "skipped: not re-executable",
+                });
+                _store.Save(tr, _journal);
+                tr.Commit();
+            }
+            catch (System.Exception error)
+            {
+                Reload();
+                PluginLog.Write($"step {planned.Index} could not be marked as skipped", error);
+                return StepOutcome.Fail("run", $"step {planned.Index} failed: {error.Message}");
+            }
+
             return new StepOutcome
             {
                 Ok = true,
@@ -356,13 +369,26 @@ public sealed class StepEngine
     /// <summary>Erase a step and everything after it, and drop them from the journal.</summary>
     public StepOutcome Reject(int index)
     {
+        var plan = _journal.PlanReject(index);
+        if (plan is null)
+        {
+            // Refused before anything is opened, so the drawing is untouched and the caller
+            // is told which numbers would have worked. Reject erases for good, so there is no
+            // index outside the journal that is safe to read as "everything".
+            var has = _journal.Count;
+            return StepOutcome.Fail(
+                "reject",
+                $"step {index} does not exist; this drawing has {has} step(s), so reject takes "
+                + (has == 0 ? "no index at all" : $"1 to {has}"),
+                $"step {index} does not exist; this drawing has {has} step(s)");
+        }
+
         try
         {
-            var plan = _journal.PlanReject(index);
             using var docLock = _doc.LockDocument();
             using var tr = _db.TransactionManager.StartTransaction();
 
-            var erased = Erase(tr, plan.Handles);
+            var erased = Erase(tr, plan.Value.Handles);
             _store.Save(tr, _journal);
             tr.Commit();
 
@@ -370,8 +396,8 @@ public sealed class StepEngine
             {
                 Ok = true,
                 Action = "reject",
-                Touched = plan.Removed,
-                Message = $"dropped step(s) {string.Join(", ", plan.Removed)}, "
+                Touched = plan.Value.Removed,
+                Message = $"dropped step(s) {string.Join(", ", plan.Value.Removed)}, "
                     + $"erased {erased.Count} entity/ies",
             };
         }
@@ -686,7 +712,13 @@ public sealed class StepEngine
             {
                 continue;
             }
-            if (!_db.TryGetObjectId(new Handle(value), out var id) || id.IsNull || !id.IsValid)
+            // IsErased belongs in this guard, and not only for symmetry with IsValid: the
+            // open below asks for openErased false, which raises eWasErased rather than
+            // answering null, so without it one hand-erased entity made every rollback that
+            // covered it fail forever — the transaction aborted and nothing at all was
+            // erased. Skipping is the behaviour the comment below claims.
+            if (!_db.TryGetObjectId(new Handle(value), out var id)
+                || id.IsNull || !id.IsValid || id.IsErased)
             {
                 // Already deleted by the user or by an earlier edit: nothing to do,
                 // and not an error worth failing the rollback over.

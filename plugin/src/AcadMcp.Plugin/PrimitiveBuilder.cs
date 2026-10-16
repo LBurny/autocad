@@ -49,6 +49,15 @@ public static class PrimitiveBuilder
     /// </summary>
     public static Entity Build(Primitive primitive, BuildContext context)
     {
+        // Before anything is created: a primitive that cannot be drawn as asked has to fail
+        // here, where the caller's own error can be named, rather than becoming a
+        // right-looking entity somewhere nobody meant it to be.
+        var unbuildable = primitive.UnbuildableReason();
+        if (unbuildable.Length > 0)
+        {
+            throw new InvalidOperationException(unbuildable);
+        }
+
         var entity = primitive.Kind switch
         {
             PrimitiveKind.Line => BuildLine(primitive),
@@ -60,6 +69,9 @@ public static class PrimitiveBuilder
             PrimitiveKind.Hatch => BuildHatch(primitive),
             PrimitiveKind.Dimension => BuildDimension(primitive, context.Database),
             PrimitiveKind.Insert => BuildInsert(primitive, context),
+            // Unreachable: UnbuildableReason above already refuses Unknown, naming the kind.
+            // Kept so that adding a member to the enum without a builder is a compile-time
+            // gap rather than a silently undrawn primitive.
             _ => throw new ArgumentOutOfRangeException(
                 nameof(primitive), primitive.Kind, "unsupported primitive kind"),
         };
@@ -160,7 +172,10 @@ public static class PrimitiveBuilder
             // A zero-width mtext is rejected by AutoCAD, so fall back to the same
             // generous default the DXF backend uses.
             Width = p.Width > 0 ? p.Width : 6000.0,
-            Attachment = p.Align == "left" ? AttachmentPoint.TopLeft : AttachmentPoint.MiddleCenter,
+            // Rotation was silently dropped here, so a rotated mtext arrived horizontal while
+            // the same journal written to DXF came out turned.
+            Rotation = Radians(p.Rotation),
+            Attachment = AttachmentForMText(p.Align),
         };
 
         if (!textStyle.IsNull)
@@ -215,6 +230,18 @@ public static class PrimitiveBuilder
             DimensionText = "",
             DimensionStyle = database.Dimstyle,
         };
+
+        // The text height travels with the primitive as a *model* height — the caller scaled
+        // it by the sheet's plot scale — and the dimension style's own dimtxt is a paper
+        // height. Dropping it, which this did, left every dimension on a 1:100 plan with text
+        // about a hundredth of the size asked for, and made the same journal plot differently
+        // from the DXF backend, which overrides dimtxt for exactly this reason. A per-entity
+        // override rather than a change to the style: the style is document state shared with
+        // the user's own dimensions.
+        if (p.TextHeight > 0)
+        {
+            dimension.Dimtxt = p.TextHeight;
+        }
         return dimension;
     }
 
@@ -417,19 +444,66 @@ public static class PrimitiveBuilder
     }
 
     private static string Describe(IEnumerable<object> values) =>
-        string.Join(", ", values.Select(value => value is string text ? $"'{text}'" : $"{value}"));
+        string.Join(", ", values.Select(value => value is string text
+            ? $"'{text}'"
+            // Invariant: the reader of this message is a caller comparing it against the
+            // values it sent, and a comma decimal separator would show it something else.
+            : Convert.ToString(value, CultureInfo.InvariantCulture)));
 
     // ---------------------------------------------------------------- helpers
 
+    /// <summary>The alignment words this backend can put on a text.</summary>
+    private const string TextAlignments = "'left', 'center', 'right', 'top-center'";
+
+    /// <summary>
+    /// Alignment modes for an align word. Refuses anything it cannot draw as asked.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The three left-anchored vertical modes are refused rather than drawn. A DBText honours
+    /// its vertical mode only when the horizontal mode is centred or right — the alignment
+    /// point is not used at all for a left text — so accepting "top-left" would draw
+    /// baseline-left text and say nothing, which is the silently-wrong drawing this file
+    /// refuses everywhere else. The drawing backend this journal also runs on <em>can</em>
+    /// express all six, which is exactly why the difference has to be said out loud instead
+    /// of showing up as two different plans.
+    /// </para>
+    /// <para>
+    /// An unknown word is refused too. It used to fall through to left-aligned baseline text,
+    /// so a typo was indistinguishable from a request.
+    /// </para>
+    /// </remarks>
     private static (TextHorizontalMode, TextVerticalMode) AlignmentFor(string align) => align switch
     {
+        "left" => (TextHorizontalMode.TextLeft, TextVerticalMode.TextBase),
         "center" => (TextHorizontalMode.TextCenter, TextVerticalMode.TextVerticalMid),
         "right" => (TextHorizontalMode.TextRight, TextVerticalMode.TextVerticalMid),
-        "middle-left" => (TextHorizontalMode.TextLeft, TextVerticalMode.TextVerticalMid),
         "top-center" => (TextHorizontalMode.TextCenter, TextVerticalMode.TextTop),
-        "top-left" => (TextHorizontalMode.TextLeft, TextVerticalMode.TextTop),
-        "bottom-left" => (TextHorizontalMode.TextLeft, TextVerticalMode.TextBottom),
-        _ => (TextHorizontalMode.TextLeft, TextVerticalMode.TextBase),
+        "middle-left" or "top-left" or "bottom-left" => throw new InvalidOperationException(
+            $"this backend cannot draw a '{align}' text: AutoCAD ignores a text's vertical "
+            + $"alignment unless it is centred or right, so it would come out baseline-left and "
+            + $"say nothing. Use one of {TextAlignments}, or place it at the baseline you want"),
+        _ => throw new InvalidOperationException(
+            $"'{align}' is not a text alignment; it is one of {TextAlignments}"),
+    };
+
+    /// <summary>
+    /// MTEXT attachment point for an align word, on the same vocabulary as
+    /// <see cref="AlignmentFor"/> so one word means one thing across both kinds.
+    /// </summary>
+    /// <remarks>
+    /// MTEXT carries the whole placement in this one enum, where TEXT splits it across two
+    /// modes, so the map is not the same table — but it is the same vocabulary. "left" lands
+    /// on the bottom-left corner the DXF backend also uses, so the same journal drawn twice
+    /// still agrees.
+    /// </remarks>
+    private static AttachmentPoint AttachmentForMText(string align) => align switch
+    {
+        "left" => AttachmentPoint.BottomLeft,
+        "center" => AttachmentPoint.MiddleCenter,
+        "top-center" => AttachmentPoint.TopCenter,
+        _ => throw new InvalidOperationException(
+            $"'{align}' is not an mtext alignment; it is one of {TextAlignments}"),
     };
 
     private static Point3d Point(Primitive p, int index)
@@ -456,6 +530,23 @@ public static class PrimitiveBuilder
             }
             catch (Autodesk.AutoCAD.Runtime.Exception)
             {
+            }
+        }
+        if (p.Color is { } color)
+        {
+            // 0 (by block) and 256 (by layer) are AutoCAD's own two "ask something else"
+            // values, and both are what leaving the property alone already means. Anything
+            // else outside 1..255 is not an ACI index at all, and quietly ignoring it would
+            // hand back an entity in the layer's colour while the caller believed otherwise.
+            if (color is < 0 or > 256)
+            {
+                throw new InvalidOperationException(
+                    $"color {color} is not an ACI colour index; they run from 1 to 255, "
+                    + "with 0 for by-block and 256 for by-layer");
+            }
+            if (color is > 0 and < 256)
+            {
+                entity.ColorIndex = color;
             }
         }
     }

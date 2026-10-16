@@ -47,6 +47,38 @@ public static class JournalJson
     public static JsonObject RecordToNode(StepRecord record) =>
         JsonSerializer.SerializeToNode(record, WriteOptions) as JsonObject ?? new JsonObject();
 
+    /// <summary>
+    /// Primitive objects as a JSON array for the RPC wire, in the vocabulary the Python
+    /// readers compare against.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A step row handed to Python is a <em>view</em>, not the stored payload, and the one
+    /// place the two differ is the kind: the stored journal writes the enum's own name
+    /// ("Line", "Insert") and Python compares kinds literally — <c>kind != "text"</c>,
+    /// <c>kind != "block"</c> — so a PascalCase kind read as none of them. That is the same
+    /// one-vocabulary mistake that made a plugin undo report ok while erasing nothing. Every
+    /// kind therefore goes out lower-cased, which is how the Python journal's own recorder
+    /// writes them and how <c>dxf.py</c> names a placed block ("insert").
+    /// </para>
+    /// <para>
+    /// Reading is unaffected either way: <see cref="TryReadKind"/> ignores case and
+    /// punctuation, so both spellings load back as the kind they name.
+    /// </para>
+    /// </remarks>
+    public static JsonArray PrimitivesForWire(IReadOnlyList<Primitive> primitives)
+    {
+        var array = new JsonArray();
+        foreach (var primitive in primitives)
+        {
+            var node = JsonSerializer.SerializeToNode(primitive, WriteOptions) as JsonObject
+                ?? new JsonObject();
+            node["kind"] = primitive.Kind.ToString().ToLowerInvariant();
+            array.Add(node);
+        }
+        return array;
+    }
+
     // ---------------------------------------------------------------- reading
 
     /// <summary>Parse a journal, returning an empty one rather than throwing.</summary>
@@ -69,6 +101,15 @@ public static class JournalJson
         }
 
         if (root is not JsonObject obj)
+        {
+            return journal;
+        }
+
+        // A version this build does not know is refused rather than read with defaults.
+        // Every field reader here is tolerant, which is right for a hand-edited file and
+        // exactly wrong for a *newer* one: a renamed or re-typed field would load as its
+        // default and the step would look intact while meaning something else.
+        if (Int(obj, "version", Version) > Version)
         {
             return journal;
         }
@@ -202,11 +243,19 @@ public static class JournalJson
     {
         try
         {
+            var name = Str(o, "kind");
+            var kind = TryReadKind(name);
             var color = o["color"] is JsonValue cv && cv.TryGetValue<int>(out var c) ? c : (int?)null;
             var linetype = Str(o, "linetype");
             return new Primitive
             {
-                Kind = ReadKind(Str(o, "kind")),
+                Kind = kind ?? PrimitiveKind.Unknown,
+                // The word is kept only when it named nothing: a primitive this build can
+                // draw has no use for it, and carrying it would make the payload noisier
+                // with every round trip.
+                UnknownKind = kind is null
+                    ? (name.Length > 0 ? name : NullableStr(o, "unknown_kind"))
+                    : null,
                 Points = Numbers(o["points"]),
                 Closed = Bool(o, "closed"),
                 Radius = Num(o, "radius"),
@@ -242,17 +291,30 @@ public static class JournalJson
     // ---------------------------------------------------------------- converters
 
     /// <summary>Case- and punctuation-insensitive kind lookup, so "MText" and "mtext" both land.</summary>
-    public static PrimitiveKind ReadKind(string raw)
+    /// <remarks>
+    /// A name that matches nothing reads as <see cref="PrimitiveKind.Unknown"/>, which the
+    /// builder refuses. It used to read as <see cref="PrimitiveKind.Line"/>, so a kind this
+    /// build has no verb for — a sheet's <c>viewport</c>, or a typo — was drawn as a
+    /// zero-length line at the origin and journalled as a success.
+    /// </remarks>
+    public static PrimitiveKind ReadKind(string raw) => TryReadKind(raw) ?? PrimitiveKind.Unknown;
+
+    /// <summary>The kind a name names, or null when it names none of them.</summary>
+    public static PrimitiveKind? TryReadKind(string raw)
     {
         var key = Normalise(raw);
+        if (key.Length == 0)
+        {
+            return null;
+        }
         foreach (var value in Enum.GetValues<PrimitiveKind>())
         {
-            if (Normalise(value.ToString()) == key)
+            if (value != PrimitiveKind.Unknown && Normalise(value.ToString()) == key)
             {
                 return value;
             }
         }
-        return PrimitiveKind.Line;
+        return null;
     }
 
     public static StepState ReadState(string raw)

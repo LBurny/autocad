@@ -106,7 +106,7 @@ tests/                  test_geom.py, test_backends.py, test_journal.py, test_re
 ## Commands
 
 ```bash
-uv run pytest -q                      # 734 tests, ~15s, no AutoCAD required
+uv run pytest -q                      # 746 tests, ~15s, no AutoCAD required
 uv run pytest tests/test_terms.py -q  # adding a tool without a vocabulary entry fails here
 uv run pytest tests/test_prompts.py -q  # a prompt naming a tool that does not exist fails here
 uv run python scripts/check_doc_numbers.py   # docs and evaluation answers vs the tree
@@ -858,6 +858,118 @@ the same drawing: `生产车间` at height 350 is 1991 mm in AutoCAD and 1973 mm
 package's PNG preview, i.e. 497.8 mm a character — so the preview is a faithful proxy for
 text width, and anything that sizes a caption to sit inside a box has to use
 `layers.fit_text_height`, or a four-character shaft name is wider than a 1500 mm shaft.
+
+**The plugin's step row *is* the journal on a live drawing, so a key it omits is a tool
+answering confidently and wrongly.** When the plugin owns the journal nothing reaches this
+process, and `drawing_summary`, `drawing_critique` (which `drawing_finalize` gates on),
+`drawing_check_standard`, `catalog_suggest` and `element_capture` all read the row for the
+arguments and the geometry. `RpcServer.Row` sent `primitives` as a *count* and omitted
+`params` altogether, so on a live drawing the summary reported an empty plan and one
+"recorded no readable parameters" warning per step, the critique found nothing to complain
+about in a plan with a floating door in it, the finalize gate passed on the back of that,
+the standard check collected no text at all so its text-height rule could never fire, and
+capture could not find a primitive to capture. Every one of those was invisible to
+`live_rpc_check.py`, which drove apply/rollback/undo over the socket and never asked a
+journal-derived tool anything, and to the xunit suite, which cannot reach AutoCAD. Two
+lessons worth keeping: a step row now carries `params` and the primitive *objects*, and the
+same keys are asserted against a real plugin in `live_rpc_check.py` — the one place the C#
+half of the wire can be checked at all.
+
+**A wire vocabulary is compared literally, so the case is part of the contract.** The
+`kind` on a primitives array went out as the C# enum's own name — `"Line"`, `"Insert"` —
+while the Python readers compare `kind != "text"`, `kind != "block"` and
+`capture_ops` accepts `("insert", "block")`. A PascalCase kind read as none of them, which
+is the same one-vocabulary mistake that once made a plugin undo report `ok` while erasing
+nothing. The journal's own payload keeps the enum name (`ReadKind` ignores case and
+punctuation, so both spellings load back), and `JournalJson.PrimitivesForWire` lower-cases
+the kind for the wire view, which is how the Python journal's recorder writes them and how
+`dxf.py` names a placed block. The four tables that decide which states mean "on the
+drawing" now hold one set — `journal.IN_DRAWING_STATES` and the `INACTIVE_STATES` copies in
+`verify`/`summary`/`critique`/`suggest`, pinned against each other by
+`tests/test_plugin_row_contract.py`, because three of the four had been left speaking only
+the Python journal's `applied`/`undone`.
+
+**`get_steps` used to answer with the oldest rows instead of the ones asked for.** The C#
+clamp was 1000 while `PluginBackend` asked for 10000 meaning "the whole journal", and it
+said nothing about cutting the reply short — so past a thousand steps `undo` computed its
+target from a stale prefix and a one-step undo could name a step hundreds back. The bound
+is now 100000 and the caller pages on `total`, which the reply already carried.
+
+**Idle-queue work that has already started cannot be abandoned, and saying "blocked" was
+a lie.** `RunAsync` reads its abandoned flag once as the queued item begins, so when the
+main thread was already inside `work()` as the caller's wait expired, the work ran to
+completion and the caller was told `{"ok": false, "blocked": true}` — a step applied to the
+drawing while the client was told nothing had changed, and a retry then drew it twice. The
+item and the caller now decide under one lock: work that has not started is abandoned, work
+that has is *waited out* (a synchronous function on the main thread does not stop halfway,
+so the wait is bounded by the work rather than by AutoCAD's idleness), and a queue torn
+down while a request was in flight says "the plugin has been unloaded" instead of blaming
+AutoCAD's idleness.
+
+**An erased entity made every rollback that covered it fail forever.** `StepEngine.Erase`
+guarded on `IsNull`/`IsValid` and then opened with `openErased: false` — and opening an
+erased object that way *raises* `eWasErased` rather than answering null, so the `obj is
+null || obj.IsErased` test after it was unreachable. The comment underneath already promised
+the right behaviour ("already deleted by the user or by an earlier edit: nothing to do"),
+which is the tell that the guard was the bug. `id.IsErased` is now checked before the open,
+in `Erase` and in `JournalStore.Trash` alike; the codebase's own reader in `SelfTest.Read`
+and `CountPresent` checked `IsValid` *and* `IsErased` all along, which is what a reader does
+when the two are not the same question.
+
+**`JournalStore.Load` bounded its walk by the meta count, which is a distinct-key total.**
+With a hole in the middle — a truncated chunk chain, a hand-edited dictionary — the count is
+smaller than the highest step number, so every step above the hole was dropped while their
+geometry stayed in the drawing; and a hand-edited `{"count": 2000000000}` turned the loop
+into a multi-gigabyte allocation that no reader can catch. The walk is bounded by the highest
+index present, which is the one number that cannot disagree with the records. `Chunk` had the
+same shape of defect: it shortened a chunk by one character to keep a surrogate pair together
+and then advanced by the full chunk anyway, dropping that character — latent only because the
+stored JSON escapes every non-ASCII character, so no surrogate reaches it today. **This is the
+one fix in that round that could not be measured on this machine**: whether `IsValid` already
+absorbs erased ids needs a live AutoCAD to settle, and `id.IsErased` is harmless either way.
+
+**`PlanReject` raised where `PlanRollback` refused.** Index 0 is the value `rollback_to`
+accepts and documents as "before every step", and reject takes the same argument — so
+`step_control(action='reject', index=0)` reached the caller as "Non-negative number required"
+out of `RemoveRange` instead of a refusal. Reject now refuses every index that is not a step,
+by name and with the range that would have worked: unlike a rollback there is no reading of 0
+for an erase that cannot be taken back that is safe to guess at.
+
+**A snapshot is not something a rollback cannot re-create.** `IsRecoverable` read
+`Mutated && Executable`, and a baseline is stored `Executable = false` precisely because it
+owns no geometry — so every rollback past a snapshot reported "step(s) N cannot be
+re-created", a warning about a step that never drew anything, and `Snapshot`'s own docstring
+already said it must never be treated that way. `!Mutated` is enough. The branch in `Execute`
+that marks a non-re-executable step as skipped was also the only mutation path with no
+`Reload()` in its `catch`, so a failed save left memory saying "done" while the drawing still
+said "planned", and nothing on the RPC path re-reads to find out.
+
+**A primitive the plugin cannot draw is refused by name, not drawn as a line.** `ReadKind`
+answered `PrimitiveKind.Line` for a name that matched nothing, which made `Build`'s
+defensive `throw` dead code and turned an unsupported kind into a zero-length entity at the
+origin, journalled with a handle and reported as a success. It matters for a real one:
+`ops.sheet_primitives` really does emit a `viewport`, which `PrimitiveKind` has no member
+for. Unknown names now read as `PrimitiveKind.Unknown` and carry the word that was not
+understood (`Primitive.UnknownKind`, persisted so a reopen fails with the same explanation).
+`PointAt` likewise answered (0, 0) past the end of a points array, so a line sent with one
+coordinate — or a polyline with an odd count, whose last coordinate the vertex loop dropped
+— produced a wrong entity and a handle with no error; `Primitive.UnbuildableReason` now
+refuses a short or odd array before anything is created.
+
+**A dimension's text height went out on the wire and was thrown away.** `Primitive.TextHeight`
+carries the *model* height the caller scaled by the sheet's plot scale, and the DXF backend
+overrides `dimtxt` with it ("without this the text renders invisible"), while
+`BuildDimension` took the drawing's dimstyle and nothing else — so on a 1:100 plan the same
+journal drew dimension text about a hundredth of the size asked for, and differently from the
+file. `Dimension.Dimtxt` is settable per entity, which is where it goes: a per-dimension
+override rather than a change to the dimension style, which is document state shared with the
+user's own dimensions. (Check the AutoCAD API surface with `tools/AcadMcp.ApiProbe` before
+guessing: it reads `acdbmgd` as metadata with AutoCAD closed, and that is how `Dimtxt` was
+confirmed rather than assumed.) Two more of the same shape in `PrimitiveBuilder`: `BuildText`
+silently dropped the vertical anchor of `middle-left`/`top-left`/`bottom-left` — AutoCAD
+ignores a text's vertical mode unless its horizontal mode is centred or right — and now
+refuses them by name, along with an `align` word it does not know, in the same spirit as the
+dynamic-block property checks; and `Primitive.Color` was parsed, documented and never applied.
 
 ## Environment
 

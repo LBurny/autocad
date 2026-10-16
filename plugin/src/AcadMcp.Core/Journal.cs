@@ -270,11 +270,27 @@ public sealed class Journal
     /// handles that must go with them.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Reject is the deliberate destructive act, so it ignores the accepted
     /// soft-lock; the records are about to stop existing, which is the point.
+    /// </para>
+    /// <para>
+    /// Returns null for an index that names no step. This used to fall through to
+    /// <c>RemoveRange</c> and raise <c>ArgumentOutOfRangeException</c>, so
+    /// <c>step_control(action='reject', index=0)</c> — index 0 being the "before every step"
+    /// value <see cref="PlanRollback"/> accepts and documents — reached the caller as
+    /// "Non-negative number required" instead of a refusal. Unlike a rollback there is no
+    /// reading of 0 that is safe to guess at here: this erases for good, so every index that
+    /// is not a step is refused by name.
+    /// </para>
     /// </remarks>
-    public (IReadOnlyList<string> Handles, IReadOnlyList<int> Removed) PlanReject(int index)
+    public (IReadOnlyList<string> Handles, IReadOnlyList<int> Removed)? PlanReject(int index)
     {
+        if (index < 1 || index > _records.Count)
+        {
+            return null;
+        }
+
         var doomed = _records.Where(r => r.Index >= index).ToList();
         var survivors = _records.Where(r => r.Index < index).ToList();
 
@@ -313,20 +329,44 @@ public sealed class Journal
         }
 
         var replacement = record;
-        if (patch.TryGetPropertyValue("label", out var label) && label is not null)
+        // Collected rather than removed from the caller's object: the patch belongs to
+        // whoever built it, and emptying it as a side effect of applying it is the kind of
+        // surprise that only shows up when a caller reuses one.
+        var label = "";
+        var hasLabel = false;
+        var note = "";
+        var hasNote = false;
+        var rest = new JsonObject();
+        foreach (var pair in patch)
         {
-            replacement = replacement with { Label = label.GetValue<string>() };
-            patch.Remove("label");
+            switch (pair.Key)
+            {
+                case "label" when pair.Value is not null:
+                    label = pair.Value.GetValue<string>();
+                    hasLabel = true;
+                    break;
+                case "note" when pair.Value is not null:
+                    note = pair.Value.GetValue<string>();
+                    hasNote = true;
+                    break;
+                default:
+                    rest[pair.Key] = pair.Value?.DeepClone();
+                    break;
+            }
         }
-        if (patch.TryGetPropertyValue("note", out var note) && note is not null)
+
+        if (hasLabel)
         {
-            replacement = replacement with { Note = note.GetValue<string>() };
-            patch.Remove("note");
+            replacement = replacement with { Label = label };
         }
-        if (patch.Count > 0)
+        if (hasNote)
+        {
+            replacement = replacement with { Note = note };
+        }
+        if (rest.Count > 0)
         {
             var merged = record.Params is null ? new JsonObject() : (JsonObject)record.Params.DeepClone();
-            foreach (var pair in patch)
+            foreach (var pair in rest)
             {
                 merged[pair.Key] = pair.Value?.DeepClone();
             }

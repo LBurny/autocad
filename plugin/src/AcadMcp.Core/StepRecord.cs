@@ -102,8 +102,15 @@ public sealed record StepRecord
     public bool IsRunnable => State is StepState.Planned or StepState.Failed;
 
     /// <summary>A done step that owns no undo entry cannot be undone, only re-created.</summary>
+    /// <remarks>
+    /// A step that provably changed nothing is recoverable whatever its <see cref="Executable"/>
+    /// flag says, because there is nothing to re-create — a baseline snapshot is exactly that
+    /// case, and it is stored <c>Executable = false</c> on purpose. Testing <c>Mutated &amp;&amp;
+    /// Executable</c> made every rollback past a snapshot report a step that "cannot be
+    /// re-created", which is a warning about a step that never drew anything.
+    /// </remarks>
     [JsonIgnore]
-    public bool IsRecoverable => State != StepState.Done || (Mutated && Executable);
+    public bool IsRecoverable => State != StepState.Done || !Mutated || Executable;
 
     /// <summary>One row of the steps list: index, name and a state marker.</summary>
     public string RowText() => $"{Index,3}  {(Drifted ? "~" : StateMark())}  {DisplayName()}";

@@ -33,6 +33,20 @@ MISSING = "missing"
 TRUNCATED = "walk_truncated"
 NO_BASELINE = "no_baseline"
 
+#: The state a row is read as when it does not say. Assuming the opposite would let a
+#: rollback erase entities the drawing still needs.
+APPLIED = "applied"
+
+#: Step states that mean the drawing does not hold the step, so its entities must not be
+#: expected. Two vocabularies arrive here: the Python journal writes "applied"/"undone", and
+#: the plugin's in-DWG journal writes "done"/"planned"/"failed" (RpcServer.Row lowercases
+#: StepState's name). Testing for "undone" alone counted a plugin's planned and failed steps
+#: as applied — the same one-vocabulary mistake that made a plugin undo report ok while
+#: erasing nothing, and the tables in `critique.py` and `suggest.py` already carry both
+#: spellings. `tests/test_plugin_row_contract.py` pins all four against each other so they
+#: cannot drift apart again.
+INACTIVE_STATES = frozenset({"undone", "planned", "failed", "rejected"})
+
 
 def reconcile(
     steps: list[dict[str, Any]],
@@ -80,7 +94,7 @@ def reconcile(
                 f"{row.get('entities')!r}; it was counted as none"
             )
             count = 0
-        if str(row.get("state", "applied")) == "undone":
+        if str(row.get("state", APPLIED)).strip().lower() in INACTIVE_STATES:
             undone += 1
             undone_entities += count
             continue

@@ -21,6 +21,7 @@ from typing import Any
 if __package__ in (None, ""):  # run as a script, not through pytest
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from acadmcp import summary  # noqa: E402
 from acadmcp.acad_plugin_client import PluginClient, PluginError, PluginUnavailable  # noqa: E402
 from acadmcp.backends.plugin import PluginBackend  # noqa: E402
 from acadmcp.steps import StepSession  # noqa: E402
@@ -162,6 +163,41 @@ def run(report: Report) -> None:
             "the drawing holds both steps' entities",
             entity_count(backend) == 4,
             f"entities={entity_count(backend)}",
+        )
+
+        # --- what the wire actually carries for a step ----------------------
+        # The plugin owns this journal, so its step row is all any of the read tools ever
+        # see: `drawing_summary`, `drawing_critique` (which `drawing_finalize` gates on),
+        # `drawing_check_standard`, `catalog_suggest` and `element_capture` all read the
+        # arguments and the geometry off it. This is the only place that claim can be checked
+        # against the real C#, and both halves of it have been wrong: `primitives` went out as
+        # a *count*, and `params` was missing altogether, which made every one of those tools
+        # answer confidently and emptily on a live drawing.
+        rows = backend.step_rows()
+        row = next(r for r in rows if r["op"] == "draw_room")
+        report.check(
+            "a wire step row carries the caller's arguments",
+            isinstance(row.get("params"), dict) and bool(row["params"]),
+            f"params={row.get('params')!r}",
+        )
+        primitives = row.get("primitives")
+        report.check(
+            "and its primitives as objects, not a count",
+            isinstance(primitives, list) and len(primitives) == 3,
+            f"primitives={_abbreviate(primitives) if isinstance(primitives, list) else primitives!r}",
+        )
+        kinds = sorted(str(p.get("kind")) for p in primitives or [] if isinstance(p, dict))
+        report.check(
+            "spelled the way the Python readers compare them",
+            kinds == ["hatch", "polyline", "text"],
+            f"kinds={kinds}",
+        )
+        read = summary.summarise(rows)
+        report.check(
+            "so a reader gets a plan out of it",
+            not [w for w in read["warnings"] if "readable parameters" in w]
+            and read["steps"]["applied"] == 2,
+            f"applied={read['steps']['applied']} warnings={read['warnings']}",
         )
 
         status = session.status()

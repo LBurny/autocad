@@ -26,6 +26,18 @@ public enum PrimitiveKind
     /// rolled back.
     /// </remarks>
     Insert,
+
+    /// <summary>A kind this build does not know how to draw. Never drawn.</summary>
+    /// <remarks>
+    /// Read from a name that matched nothing, and kept as a distinct member rather than
+    /// folded into <see cref="Line"/> so that an unknown primitive is <b>refused</b> instead
+    /// of being drawn as something it is not. That matters for a kind the Python side emits
+    /// and this plugin has no verb for — a sheet's <c>viewport</c> is the real one — because
+    /// folding it into a line draws a zero-length entity at the origin and calls the step a
+    /// success. <see cref="Primitive.UnknownKind"/> carries the name, so the refusal can say
+    /// which word was not understood.
+    /// </remarks>
+    Unknown,
 }
 
 /// <summary>
@@ -45,6 +57,17 @@ public sealed record Primitive
 {
     [JsonPropertyName("kind")]
     public PrimitiveKind Kind { get; init; } = PrimitiveKind.Line;
+
+    /// <summary>
+    /// The kind word as it arrived, when it named nothing this build can draw.
+    /// </summary>
+    /// <remarks>
+    /// Persisted rather than kept in memory only, for the same reason the resolved geometry
+    /// travels with the step: reopening the drawing and replaying it has to fail with the
+    /// same explanation, not a vague one.
+    /// </remarks>
+    [JsonPropertyName("unknown_kind")]
+    public string? UnknownKind { get; init; }
 
     /// <summary>Flat x, y pairs in millimetres. One pair for a centre, two for a line.</summary>
     [JsonPropertyName("points")]
@@ -149,15 +172,70 @@ public sealed record Primitive
     [JsonIgnore]
     public int PointCount => Points.Count / 2;
 
-    /// <summary>Point at <paramref name="index"/>, or (0, 0) when out of range.</summary>
+    /// <summary>
+    /// Point at <paramref name="index"/>, or a refusal when the array does not reach it.
+    /// </summary>
+    /// <remarks>
+    /// This used to answer (0, 0) for an out-of-range index, which turned a malformed
+    /// primitive — a line sent with one coordinate, a dimension sent with one point — into
+    /// an entity drawn at the origin, journalled with a handle, and reported as a success.
+    /// Nothing downstream could tell that drawing from a real one at the origin. Refusing is
+    /// the only honest answer: the array is what the caller sent, so a short one is their
+    /// bug and the message has to reach them.
+    /// </remarks>
     public (double X, double Y) PointAt(int index)
     {
         var offset = index * 2;
         if (offset < 0 || offset + 1 >= Points.Count)
         {
-            return (0, 0);
+            throw new ArgumentOutOfRangeException(
+                nameof(index),
+                $"a {Kind} primitive needs point {index}, but its points array holds "
+                + $"{Points.Count} coordinate(s) — points are flat x, y pairs");
         }
         return (Points[offset], Points[offset + 1]);
+    }
+
+    /// <summary>How many points this kind cannot be drawn without.</summary>
+    [JsonIgnore]
+    public int MinimumPoints => Kind switch
+    {
+        PrimitiveKind.Line or PrimitiveKind.Polyline or PrimitiveKind.Dimension => 2,
+        // A hatch boundary has to enclose an area; three points is the least that can.
+        PrimitiveKind.Hatch => 3,
+        PrimitiveKind.Unknown => 0,
+        _ => 1,
+    };
+
+    /// <summary>
+    /// Why this primitive cannot be drawn as it stands, or "" when it can.
+    /// </summary>
+    /// <remarks>
+    /// Checked before anything is created, so a whole step fails with the caller's own
+    /// primitive named rather than producing a wrong entity and a handle. A flat array with
+    /// an odd length is refused here too: the dangling coordinate is silently dropped by the
+    /// vertex loop otherwise, which is the same class of quiet wrong drawing.
+    /// </remarks>
+    public string UnbuildableReason()
+    {
+        if (Kind == PrimitiveKind.Unknown)
+        {
+            var name = string.IsNullOrWhiteSpace(UnknownKind) ? "(unnamed)" : $"'{UnknownKind}'";
+            return $"this build cannot draw a {name} primitive, so nothing was drawn; it draws "
+                + "lines, polylines, circles, arcs, text, mtext, hatches, dimensions and block "
+                + "inserts";
+        }
+        if (Points.Count % 2 != 0)
+        {
+            return $"a {Kind} primitive has an odd number of coordinates ({Points.Count}); "
+                + "points are flat x, y pairs, so the last one has no partner";
+        }
+        if (PointCount < MinimumPoints)
+        {
+            return $"a {Kind} primitive needs at least {MinimumPoints} point(s) and has "
+                + $"{PointCount}; it would be drawn at the origin instead of where it was asked for";
+        }
+        return "";
     }
 
     /// <summary>A short human description, used in step rows and tooltips.</summary>

@@ -20,6 +20,14 @@ from typing import Any
 APPLIED = "applied"
 UNDONE = "undone"
 
+#: Every step state that means the step is on the drawing. Two vocabularies reach the Python
+#: side: this journal writes "applied", and the plugin's in-DWG journal writes "done"
+#: (RpcServer.Row lowercases StepState's name), with "accepted" as the reviewed variant the
+#: recording backends read. One table, because a reader that knew only "applied" is what let
+#: an undo over a live plugin report ok while erasing nothing — and then let every other reader
+#: repeat the mistake in its own copy.
+IN_DRAWING_STATES = frozenset({APPLIED, "accepted", "done"})
+
 
 @dataclass
 class StepRecord:

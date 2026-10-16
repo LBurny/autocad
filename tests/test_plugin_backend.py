@@ -17,6 +17,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from acadmcp.backends import plugin  # noqa: E402
 from acadmcp.backends.plugin import PluginBackend  # noqa: E402
 
 
@@ -45,7 +46,16 @@ class FakeClient:
             self.steps.append(step)
             return {"result": {"ok": True, "message": "", "step": step}}
         if method == "get_steps":
-            return {"steps": list(self.steps)}
+            # The plugin's own reply: a page, and the total it was cut from. `offset`/`limit`
+            # are honoured rather than ignored because a caller that asked past the end used
+            # to be handed the *oldest* rows instead of the ones it named.
+            offset = int(payload.get("offset", 0))
+            limit = int(payload.get("limit", 200))
+            return {
+                "total": len(self.steps),
+                "offset": offset,
+                "steps": list(self.steps[offset : offset + limit]),
+            }
         if method == "rollback_to":
             for s in self.steps:
                 if s["index"] > payload["index"] and s["state"] == "done":
@@ -178,3 +188,53 @@ def test_undo_reports_how_many_entities_it_erased():
     ]
     report = be.undo(1)
     assert report["erased"] == 1
+
+
+def test_a_journal_longer_than_one_page_is_read_in_pages():
+    """The plugin bounds a single reply, so a long journal arrives in pages.
+
+    Reading only the first page was silent — the rows came back as the oldest 1000 and
+    nothing said so — and `undo` computes its target from these rows, so a one-step undo
+    after that named a step hundreds back.
+    """
+    be, client = _backend()
+    client.steps = [
+        {"index": i, "state": "done", "op": "draw_wall", "handles": [], "label": ""}
+        for i in range(1, 26)
+    ]
+
+    rows = be.step_rows()
+
+    assert len(rows) == 25
+    assert [row["index"] for row in rows] == list(range(1, 26))
+    # In pages, in order, resuming where the last one stopped.
+    reads = [payload for method, payload in client.calls if method == "get_steps"]
+    assert reads == [{"offset": 0, "limit": plugin.STEP_PAGE}]
+
+
+def test_paging_stops_when_the_total_is_short():
+    """A plugin that reports no total is read once, as it always was."""
+
+    class NoTotal(FakeClient):
+        def call(self, method: str, **payload: Any) -> Any:
+            if method == "get_steps":
+                self.calls.append((method, payload))
+                return {"steps": list(self.steps)}
+            return super().call(method, **payload)
+
+    client = NoTotal()
+    client.steps = [
+        {"index": i, "state": "done", "op": "draw_wall", "handles": [], "label": ""}
+        for i in range(1, 4)
+    ]
+    be = PluginBackend(client=client)
+
+    assert len(be.step_rows()) == 3
+    assert len([1 for method, _ in client.calls if method == "get_steps"]) == 1
+
+
+def test_info_names_the_backend():
+    """Every other backend names itself, and `drawing_status` declares the key."""
+    be, _ = _backend()
+
+    assert be.info()["backend"] == "plugin"

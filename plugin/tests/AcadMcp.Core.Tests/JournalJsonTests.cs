@@ -274,11 +274,37 @@ public class JournalJsonTests
     [InlineData("MText", PrimitiveKind.MText)]
     [InlineData("M_TEXT", PrimitiveKind.MText)]
     [InlineData("dimension", PrimitiveKind.Dimension)]
-    [InlineData("nonsense", PrimitiveKind.Line)]
-    [InlineData("", PrimitiveKind.Line)]
-    public void KindParsingIsCaseInsensitiveAndFallsBack(string raw, PrimitiveKind expected)
+    // Not Line. Folding an unrecognised name into Line is what turned a sheet's `viewport`
+    // — a kind the Python side really emits and this plugin has no verb for — into a
+    // zero-length line at the origin, journalled and reported as a success.
+    [InlineData("nonsense", PrimitiveKind.Unknown)]
+    [InlineData("", PrimitiveKind.Unknown)]
+    [InlineData("viewport", PrimitiveKind.Unknown)]
+    public void KindParsingIsCaseInsensitiveAndRefusesAnUnknownName(string raw, PrimitiveKind expected)
     {
         Assert.Equal(expected, JournalJson.ReadKind(raw));
+    }
+
+    [Fact]
+    public void AnUnknownKindKeepsTheNameItCouldNotRead()
+    {
+        var record = JournalJson.RecordFromNode(JsonNode.Parse(
+            """{"op":"apply","primitives":[{"kind":"viewport","points":[0,0,1,1]}]}"""))!;
+
+        Assert.Equal(PrimitiveKind.Unknown, record.Primitives[0].Kind);
+        Assert.Equal("viewport", record.Primitives[0].UnknownKind);
+        // And the refusal names it, rather than reporting a kind nobody sent.
+        Assert.Contains("viewport", record.Primitives[0].UnbuildableReason());
+    }
+
+    [Fact]
+    public void AKnownKindCarriesNoUnknownName()
+    {
+        var record = JournalJson.RecordFromNode(JsonNode.Parse(
+            """{"op":"apply","primitives":[{"kind":"line","points":[0,0,1,1]}]}"""))!;
+
+        Assert.Equal(PrimitiveKind.Line, record.Primitives[0].Kind);
+        Assert.Null(record.Primitives[0].UnknownKind);
     }
 
     [Theory]
@@ -303,14 +329,47 @@ public class JournalJsonTests
     // ---------------------------------------------------------------- primitive behaviour
 
     [Fact]
-    public void PointAtReturnsZeroBeyondTheEnd()
+    public void PointAtRefusesARunThatDoesNotReachIt()
     {
         var primitive = new Primitive { Points = [10, 20, 30, 40] };
 
         Assert.Equal((10, 20), primitive.PointAt(0));
         Assert.Equal((30, 40), primitive.PointAt(1));
-        Assert.Equal((0, 0), primitive.PointAt(2));
-        Assert.Equal((0, 0), primitive.PointAt(-1));
+        // (0, 0) here used to be the answer, which is how a line sent with one coordinate
+        // became an entity drawn at the origin and journalled as a success. The message has
+        // to name the primitive, because a caller reading it cannot see which one it was.
+        var beyond = Assert.Throws<ArgumentOutOfRangeException>(() => primitive.PointAt(2));
+        Assert.Contains("Line", beyond.Message);
+        Assert.Throws<ArgumentOutOfRangeException>(() => primitive.PointAt(-1));
+    }
+
+    [Theory]
+    [InlineData(PrimitiveKind.Line, 0, "needs at least 2 point(s)")]
+    [InlineData(PrimitiveKind.Hatch, 4, "needs at least 3 point(s)")]
+    [InlineData(PrimitiveKind.Circle, 0, "needs at least 1 point(s)")]
+    public void AShortPrimitiveIsRefusedBeforeAnythingIsDrawn(
+        PrimitiveKind kind, int coordinates, string expected)
+    {
+        var primitive = new Primitive { Kind = kind, Points = [.. Enumerable.Repeat(0.0, coordinates)] };
+
+        Assert.Contains(expected, primitive.UnbuildableReason());
+    }
+
+    [Fact]
+    public void AnOddCoordinateCountIsRefusedRatherThanHavingOneDropped()
+    {
+        // The vertex loop reads whole pairs, so the dangling coordinate vanished without a
+        // word and the polyline came out one vertex short of what was asked for.
+        var primitive = new Primitive { Kind = PrimitiveKind.Polyline, Points = [1, 2, 3] };
+
+        Assert.Contains("odd number of coordinates", primitive.UnbuildableReason());
+    }
+
+    [Fact]
+    public void ALongEnoughPrimitiveHasNothingToComplainAbout()
+    {
+        Assert.Empty(new Primitive { Kind = PrimitiveKind.Line, Points = [0, 0, 1, 1] }.UnbuildableReason());
+        Assert.Empty(new Primitive { Kind = PrimitiveKind.Insert, Points = [0, 0] }.UnbuildableReason());
     }
 
     [Fact]
@@ -369,5 +428,60 @@ public class JournalJsonTests
 
         Assert.Equal(2, step.Primitives.Count);
         Assert.Equal("ok", step.Primitives[1].Text);
+    }
+
+    [Fact]
+    public void AJournalFromANewerBuildIsRefusedRatherThanReadWithDefaults()
+    {
+        // Every field reader here is tolerant on purpose, which is right for a hand-edited
+        // file and exactly wrong for a newer one: a renamed or re-typed field would load as
+        // its default, and the step would come back looking whole while meaning something this
+        // build cannot interpret. The Python side refuses a newer payload for the same reason.
+        const string payload = """
+            {"version":99,"description":"from the future","records":[{"op":"draw_wall"}]}
+            """;
+
+        var journal = JournalJson.FromJson(payload);
+
+        Assert.True(journal.IsEmpty);
+        Assert.Equal("", journal.Description);
+    }
+
+    [Fact]
+    public void AJournalFromThisBuildIsRead()
+    {
+        var journal = JournalJson.FromJson(
+            $$"""{"version":{{JournalJson.Version}},"records":[{"op":"draw_wall"}]}""");
+
+        Assert.Equal(1, journal.Count);
+    }
+
+    [Fact]
+    public void TheWireSpellsPrimitiveKindsTheWayPythonComparesThem()
+    {
+        // The RPC step row hands these to the Python readers, which have no local journal to
+        // fall back on when the plugin owns the drawing — and which compare kinds literally
+        // (`kind != "text"`), so a PascalCase kind read as none of them. A count of primitives,
+        // which is what this used to be, read as nothing at all.
+        var journal = new Journal();
+        journal.AddExecuted(new StepRecord
+        {
+            Op = "draw_wall",
+            Primitives =
+            [
+                new Primitive { Kind = PrimitiveKind.Line, Points = [0, 0, 6000, 0], Layer = "A-WALL" },
+                new Primitive { Kind = PrimitiveKind.Text, Points = [1, 2], Text = "ok" },
+                new Primitive { Kind = PrimitiveKind.Insert, Points = [3, 4], Block = "TEST" },
+            ],
+        });
+
+        var wire = JournalJson.PrimitivesForWire(journal.Records[0].Primitives);
+
+        Assert.Equal(["line", "text", "insert"], wire.Select(p => p!["kind"]!.GetValue<string>()));
+        // And the spelling Python sends back reads as the kind it names, so the two directions
+        // cannot disagree about what a step holds.
+        var readBack = JournalJson.RecordFromNode(
+            new JsonObject { ["op"] = "x", ["primitives"] = wire.DeepClone() })!;
+        Assert.Equal(journal.Records[0].Primitives.Select(p => p.Kind), readBack.Primitives.Select(p => p.Kind));
     }
 }

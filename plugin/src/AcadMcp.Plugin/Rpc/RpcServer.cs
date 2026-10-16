@@ -45,6 +45,19 @@ public sealed class RpcServer : IDisposable
     /// <summary>A single line longer than this is refused rather than buffered.</summary>
     private const int MaxLineChars = 8 * 1024 * 1024;
 
+    /// <summary>
+    /// The most step rows one <c>get_steps</c> call may ask for.
+    /// </summary>
+    /// <remarks>
+    /// This used to be 1000, which silently truncated: the Python side asks for 10000 meaning
+    /// "the whole journal", so past a thousand steps the rows came back as the *oldest* prefix
+    /// while the caller believed it held everything. `drawing_undo` then computed a target from
+    /// the wrong rows and a one-step undo could erase hundreds. The bound is now generous
+    /// enough for any real journal, the reply carries `total`, and the caller pages when it
+    /// needs to.
+    /// </remarks>
+    private const int MaxStepsPerPage = 100_000;
+
     private readonly TcpListener _listener;
     private readonly CancellationTokenSource _stop = new();
 
@@ -163,7 +176,55 @@ public sealed class RpcServer : IDisposable
             return Error(null, "a request must be a JSON object");
         }
 
-        var id = call["id"];
+        // Sanitised once here rather than trusted at each of the five places that echo it
+        // back, and every branch below sits inside the catch. Both matter for the same
+        // failure: an id holding an unpaired UTF-16 surrogate — which any client that
+        // truncates a string mid-pair produces, and `json.dumps` will happily escape onto the
+        // wire — throws when the reply tries to serialise it, so the ping branch, the
+        // "needs a method" branch and the catch handlers themselves all raised *outside* the
+        // old try. Nothing wrote a reply line at all, and `ServeAsync` closed the socket, so
+        // the client's diagnosis was "the plugin is gone" — on `ping`, the one call whose
+        // whole purpose is to tell those two apart. For a drawing call it was worse: the step
+        // had already run and been journalled before the reply was built.
+        var id = EchoableId(call["id"]);
+        try
+        {
+            return await HandleAsync(call, id).ConfigureAwait(false);
+        }
+        catch (System.Exception error)
+        {
+            PluginLog.Write("rpc request failed", error);
+            return Error(id, $"{error.GetType().Name}: {error.Message}");
+        }
+    }
+
+    /// <summary>
+    /// The request's id as a value a reply can carry, or null when it cannot be carried.
+    /// </summary>
+    /// <remarks>
+    /// A clone rather than the node itself: constructing the clone is what forces the value
+    /// to be read, so a value that survives this is one that will survive being written into
+    /// a reply. A null id is a reply the client can still match up by its absence, which is a
+    /// far better answer than no line at all.
+    /// </remarks>
+    private static JsonNode? EchoableId(JsonNode? id)
+    {
+        if (id is null)
+        {
+            return null;
+        }
+        try
+        {
+            return id.DeepClone();
+        }
+        catch (System.Exception)
+        {
+            return null;
+        }
+    }
+
+    private async Task<string> HandleAsync(JsonObject call, JsonNode? id)
+    {
         var method = call["method"] is JsonValue value && value.TryGetValue<string>(out var name)
             ? name
             : "";
@@ -388,7 +449,7 @@ public sealed class RpcServer : IDisposable
     private static JsonObject Steps(StepEngine engine, JsonObject p)
     {
         var offset = Math.Max(0, Int(p, "offset"));
-        var limit = Math.Clamp(Int(p, "limit", 200), 1, 1000);
+        var limit = Math.Clamp(Int(p, "limit", 200), 1, MaxStepsPerPage);
 
         var steps = new JsonArray();
         foreach (var record in engine.Journal.Records.Skip(offset).Take(limit))
@@ -428,7 +489,15 @@ public sealed class RpcServer : IDisposable
             ["transaction"] = record.Transaction,
             ["duration_ms"] = record.DurationMs,
             ["handles"] = handles,
-            ["primitives"] = record.Primitives.Count,
+            // The primitives themselves, not a count of them. The plugin is the owner of
+            // this journal, so this row is all a reader on the Python side ever sees: it has
+            // no local Journal to fall back on, and `summary`/`critique`/`suggest`/
+            // `check_standard`/`element_capture` all read the geometry and the arguments off
+            // these two keys. A count here made every one of them blind on a live drawing —
+            // `drawing_critique` found nothing to complain about in a plan with a floating
+            // door in it, and `drawing_finalize`, which gates on it, passed.
+            ["primitives"] = JournalJson.PrimitivesForWire(record.Primitives),
+            ["params"] = record.Params is null ? new JsonObject() : record.Params.DeepClone(),
             ["row"] = record.RowText(),
             ["tooltip"] = record.TooltipText(),
             ["mark"] = record.StateMark(),

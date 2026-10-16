@@ -55,9 +55,13 @@ from typing import Any
 
 from . import geom, layers
 
-#: The step states a journal row can carry. Anything else is read as applied, so that
+#: The step states that mean the step is not in the drawing. Two vocabularies arrive: the
+#: Python journal writes "undone" and the plugin's in-DWG journal writes "planned"/"failed"
+#: (RpcServer.Row lowercases StepState's name). Reading only "undone" counted a live plugin's
+#: planned steps as drawn. Anything else is read as applied, so that
 #: `applied + undone == total` always holds whatever a hand-edited row says.
-UNDONE = "undone"
+#: `tests/test_plugin_row_contract.py` pins this against the other three tables.
+UNDONE_STATES = frozenset({"undone", "planned", "failed", "rejected"})
 
 #: The `structure` buckets, in the order the summary reports them.
 STRUCTURE_KEYS = ("columns", "stairs", "lifts", "shafts", "equipment")
@@ -492,7 +496,7 @@ def summarise(rows: Sequence[dict], *, catalog: dict | None = None) -> dict[str,
         # still says which layers the drawing uses.
         recorded_layers.update(_recorded_layers(params))
 
-        if str(raw.get("state", "")).strip().lower() == UNDONE:
+        if str(raw.get("state", "")).strip().lower() in UNDONE_STATES:
             out["steps"]["undone"] += 1
             undone.append(index)
             continue
