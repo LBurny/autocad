@@ -63,6 +63,10 @@ class StatusReply(TypedDict, total=False):
     sheet: dict[str, Any]  # {paper, scale, orientation, layout, ...}; {} until drawing_sheet
     standard: dict[str, Any]  # standards.describe(): {count, in_force, skipped, standards}
     drawing_catalog: dict[str, Any]  # recording backends: {catalog, loaded, warning?}
+    # The standard the drawing recorded and whether the same-named one in force agrees:
+    # {standard, loaded}; `standard` is None for a drawing saved before any was recorded.
+    drawing_standard: dict[str, Any]
+    standard_warning: str  # only when the recorded standard and the one in force disagree
 
 
 class HistoryReply(TypedDict, total=False):

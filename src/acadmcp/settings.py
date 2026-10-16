@@ -11,8 +11,9 @@ not: a broken settings file must not be the end of the drawing session, it must 
 in the report.
 
 Alongside the layer overrides it names the project's own standards files — GB/T tables with
-sources, merged row by row over the package's standard — because a drawing office's standard
-is no more this package's to decide than its blocks are.
+sources, merged row by row over the package's standard — and its own templates files, merged
+key by key over the package's — because a drawing office's standard and its sheets are no more
+this package's to decide than its blocks are.
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ class Settings:
         catalogs: list[str] | None = None,
         layers: dict[str, tuple[int, str]] | None = None,
         standards: list[str] | None = None,
+        templates: list[str] | None = None,
         source: Path | None = None,
         skipped: list[str] | None = None,
     ) -> None:
@@ -49,6 +51,9 @@ class Settings:
         #: the same precedence the catalogue files get, because a drawing office's standard is
         #: no more this package's to decide than its blocks are.
         self.standards = list(standards or [])
+        #: The project's own templates files, merged over the package's key by key — the
+        #: standards rule, because a project's sheets are its own the way its standard is.
+        self.templates = list(templates or [])
         self.source = source
         self.skipped = list(skipped or [])
 
@@ -63,6 +68,7 @@ class Settings:
             "catalogs": list(self.catalogs),
             "layers": {name: list(spec) for name, spec in self.layers.items()},
             "standards": list(self.standards),
+            "templates": list(self.templates),
             "skipped": list(self.skipped),
         }
 
@@ -114,6 +120,11 @@ def load(path: Path | None = None) -> Settings:
     if isinstance(standards, str):
         standards = [standards]
 
+    # The project's own templates, read the same way and for the same reason.
+    templates = payload.get("templates") or payload.get("template") or []
+    if isinstance(templates, str):
+        templates = [templates]
+
     layers: dict[str, tuple[int, str]] = {}
     raw_layers = payload.get("layers") or {}
     if isinstance(raw_layers, dict):
@@ -141,6 +152,10 @@ def load(path: Path | None = None) -> Settings:
             str(Path(str(path)).parent / name) if not Path(name).is_absolute() else name
             for name in standards
         ],
+        templates=[
+            str(Path(str(path)).parent / name) if not Path(name).is_absolute() else name
+            for name in templates
+        ],
         source=Path(path),
         skipped=skipped,
     )
@@ -157,16 +172,17 @@ def current() -> Settings:
 def reset() -> None:
     """Forget the loaded settings, and what was built from them.
 
-    The standards cache is dropped as well as the catalogue's, and for the same reason: both
-    are resolved through this file, so a settings change that left them standing would report
-    the previous project's standard.
+    The standards and templates caches are dropped as well as the catalogue's, and for the same
+    reason: all three are resolved through this file, so a settings change that left them
+    standing would report the previous project's standard and sheets.
     """
     global _current
     _current = None
-    from . import catalog, standards
+    from . import catalog, standards, templates
 
     catalog.reset()
     standards.reset()
+    templates.reset()
 
 
 _current: Settings | None = None

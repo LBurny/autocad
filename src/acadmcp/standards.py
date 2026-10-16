@@ -16,11 +16,28 @@ Three rules, all of them the catalogue loader's and the plugin journal's before 
 * **Later files win, row by row.** The package's table is read first and a project's file
   merges over it, so a project restates only the rows it disagrees with and inherits the
   rest. A project and the package cannot disagree about the rows neither restated.
+* **A standard may extend one parent, and the parent's rows merge under its own.** ``extends``
+  names a SINGLE parent — a chain, not a DAG — and the parent's already-resolved tables are
+  deep-copied *under* the child's own rows by that same row-by-row rule, so a specialised
+  standard (a site-plan scheme) restates only its deltas. Resolution runs once all files are
+  read, so a parent may come from the package file or any project file. A missing parent or a
+  cycle is **skipped and named**, like every other unreadable row here, and the standard still
+  loads with its own rows — the lookups the absent tables would have answered then refuse by
+  name, which is this module's loud-failure discipline rather than a crash.
 * **A lookup outside a transcribed table refuses by name.** ``b / 0.7b / 0.5b / 0.35b`` is
   not recalled here: a table nobody has transcribed ships empty, and asking it for a row
   says so and names what it does hold. Interpolating a neighbouring value would be a
   wrong-looking line that nothing catches — the discipline the element catalogue keeps for a
   named variant that does not exist, applied to a number.
+
+* **The standard travels inside the drawing, the way the catalogue does.** A standard is
+  ambient — a package file plus whichever project files are found by walking up from the
+  working directory — so the same drawing reopened elsewhere would be checked against
+  something else. :func:`identity` is what a drawing remembers: the name, the label and the
+  *effective* tables (already merged through ``extends``), so a copy stands whole where it
+  lands. ``Standards.adopt`` reads it back tolerantly and never lets the drawing's copy
+  override a standard of that name already in force — the local standard is the authority,
+  but the disagreement is reported, not hidden.
 
 * **The checker reports, it never raises.** :func:`check` reads a *snapshot* of the drawing —
   the unit, the layers in use, every text with its height, the sheet — as plain data, and
@@ -58,6 +75,7 @@ and it reaches :mod:`acadmcp.settings` only lazily inside :func:`current` — th
 from __future__ import annotations
 
 import contextlib
+import copy
 import hashlib
 import json
 import math
@@ -97,6 +115,7 @@ class Standard:
         label: str = "",
         tables: dict[str, dict[str, Any]] | None = None,
         skipped: list[str] | None = None,
+        extends: str = "",
     ) -> None:
         self.name = name
         self.label = label or name
@@ -104,6 +123,11 @@ class Standard:
             str(table): dict(rows) for table, rows in (tables or {}).items()
         }
         self.skipped: list[str] = list(skipped or [])
+        #: The single parent this standard extends, resolved by :meth:`Standards._resolve_extends`
+        #: after every file is read. Empty for a standard that stands on its own. Kept as the
+        #: declared name rather than a reference, so the chain is what ``describe`` reports and
+        #: the parent's tables never alias into the child's.
+        self.extends: str = extends
 
     # --- reading -----------------------------------------------------------
 
@@ -164,13 +188,20 @@ class Standard:
         return sorted(keys, key=order)
 
     def describe(self) -> dict[str, Any]:
-        return {
+        described: dict[str, Any] = {
             "name": self.name,
             "label": self.label,
             "digest": self.digest(),
             "tables": {table: self.coverage(table) for table in sorted(self.tables)},
             "skipped": list(self.skipped),
         }
+        # Only when declared: an absent key says "stands on its own", which is the common case
+        # and not something a caller reading a description needs told. The digest covers the
+        # *merged* tables either way, so a child's digest differing from its parent's is the
+        # inherited rows showing through.
+        if self.extends:
+            described["extends"] = self.extends
+        return described
 
     def digest(self) -> str:
         """A hash of the tables, so a difference is detectable without a diff.
@@ -283,15 +314,27 @@ class Standards:
             self.standards = {std.name: std for std in (standards or [])}
         #: One line per standard or row that could not be used, in the order they were read.
         self.skipped: list[str] = list(skipped or [])
+        #: The name a *drawing* declared it was drawn under — a template's standard, or the one
+        #: a reopened drawing records. :meth:`in_force` prefers it over :data:`DEFAULT_STANDARD`,
+        #: because its whole meaning is "the standard a drawing is drawn under": a session that
+        #: opened a GB/T 50103 site template and then reported the package's gbt50001 as in
+        #: force was reporting a standard that drawing is not drawn under. Measured in a sandbox
+        #: run, which is where that mismatch was found.
+        self.selected: str = ""
 
     # --- loading -----------------------------------------------------------
 
     @classmethod
     def load(cls, paths: list[str | Path] | None = None) -> Standards:
-        """Read the package standard and then any project ones, later files winning."""
+        """Read the package standard and then any project ones, later files winning.
+
+        ``extends`` is resolved last, once every file has been read and every same-name merge
+        done, so a child may extend a parent that arrived in a later file or the package's own.
+        """
         registry = cls()
         for path in [PACKAGE_STANDARDS, *(paths or [])]:
             registry.add_file(Path(path))
+        registry._resolve_extends()
         return registry
 
     @classmethod
@@ -336,11 +379,15 @@ class Standards:
         if not name:
             self.skipped.append(f"{where}: no name")
             return
+        # The single parent this standard restates its deltas over. Lower-cased like every name
+        # here so the chain resolves whatever case a project file wrote.
+        extends = str(entry.get("extends", "") or "").strip().lower()
 
         tables = entry.get("tables")
         if not isinstance(tables, dict):
             # An author who wrote the tables at the top level, beside `name`, is saying the
-            # same thing; every other key of theirs is metadata.
+            # same thing; every other key of theirs is metadata. `extends` is a string, so this
+            # filter never mistakes it for a table.
             tables = {
                 str(key): value
                 for key, value in entry.items()
@@ -348,17 +395,110 @@ class Standards:
                 and key not in ("name", "label", "tables")
                 and isinstance(value, dict)
             }
-        if not tables:
+        if not tables and not extends:
+            # No rows and no parent is nothing to load; a standard carrying only `extends` is a
+            # project restating the parent whole, which is a legitimate (if empty) delta.
             self.skipped.append(f"{where}: standard '{name}' has no tables")
             return
 
         existing = self.standards.get(name)
         if existing is None:
-            existing = Standard(name=name, label=str(entry.get("label", name)))
+            existing = Standard(name=name, label=str(entry.get("label", name)), extends=extends)
             self.standards[name] = existing
-        elif entry.get("label"):
-            existing.label = str(entry["label"])
+        else:
+            if entry.get("label"):
+                existing.label = str(entry["label"])
+            if extends:
+                # Later file wins, the same rule the rows follow: a project that restates the
+                # parent overrides an earlier file's declaration, and one that says nothing
+                # leaves it standing.
+                existing.extends = extends
         existing.merge_tables(tables, where=where, skipped=self.skipped)
+
+    # --- extends -----------------------------------------------------------
+
+    def _extends_cycles(self) -> list[list[str]]:
+        """The standards caught in an ``extends`` cycle, each as its member names.
+
+        Each standard names at most one parent, so the graph is functional and a cycle is a
+        simple ring: follow the chain from every standard and the first node seen twice starts
+        it. ``seen`` marks a walk finished, so a standard that merely leads *into* a cycle is
+        not reported as one — only its members are, which is what the skip line has to name.
+        """
+        cycles: list[list[str]] = []
+        seen: set[str] = set()
+        for start in self.standards:
+            if start in seen:
+                continue
+            path: list[str] = []
+            name = start
+            while True:
+                if name in path:
+                    cycles.append(path[path.index(name) :])
+                    break
+                if name in seen:
+                    break
+                seen.add(name)
+                path.append(name)
+                parent = self.standards[name].extends
+                if not parent or parent not in self.standards:
+                    break
+                name = parent
+        return cycles
+
+    def _resolve_extends(self) -> None:
+        """Fold each parent's resolved tables *under* its child's rows, once, after loading.
+
+        Effective tables are the parent's, deep-copied, with the child's own rows merged over by
+        :meth:`Standard.merge_tables` — the same row-by-row rule a later file follows, so a row
+        the child restates wins, a table it never mentions comes through whole, and ``_``-prefixed
+        metadata takes the child's where it states one. The copy matters: the parent is a registry
+        entry in its own right and may be the standard in force elsewhere, so a child's merge must
+        not edit it.
+
+        A missing parent or a cycle's members load with only their own rows and a line in
+        :attr:`skipped` naming the problem — never a raise, the loader's rule — and the lookups
+        the absent tables would have answered then refuse by name.
+        """
+        cycles = self._extends_cycles()
+        cycle_members = {name for cycle in cycles for name in cycle}
+        for cycle in cycles:
+            ring = " -> ".join([*cycle, cycle[0]])
+            self.skipped.append(
+                f"standard '{cycle[0]}' extends: cycle in 'extends' ({ring}); "
+                "loaded without the inherited tables"
+            )
+
+        resolved: dict[str, dict[str, dict[str, Any]]] = {}
+
+        def resolve(name: str) -> dict[str, dict[str, Any]]:
+            if name in resolved:
+                return resolved[name]
+            std = self.standards[name]
+            own = std.tables
+            parent_name = std.extends
+            if not parent_name or name in cycle_members:
+                resolved[name] = own
+                return own
+            if parent_name not in self.standards:
+                self.skipped.append(
+                    f"standard '{name}' extends unknown standard '{parent_name}'; "
+                    "loaded without the inherited tables"
+                )
+                resolved[name] = own
+                return own
+            merged = copy.deepcopy(resolve(parent_name))
+            std.tables = merged
+            std.merge_tables(
+                own,
+                where=f"standard '{name}' extends '{parent_name}'",
+                skipped=self.skipped,
+            )
+            resolved[name] = std.tables
+            return std.tables
+
+        for name in list(self.standards):
+            resolve(name)
 
     # --- lookup ------------------------------------------------------------
 
@@ -379,17 +519,34 @@ class Standards:
         """The standard a drawing is drawn under, or None when there is none.
 
         The named one when a caller names one — the template builder draws under the standard
-        a template declares. Otherwise :data:`DEFAULT_STANDARD` if it is loaded, and the first
-        standard read if it is not. None is a real answer and not an error: a process with no
-        standard at all falls back to the built-in layer scheme, which is what this package
-        drew before any of this was data.
+        a template declares. Otherwise the one a drawing *selected* (:meth:`select`), then
+        :data:`DEFAULT_STANDARD` if it is loaded, and the first standard read if it is not. None
+        is a real answer and not an error: a process with no standard at all falls back to the
+        built-in layer scheme, which is what this package drew before any of this was data.
         """
         wanted = str(name).strip().lower()
         if wanted:
             return self.standards.get(wanted)
+        if self.selected and self.selected in self.standards:
+            return self.standards[self.selected]
         if DEFAULT_STANDARD in self.standards:
             return self.standards[DEFAULT_STANDARD]
         return next(iter(self.standards.values()), None)
+
+    def select(self, name: str) -> Standard | None:
+        """Make `name` the standard this session draws under, and return it.
+
+        Called when a drawing declares its standard — a template's ``standard``, or the one a
+        reopened drawing carries — so ``in_force()`` answers with the standard that drawing is
+        actually under instead of the package default. An unknown name selects nothing and
+        leaves the previous selection standing: a name this registry has not got is not a reason
+        to move a session onto a standard it cannot resolve.
+        """
+        wanted = str(name).strip().lower()
+        if wanted and wanted in self.standards:
+            self.selected = wanted
+            return self.standards[wanted]
+        return None
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -398,6 +555,61 @@ class Standards:
             "skipped": list(self.skipped),
             "standards": {name: self.standards[name].describe() for name in self.keys()},
         }
+
+    # --- what a drawing remembers ------------------------------------------
+
+    def adopt(self, payload: dict[str, Any] | None) -> Standard | None:
+        """Take on the standard a drawing recorded, unless one of that name is already in force.
+
+        Tolerant, for the same reason loading is: a drawing whose embedded standard is damaged
+        must still open, and what could not be read is counted in :attr:`skipped` and reported,
+        never raised. The tables are adopted *whole* — they are the effective ones the drawing
+        was drawn with, already resolved through ``extends``, so no parent has to be present
+        for the adopted copy to stand: it is the tables, not the name, that make the standard.
+
+        A name already in force — the package's or a project's — is **never** overridden by the
+        drawing's copy: the local standard is the authority, and silently re-checking a drawing
+        against another office's tables is the failure this whole mechanism exists to prevent.
+        That existing standard is returned so a caller can still compare digests and report the
+        disagreement. An unknown name is adopted whole, so :meth:`in_force` resolves it and a
+        drawing carries its standard with it to a machine that has never seen its file.
+        """
+        if not isinstance(payload, dict):
+            self.skipped.append("drawing: standard identity is not an object")
+            return None
+        name = str(payload.get("name", "")).strip().lower()
+        if not name:
+            self.skipped.append("drawing: standard identity has no name")
+            return None
+        existing = self.standards.get(name)
+        if existing is not None:
+            return existing
+        raw_tables = payload.get("tables")
+        if not isinstance(raw_tables, dict):
+            self.skipped.append(f"drawing: standard '{name}' carries no tables")
+            return None
+        tables: dict[str, dict[str, Any]] = {}
+        for table, rows in raw_tables.items():
+            # Row-level tolerance, the loader's rule: a table that is not an object is named
+            # and dropped, and the tables that did read still make a usable standard.
+            if isinstance(rows, dict):
+                tables[str(table)] = dict(rows)
+            else:
+                self.skipped.append(f"drawing: standard '{name}' table '{table}' must be an object")
+        if not tables:
+            self.skipped.append(f"drawing: standard '{name}' carries no readable tables")
+            return None
+        adopted = Standard(
+            name=name,
+            label=str(payload.get("label", name)),
+            tables=tables,
+            # Carried for the report only. The tables are already the merged ones, so nothing
+            # re-resolves `extends` on an adopted standard — re-running the merge would fold a
+            # parent under rows that already contain it.
+            extends=str(payload.get("extends", "") or "").strip().lower(),
+        )
+        self.standards[name] = adopted
+        return adopted
 
 
 # ---------------------------------------------------------------------------
@@ -451,6 +663,46 @@ def get(name: str) -> Standard | None:
 def in_force(name: str = "") -> Standard | None:
     """The standard a drawing is drawn under, or None when there is none."""
     return current().in_force(name)
+
+
+def select(name: str) -> Standard | None:
+    """Make `name` the standard this session draws under, from the registry in force.
+
+    The server calls this when a drawing declares its standard, so a template's GB/T 50103
+    sheet is drawn and reported under GB/T 50103 rather than under whatever the package
+    defaults to.
+    """
+    return current().select(name)
+
+
+def identity(standard: Standard) -> dict[str, Any]:
+    """The standard as a drawing will remember it.
+
+    The whole thing, not a reference to it: a standard *is* its tables, and a drawing that
+    records only a name resolves against whatever that name means on the next machine — the
+    failure the catalogue's identity exists to prevent, in the standards' vocabulary. The
+    tables are the **effective** ones, already merged through ``extends``, so an adopted copy
+    needs no parent present to stand whole; ``digest`` is :meth:`Standard.digest`'s hash of
+    those same tables, so "is this the same standard?" stays a one-line question.
+
+    ``name`` is lower-cased the way every name in this module is, so a payload written by one
+    machine resolves against the registry of another regardless of the case a file wrote.
+    """
+    if not isinstance(standard, Standard):
+        raise ValueError(
+            "identity needs a Standard; read standards.in_force() and handle its None first"
+        )
+    payload: dict[str, Any] = {
+        "name": standard.name,
+        "label": standard.label,
+        "digest": standard.digest(),
+        "tables": copy.deepcopy(standard.tables),
+        "skipped": list(standard.skipped),
+    }
+    # Only when declared, mirroring describe(): an absent key says the standard stands alone.
+    if standard.extends:
+        payload["extends"] = standard.extends
+    return payload
 
 
 def lineweight_centimm(mm: float) -> int:
@@ -779,6 +1031,7 @@ __all__ = [
     "current",
     "describe",
     "get",
+    "identity",
     "in_force",
     "lineweight_centimm",
     "load",

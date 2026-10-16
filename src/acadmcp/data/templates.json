@@ -36,6 +36,32 @@
         "图号": ""
       },
       "artefact": "templates/gb_a4_arch.dxf"
+    },
+    {
+      "key": "gbt50104_a3_plan",
+      "label": "A3 建筑平面（GB/T 50104）",
+      "standard": "gbt50104",
+      "paper": "A3",
+      "orientation": "landscape",
+      "scale": "1:100",
+      "title_fields": {
+        "图名": "",
+        "图号": ""
+      },
+      "artefact": "templates/gbt50104_a3_plan.dxf"
+    },
+    {
+      "key": "gbt50103_a2_site",
+      "label": "A2 总平面（GB/T 50103）",
+      "standard": "gbt50103",
+      "paper": "A2",
+      "orientation": "landscape",
+      "scale": "1:500",
+      "title_fields": {
+        "图名": "",
+        "图号": ""
+      },
+      "artefact": "templates/gbt50103_a2_site.dxf"
     }
   ]
 }

@@ -96,10 +96,10 @@ def _project(tmp_path: Path, payload: dict, *, standards_payload: dict | None = 
 # ---------------------------------------------------------------------------
 
 
-def test_the_package_ships_the_gbt50001_standard():
+def test_the_package_ships_the_gbt_standards():
     registry = standards.current()
 
-    assert registry.keys() == ["gbt50001"]
+    assert registry.keys() == ["gbt50001", "gbt50103", "gbt50104"]
     assert registry.get("gbt50001") is registry.in_force()
     assert registry.skipped == []
 
@@ -118,11 +118,32 @@ def test_lookup_refuses_outside_the_table_by_name():
         std.lookup("text_heights", "0.33")
 
 
-def test_an_empty_table_refuses_everything():
-    std = standards.current().get("gbt50001")
+def test_a_table_shipped_empty_refuses_its_rows_by_name():
+    """An empty table is the loud-failure discipline: a lookup says 'not transcribed' rather
+    than interpolating a neighbouring value. No shipped table is empty any more — the 0.7
+    line-width group and gbt50103's metres rule were transcribed — so the rule is pinned against
+    one built here, the way the absent-table case is pinned below."""
+    std = standards.Standard(
+        name="office", label="office", tables={"line_width_groups": {"_source": "nobody's"}}
+    )
 
     with pytest.raises(ValueError, match="not transcribed"):
-        std.lookup("line_width_groups", "1:20")  # row shipped empty pending transcription
+        std.lookup("line_width_groups", "0.7")
+
+
+def test_the_transcribed_line_width_group_resolves_and_a_row_nobody_wrote_refuses():
+    std = standards.current().get("gbt50001")
+
+    row = std.lookup("line_width_groups", "0.7")
+    assert (row["b"], row["0.7b"], row["0.35b"]) == (0.7, 0.5, 0.25)
+    assert row["source"].startswith("用户提供设计院规范文档"), (
+        "a transcribed width states where from"
+    )
+    # The 0.5b row is not in the document, so it is deliberately absent — a caller asking for it
+    # is told the group has no such row rather than handed a neighbouring width.
+    assert "0.5b" not in row
+    with pytest.raises(ValueError, match="no row for '1.0'.*coverage"):
+        std.lookup("line_width_groups", "1.0")
 
 
 def test_an_unknown_table_names_the_table():
@@ -201,6 +222,84 @@ def test_no_row_reaches_a_drawing_without_a_source():
 
 
 # ---------------------------------------------------------------------------
+# the shipped standards that extend gbt50001
+# ---------------------------------------------------------------------------
+#
+# Their parent is the package's own rows rather than a test fixture, so what is pinned here is
+# the resolution a *drawing* gets: a child whose rows carry the transcribed line weights while
+# the parent's colour, linetype and text-height series come through untouched.
+
+
+def _shipped_entry(name: str) -> dict:
+    """One standard's own entry out of the shipped file, before any parent is folded in.
+
+    Read raw rather than through ``Standard.tables``, which by then holds the merged result and
+    so cannot say whether the child restated a row or inherited it.
+    """
+    payload = json.loads(standards.PACKAGE_STANDARDS.read_text(encoding="utf-8"))
+    return next(entry for entry in payload["standards"] if entry["name"] == name)
+
+
+def test_gbt50104_extends_the_shipped_standard_and_restates_every_layer_row():
+    registry = standards.current()
+    std = registry.get("gbt50104")
+    parent = registry.get("gbt50001")
+
+    assert std.extends == "gbt50001"
+    assert registry.skipped == [], "a parent in the package's own file resolves; nothing to skip"
+    # A child row replaces its parent's whole row, not the fields it states — so the child
+    # restates every row, and the colour and linetype still say what the parent's did.
+    restated = {
+        key for key in _shipped_entry("gbt50104")["tables"]["layers"] if not key.startswith("_")
+    }
+    assert restated == set(parent.layers), "every parent layer row is restated"
+    for name, (color, linetype, _weight) in parent.layers.items():
+        assert std.layers[name][:2] == (color, linetype), name
+
+    assert std.layers["A-WALL"] == (2, "CONTINUOUS", 0.7), "a wall face is the thick group"
+    assert std.layers["A-SHEET"] == (7, "CONTINUOUS", 0.7), "the frame is 粗实线"
+    assert std.layers["A-DOOR"] == (4, "CONTINUOUS", 0.5)
+    assert std.layers["A-DIM"] == (3, "CONTINUOUS", 0.25)
+    # The widths are the transcribed group's own values, so the two tables cannot disagree about
+    # what b / 0.7b / 0.35b are.
+    group = std.lookup("line_width_groups", "0.7")
+    assert {std.layers[name][2] for name in ("A-WALL", "A-DOOR", "A-DIM")} == {
+        group["b"],
+        group["0.7b"],
+        group["0.35b"],
+    }
+
+
+def test_gbt50104_inherits_the_parents_text_height_series_rather_than_restating_it():
+    std = standards.current().get("gbt50104")
+    parent = standards.current().get("gbt50001")
+
+    assert std.text_heights == parent.text_heights
+    assert std.text_heights == frozenset({2.5, 3.5, 5.0, 7.0, 10.0, 14.0, 20.0})
+    assert "text_heights" not in _shipped_entry("gbt50104")["tables"], (
+        "the document's 2.5-10 series is a subset of the inherited one; restating it would be a "
+        "second place for one series to live"
+    )
+
+
+def test_gbt50103_transcribes_the_metres_rule_and_refuses_what_it_does_not_state():
+    registry = standards.current()
+    std = registry.get("gbt50103")
+
+    assert std.extends == "gbt50001"
+    assert std.lookup("dimensioning", "units")["unit"] == "m"
+    # The decimals figure and the site-plan layer names are pending transcription, so a lookup
+    # for them refuses by name rather than inventing one — the empty-table rule, on a table that
+    # holds exactly one row.
+    with pytest.raises(ValueError, match="no row for 'decimals'.*coverage"):
+        std.lookup("dimensioning", "decimals")
+    # No site-plan layer row was invented either: the child's layer table is the parent's, whole,
+    # and it states no width the parent's rows did not already say.
+    assert set(std.layers) == set(registry.get("gbt50001").layers)
+    assert std.layers["A-WALL"] == registry.get("gbt50001").layers["A-WALL"]
+
+
+# ---------------------------------------------------------------------------
 # loading: tolerant, later files winning row by row
 # ---------------------------------------------------------------------------
 
@@ -211,7 +310,9 @@ def test_a_broken_project_file_is_skipped_not_raised(tmp_path):
 
     registry = standards.load([broken])
 
-    assert registry.keys() == ["gbt50001"], "the package's own standard must survive"
+    assert registry.keys() == ["gbt50001", "gbt50103", "gbt50104"], (
+        "the package's own standards must survive"
+    )
     assert registry.skipped and "broken.json" in registry.skipped[0]
 
 
@@ -949,3 +1050,216 @@ def test_undoing_the_frame_leaves_a_sheetless_drawing_the_checker_reports(_tool_
 
     assert any(i["rule"] == "no_sheet" for i in report["issues"])
     assert report["counts"]["warning"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# Phase C: `extends` — a standard restates only its deltas over one parent
+# ---------------------------------------------------------------------------
+#
+# Resolution is a single pass at the end of `Standards.load`, over every standard the files
+# produced, so a child may extend a parent from the package file or any project file. The
+# cases below pin the four the contract names: inheritance, override, a chain, and the two
+# graceful failures (a missing parent, a cycle), both of which are *named* and never raised.
+
+
+def _standards_file(tmp_path: Path, filename: str, entries: list) -> Path:
+    path = tmp_path / filename
+    path.write_text(json.dumps({"standards": entries}, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def test_a_standard_inherits_the_parent_rows_it_never_states(tmp_path):
+    file = _standards_file(
+        tmp_path,
+        "std.json",
+        [
+            {"name": "base", "tables": {"layers": {"A-WALL": _row(2, "CONTINUOUS", 0.5)}}},
+            {"name": "child", "extends": "base", "tables": {"layers": {"A-DOOR": _row(4)}}},
+        ],
+    )
+
+    child = standards.load([file]).get("child")
+
+    assert child.layers["A-WALL"] == (2, "CONTINUOUS", 0.5), "the parent's row, unstated here"
+    assert child.layers["A-DOOR"] == (4, "CONTINUOUS", None)
+
+
+def test_a_child_row_wins_and_the_parent_entry_is_not_mutated(tmp_path):
+    file = _standards_file(
+        tmp_path,
+        "std.json",
+        [
+            {
+                "name": "base",
+                "tables": {
+                    "layers": {
+                        "_source": "base source",
+                        "_note": "base note",
+                        "A-WALL": _row(2),
+                        "A-DOOR": _row(4),
+                    }
+                },
+            },
+            {
+                "name": "child",
+                "extends": "base",
+                "tables": {
+                    "layers": {"_note": "child note", "A-WALL": _row(1, "DASHED", 0.7)}
+                },
+            },
+        ],
+    )
+
+    registry = standards.load([file])
+    base = registry.get("base")
+    child = registry.get("child")
+
+    assert child.layers["A-WALL"] == (1, "DASHED", 0.7), "the child's row wins"
+    assert child.layers["A-DOOR"] == (4, "CONTINUOUS", None), "the parent's rows survive"
+    # `_`-prefixed metadata follows the same later-wins rule, so the child's note wins while the
+    # parent's source, which the child never restated, comes through.
+    assert child.tables["layers"]["_note"] == "child note"
+    assert child.tables["layers"]["_source"] == "base source"
+
+    # The parent is a registry entry in its own right and may be the standard in force
+    # elsewhere, so merging must not have edited it — and the deep copy means even a row the
+    # child inherited is its own object.
+    assert base.layers["A-WALL"] == (2, "CONTINUOUS", None)
+    child.tables["layers"]["A-DOOR"]["color"] = 99
+    assert base.tables["layers"]["A-DOOR"]["color"] == 4
+
+
+def test_a_chain_of_three_resolves_recursively(tmp_path):
+    file = _standards_file(
+        tmp_path,
+        "std.json",
+        [
+            {
+                "name": "c",
+                "tables": {
+                    "layers": {"A-WALL": _row(2)},
+                    "text_heights": {"3.5": {"height": 3.5, "source": "a test series"}},
+                },
+            },
+            {"name": "b", "extends": "c", "tables": {"layers": {"A-DOOR": _row(4)}}},
+            {"name": "a", "extends": "b", "tables": {"layers": {"A-WINDOW": _row(6)}}},
+        ],
+    )
+
+    registry = standards.load([file])
+
+    assert set(registry.get("a").layers) == {"A-WALL", "A-DOOR", "A-WINDOW"}
+    assert set(registry.get("b").layers) == {"A-WALL", "A-DOOR"}, "the middle link resolves too"
+    # A table the whole chain never mentions in the middle comes through from the root whole.
+    assert registry.get("a").text_heights == frozenset({3.5})
+
+
+def test_a_missing_parent_is_named_and_the_standard_loads_with_its_own_rows(tmp_path):
+    file = _standards_file(
+        tmp_path,
+        "std.json",
+        [{"name": "child", "extends": "ghost", "tables": {"layers": {"A-WALL": _row(2)}}}],
+    )
+
+    registry = standards.load([file])
+    child = registry.get("child")
+
+    assert child.layers == {"A-WALL": (2, "CONTINUOUS", None)}
+    assert any("child" in line and "ghost" in line for line in registry.skipped), registry.skipped
+    # It still loaded, so the standard in force resolves and a lookup in the absent table
+    # refuses by name rather than the whole file being lost.
+    assert registry.in_force("child") is child
+    with pytest.raises(ValueError, match="no table 'text_heights'"):
+        child.lookup("text_heights", "3.5")
+
+
+def test_a_cycle_is_named_and_its_members_load_with_their_own_rows(tmp_path):
+    file = _standards_file(
+        tmp_path,
+        "std.json",
+        [
+            {"name": "a", "extends": "b", "tables": {"layers": {"A-WALL": _row(2)}}},
+            {"name": "b", "extends": "a", "tables": {"layers": {"A-DOOR": _row(4)}}},
+        ],
+    )
+
+    registry = standards.load([file])
+
+    assert registry.get("a").layers == {"A-WALL": (2, "CONTINUOUS", None)}
+    assert registry.get("b").layers == {"A-DOOR": (4, "CONTINUOUS", None)}
+    joined = " | ".join(registry.skipped)
+    assert "cycle" in joined and "a -> b -> a" in joined, registry.skipped
+
+
+def test_extends_combines_with_a_same_name_merge_across_files(tmp_path):
+    base = _standards_file(
+        tmp_path,
+        "base.json",
+        [{"name": "office", "tables": {"layers": {"A-WALL": _row(2), "A-DOOR": _row(4)}}}],
+    )
+    child = _standards_file(
+        tmp_path,
+        "child.json",
+        [{"name": "site", "extends": "office", "tables": {"layers": {"A-DOOR": _row(6)}}}],
+    )
+    merge = _standards_file(
+        tmp_path,
+        "merge.json",
+        [{"name": "site", "tables": {"layers": {"A-WINDOW": _row(7)}}}],
+    )
+
+    site = standards.load([base, child, merge]).get("site")
+
+    assert site.layers["A-WALL"] == (2, "CONTINUOUS", None), "from the parent"
+    assert site.layers["A-DOOR"] == (6, "CONTINUOUS", None), "the child's own row"
+    assert site.layers["A-WINDOW"] == (7, "CONTINUOUS", None), "the later file's row"
+    assert site.extends == "office", "a later same-name file that states no parent keeps it"
+
+
+def test_a_standard_that_only_extends_loads_the_parent_rows_whole(tmp_path):
+    file = _standards_file(
+        tmp_path,
+        "std.json",
+        [
+            {"name": "base", "tables": {"layers": {"A-WALL": _row(2)}}},
+            {"name": "alias", "extends": "base"},
+        ],
+    )
+
+    alias = standards.load([file]).get("alias")
+
+    assert alias.layers == {"A-WALL": (2, "CONTINUOUS", None)}
+    assert alias.extends == "base"
+
+
+def test_describe_reports_the_declared_parent_and_hides_it_when_there_is_none(tmp_path):
+    file = _standards_file(
+        tmp_path,
+        "std.json",
+        [
+            {"name": "base", "tables": {"layers": {"A-WALL": _row(2)}}},
+            {"name": "site", "extends": "base", "tables": {"layers": {"A-DOOR": _row(4)}}},
+        ],
+    )
+
+    described = standards.load([file]).describe()["standards"]
+
+    assert described["site"]["extends"] == "base"
+    assert "extends" not in described["base"]
+    assert "extends" not in described["gbt50001"], "the package standard stands on its own"
+
+
+def test_the_digest_covers_the_merged_tables_and_differs_from_the_parent(tmp_path):
+    file = _standards_file(
+        tmp_path,
+        "std.json",
+        [
+            {"name": "base", "tables": {"layers": {"A-WALL": _row(2)}}},
+            {"name": "site", "extends": "base", "tables": {"layers": {"A-DOOR": _row(4)}}},
+        ],
+    )
+
+    registry = standards.load([file])
+
+    assert registry.get("site").digest() != registry.get("base").digest()
+

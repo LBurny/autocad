@@ -187,6 +187,36 @@
         "v": { "params": { "焊接符号": "V" } },
         "backing": { "params": { "焊接符号": "背衬" } }
       }
+    },
+    {
+      "key": "level_mark",
+      "label": "标高符号 (level mark)",
+      "category": "annotation",
+      "op": "level_mark",
+      "layer": "A-DIM",
+      "params": { "text": "±0.000" },
+      "notes": "The level a mark notes is its content, not a size, so it is a parameter rather than a variant: place it with params={'text': '±0.300'} to note another level. The default is ground level. The mark is sized in paper millimetres by the sheet's own plot scale, so it comes out the same size on the paper at any scale. A symbol, not a tag: it carries no number, so placing one does not consume a tag number.",
+      "variants": {}
+    },
+    {
+      "key": "north_arrow",
+      "label": "指北针 (north arrow)",
+      "category": "annotation",
+      "op": "north_arrow",
+      "layer": "A-ANNO",
+      "params": { "label": "北" },
+      "notes": "Points up the sheet; params={'label': 'N'} relabels it for an English sheet. Sized in paper millimetres by the sheet's plot scale. A symbol, not a tag: it carries no number, so placing one does not consume a tag number.",
+      "variants": {}
+    },
+    {
+      "key": "section_mark",
+      "label": "剖切符号 (section mark)",
+      "category": "annotation",
+      "op": "section_mark",
+      "layer": "A-ANNO",
+      "params": { "label": "1-1", "length": 6000.0 },
+      "notes": "Placed at its first end: the tool's rotation is the cut direction and params carry length and side, because the catalogue's own reference point is a single point — the section mark's second end is derived, not passed. The default is a 1-1 section 6 m long, ticked to the left. Sized in paper millimetres by the sheet's plot scale. A symbol, not a tag: it carries no number, so placing one does not consume a tag number.",
+      "variants": {}
     }
   ]
 }

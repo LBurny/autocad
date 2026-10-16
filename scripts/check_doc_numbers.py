@@ -165,7 +165,13 @@ def eval_answers() -> list[tuple[str, str, str]]:
             _by_key("stud").default_variant
         ),
         "dynamic block parameter whose name is misleading": str(_by_key("window").width_param),
-        "exactly one element type carries an empty tag prefix": _by_key("weld_symbol").key,
+        # Derived for real, as the sorted list of prefix-less keys: the old form answered
+        # `_by_key("weld_symbol")` by construction, so when three more prefix-less types
+        # arrived the question went false while the gate stayed green — exactly the silent
+        # staleness this script exists to catch.
+        "element types carry an empty tag prefix": ", ".join(
+            sorted(e.key for e in _elements() if not e.tag_prefix)
+        ),
         # The catalogue writes the library path the way AutoCAD does, backslashes and all,
         # so it is basenamed the way a path is rather than by splitting on "/".
         "imported from a block in which library drawing file": PureWindowsPath(

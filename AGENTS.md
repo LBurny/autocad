@@ -10,7 +10,8 @@ DXF file. Published at https://github.com/LBurny/autocad.
 src/acadmcp/
   geom.py               pure 2D geometry: offsets, mitre joins, areas. No CAD imports.
   layers.py             drafting standard: layer names, ACI colours, text heights, mm sizes
-  ops.py                architectural operations (walls, doors, rooms, cores, annotation)
+  ops.py                architectural operations (walls, doors, rooms, cores, annotation,
+                        and the GB/T marks: level, north arrow, section)
   catalog.py            the element catalogue: entries, variants, identity
   catalog_ops.py        the parametric twins a catalogue entry draws where blocks cannot insert
   summary.py            derives a design summary (rooms, openings, elements) from the journal.
@@ -22,10 +23,14 @@ src/acadmcp/
   capture_ops.py        element capture: journal steps become a block definition plus a
                         catalogue entry, so a verified component is never re-derived.
   standards.py          the drafting standard as data: GB/T tables with sources, a lookup
-                        that refuses by name, and check() over a drawing's snapshot. Pure —
-                        layers and sheet only, no CAD.
+                        that refuses by name, single-parent `extends` (the parent's tables
+                        merge under the child's rows), and check() over a drawing's snapshot.
+                        The drawing records the standard that drew it (identity/adopt, the
+                        catalogue's pattern). Pure — layers and sheet only, no CAD.
   templates.py          the shipped templates: the standard, paper, scale and title-block
-                        fields a drawing starts from. Pure, no CAD.
+                        fields a drawing starts from. A project names its own files in
+                        acadmcp.json's `templates` list and they merge in key by key, exactly
+                        like its standards. Pure, no CAD.
   suggest.py            repetition mining over the step rows: what was drawn the same way
                         twice is a library element waiting to be captured. Pure, no CAD.
   replies.py            the output schemas: one TypedDict per high-frequency read tool,
@@ -36,7 +41,7 @@ src/acadmcp/
                         the served inputSchema at import — the signature carries the type,
                         this carries the meaning. Data plus the injection; no imports.
   data/                 the shipped data: elements.json (the catalogue), standards.json
-                        (GB/T tables) and templates.json (the two template specifications)
+                        (GB/T tables) and templates.json (the four template specifications)
   terms.py              the tool vocabulary: the AutoCAD command and the Chinese phrase for
                         each tool. Data plus lookup; no CAD imports.
   prompts.py            the MCP prompt templates (floor_plan, headless_to_live,
@@ -57,7 +62,8 @@ src/acadmcp/
     com.py              ActiveX driver — draws into a running AutoCAD; journals in memory
     plugin.py           records primitives per step and hands them to the plugin
 examples/floor_plan_demo.py
-templates/              the committed template artefacts (gb_a3_arch.dxf, gb_a4_arch.dxf),
+templates/              the committed template artefacts (gb_a3_arch.dxf, gb_a4_arch.dxf,
+                        gbt50104_a3_plan.dxf, gbt50103_a2_site.dxf),
                         built by scripts/build_templates.py, never hand-drawn
 scripts/check_doc_numbers.py   every quotable number, derived from the tree; non-zero on drift
 scripts/build_templates.py     builds and gates the template artefacts (fingerprint, standard)
@@ -77,8 +83,10 @@ tests/                  test_geom.py, test_backends.py, test_journal.py, test_re
                         test_critique.py (component checks against the journal),
                         test_capture.py (element capture: block, catalogue, reopen),
                         test_finalize_gate.py (the three check/capture tools, wired),
-                        test_standards.py (GB/T tables as data, and the conformance check),
-                        test_templates.py (the template registry and the artefact gate),
+                        test_standards.py (GB/T tables as data, the conformance check,
+                        and extends inheritance),
+                        test_standard_identity.py (the drawing records its standard),
+                        test_templates.py (the template registry, project files, the artefact gate),
                         test_publish.py (capture → publish → place in a fresh drawing),
                         test_suggest.py (repetition mined from the journal),
                         test_doc_numbers.py (the docs and the evaluation answers),
@@ -111,7 +119,7 @@ tests/                  test_geom.py, test_backends.py, test_journal.py, test_re
 ## Commands
 
 ```bash
-uv run pytest -q                      # 746 tests, ~15s, no AutoCAD required
+uv run pytest -q                      # 835 tests, ~20s, no AutoCAD required
 uv run pytest tests/test_terms.py -q  # adding a tool without a vocabulary entry fails here
 uv run pytest tests/test_prompts.py -q  # a prompt naming a tool that does not exist fails here
 uv run python scripts/check_doc_numbers.py   # docs and evaluation answers vs the tree
@@ -755,6 +763,33 @@ copy embedded in the drawing, then the package's starter; a difference is report
 than it writes (1), and the reason is specific: every `from_dict` failure lands in the dxf
 reader's `journal_unreadable`, which is *reported rather than raised*, so without the guard a
 future format would silently degrade to "no journal".
+
+**The drawing records the standard that drew it — the catalogue's pattern applied to GB/T
+tables.** `standards.identity()` embeds the in-force standard's *effective* tables (post-
+`extends` merge) and digest into `Journal.meta["standard"]`, riding the same DXF XRecord /
+COM sidecar path as the catalogue; on open the record is adopted with the catalogue's
+precedence (project files → embedded → package) and never overrides a name already in force.
+A same-name digest difference surfaces as `standard_warning` in `drawing_status`, and
+`drawing_check(check="standard")` with no argument prefers the recorded standard — a drawing
+with no record behaves exactly as before. `drawing_save` re-stamps by the *recorded* name,
+not the ambient one (measured wrong the other way: a drawing made from an "acme" template
+saved in an "acme"-less process silently re-recorded the package's gbt50001). The plugin
+backend's stamp is local-journal-only, the same limitation the catalogue has.
+
+A recorded name this session has **not got at all** is reported too, and is not a digest
+comparison — there is nothing to compare it with. Measured before that line existed: with a
+project's standards file in force and a drawing recording an "acme" the project does not
+define, `drawing_open` answered `standard_source: "project"` with no warning while the
+journal's `acme` record became `gbt50001`, so the drawing's own account of what drew it was
+dropped in silence, by the tool that exists to keep it. The project's tables still win; only
+the silence changed. A differing digest under the *same* name is the other case and stays a
+separate message.
+
+A template's committed artefact records its standard too — `build_templates.build_one` stamps
+before it saves. Measured missing: the shipped 50104 plan carried that standard's own line
+weights (A-WALL 0.70, A-DIM 0.25) with an empty journal, so a user opening the file directly
+had the package's gbt50001 adopted for it and a save recorded gbt50001 as the standard that
+drawing was drawn under.
 
 **An adopted entry resolves its fragment beside the drawing.** `Catalog.adopt` takes the
 drawing's own path as `origin_file` and records it as each adopted entry's `source_file`, so

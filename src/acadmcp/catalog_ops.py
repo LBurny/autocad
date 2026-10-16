@@ -98,6 +98,37 @@ def _no_rotation(what: str, rotation: float) -> None:
         )
 
 
+def _no_rotation_symbol(what: str, rotation: float) -> None:
+    """Refuse to rotate a drafting symbol whose op draws it in one fixed orientation.
+
+    Unlike a rectangle (see :func:`_no_rotation`), moving the coordinates would not help: the
+    symbol's whole shape is defined in its own frame and its op takes no rotation. A level
+    mark is read apex-down and a north arrow points up the sheet by convention, so a rotated
+    one is a different mark, not the same mark turned.
+    """
+    if float(rotation) % 360.0:
+        raise ValueError(
+            f"{what} is drawn in one fixed orientation and cannot be rotated by "
+            f"{rotation:g} degrees; place it where its orientation is wanted, or rotate the "
+            "drawing"
+        )
+
+
+def _no_scale_symbol(what: str, scale: float) -> None:
+    """Refuse to scale a symbol whose size is a paper measure, not the caller's.
+
+    Every dimension of these symbols is a *paper* millimetre times the sheet's plot scale, so
+    the drawing's own scale already fixes the size — a further uniform scale would draw
+    off-series geometry on the paper, the very thing the standard check exists to catch. Change
+    the sheet's scale instead, or scale a captured block reference, which really does carry one.
+    """
+    if abs(float(scale) - 1.0) > 1e-9:
+        raise ValueError(
+            f"{what} is sized in paper millimetres by the sheet's own scale, so it cannot be "
+            f"scaled by {scale:g}; set the sheet's scale instead"
+        )
+
+
 def column(
     be,
     at: Point,
@@ -248,6 +279,75 @@ def equipment(
     return ops.draw_equipment(be, (x, y), (x + float(width), y + float(depth)), name, layer=layer)
 
 
+#: The section mark's cut-line length in mm when a caller gives none. The uniform adapter
+#: signature carries one point and the tool's own `rotation`, so the mark's second end is
+#: derived as `at` plus this far along the cut direction. A section cut normally spans the whole
+#: building, so a caller with a real plan to section states its own `length`.
+SECTION_CUT_LENGTH = 6000.0
+
+
+def level_mark(
+    be,
+    at: Point,
+    *,
+    text: str = "\u00b10.000",
+    mirror: bool = False,
+    rotation: float = 0.0,
+    scale: float = 1.0,
+    width: float | None = None,
+    layer: str = "A-DIM",
+    **params: Any,
+) -> list[Any]:
+    """A level mark by the point whose level it notes — the triangle's apex, the same `at`
+    `draw_level_mark` takes. The level itself is `text`, and `mirror` flips the mark to the
+    other side of that point; a mark is read in one orientation, so a rotation is refused."""
+    _no_scale_symbol("a level mark", scale)
+    _no_rotation_symbol("a level mark", rotation)
+    return ops.draw_level_mark(be, at, text, mirror=mirror, layer=layer)
+
+
+def north_arrow(
+    be,
+    at: Point,
+    *,
+    label: str = "\u5317",
+    rotation: float = 0.0,
+    scale: float = 1.0,
+    width: float | None = None,
+    layer: str = "A-ANNO",
+    **params: Any,
+) -> list[Any]:
+    """A north arrow by its circle's centre — the point `draw_north_arrow` takes. The arrow
+    points up the sheet, so a rotation is refused rather than drawing a compass whose needle
+    no longer means north; `label` is the text above the circle."""
+    _no_scale_symbol("a north arrow", scale)
+    _no_rotation_symbol("a north arrow", rotation)
+    return ops.draw_north_arrow(be, at, label=label, layer=layer)
+
+
+def section_mark(
+    be,
+    at: Point,
+    *,
+    label: str = "1-1",
+    length: float = SECTION_CUT_LENGTH,
+    side: str = "left",
+    rotation: float = 0.0,
+    scale: float = 1.0,
+    width: float | None = None,
+    layer: str = "A-ANNO",
+    **params: Any,
+) -> list[Any]:
+    """A section mark by its first end. `at` is p1; `rotation` is the cut direction in degrees
+    CCW from +X and `length` how far the cut line runs to p2 — the two the uniform signature
+    carries, so the mark's second end is derived rather than passed. `label` names the section
+    and `side` picks which side of the travel the viewing ticks sit on."""
+    _no_scale_symbol("a section mark", scale)
+    x, y = geom.xy(at)
+    p2 = geom.polar((x, y), float(rotation), float(length))
+    return ops.draw_section_mark(be, (x, y), p2, label, side=side, layer=layer)
+
+
 def insert_captured(
     be,
     at: Point,
@@ -362,6 +462,9 @@ CATALOG_OPS: dict[str, Callable[..., list[Any]]] = {
     "stair": stair,
     "shaft": shaft,
     "equipment": equipment,
+    "level_mark": level_mark,
+    "north_arrow": north_arrow,
+    "section_mark": section_mark,
     "insert_captured": insert_captured,
 }
 

@@ -323,7 +323,27 @@ def draw_wall_with_openings(
                 tag=tag,
                 tag_offset=tag_offset,
             )
-        # kind == "opening": leave the gap bare
+        elif kind == "opening" and tag:
+            # A bare opening draws no symbol of its own, so its tag is the only thing that can
+            # name it — a 卷帘门 is annotated exactly this way, and the docstring promises `tag`
+            # for every opening, not only the two that carry a symbol. Placement follows the
+            # door's: centred on the opening, offset across the wall. Measured on a sandbox run:
+            # before this, a tag on a `kind="opening"` was dropped silently and the run still
+            # said ok.
+            normal = geom.left_normal(geom.polar((0, 0), angle, 1.0))
+            mid = geom.point_along(pts, start + width / 2.0)
+            tag_h = layers.text_height("tag", be.text_scale())
+            across = thickness / 2.0 + tag_h * 1.2 if tag_offset is None else float(tag_offset)
+            symbols.append(
+                be.text(
+                    geom.add(mid, geom.mul(normal, across)),
+                    str(tag),
+                    tag_h,
+                    layer="A-ANNO",
+                    align="center",
+                )
+            )
+        # kind == "opening" with no tag: leave the gap bare
         cursor = max(cursor, end)
         previous = kind
 
@@ -1107,6 +1127,156 @@ def leader_note(
             align="left" if math.cos(math.radians(direction)) >= 0 else "right",
         )
     )
+    return made
+
+
+# ---------------------------------------------------------------------------
+# drafting symbols
+# ---------------------------------------------------------------------------
+
+#: Paper-millimetre sizes for the three drafting symbols below. Each is a *paper* measure, so
+#: every call site multiplies it by ``be.text_scale()`` — model millimetres per paper
+#: millimetre — and the symbol comes out the same size on the paper whatever the sheet plots
+#: at. The values are the conventional ones a national standard states, and the standard's own
+#: table is recorded in ``data/standards.json`` (gbt50001/symbols) with its source, so a
+#: divergence between these constants and that record is visible rather than assumed away.
+LEVEL_TRIANGLE_MM = 3.0  # 标高符号: triangle height, 高约 3mm
+NORTH_ARROW_DIAMETER_MM = 24.0  # 指北针: circle diameter
+NORTH_ARROW_TAIL_MM = 3.0  # 指北针: 指针尾部宽度
+SECTION_TICK_MM = 6.0  # 剖切符号: the viewing tick (the standard gives 4~6mm)
+
+
+def draw_level_mark(
+    be: Backend,
+    at: Point,
+    text: str,
+    *,
+    mirror: bool = False,
+    layer: str = "A-DIM",
+) -> list[Any]:
+    """A level mark (标高符号): an isosceles right triangle apex-down at `at`, level written above.
+
+    `at` is the point whose level is noted, and the triangle's apex sits on it. A horizontal
+    line leaves the triangle's top edge to the right, or to its left when `mirror=True`, and
+    runs far enough to carry `text` plus a small margin; `text` is written above that line. The
+    triangle's height and the text at the 'dim' paper height are paper measures, so the mark is
+    the same size on the paper at any plot scale.
+    """
+    label = str(text or "").strip()
+    if not label:
+        # The text is the whole of what the mark notes; an empty one draws a shape that says
+        # nothing, which is a caller slip rather than a blank mark.
+        raise ValueError(
+            "a level mark needs the level it notes, e.g. text='±0.000'; an empty level draws "
+            "a mark that says nothing"
+        )
+    scale = be.text_scale()
+    height = LEVEL_TRIANGLE_MM * scale
+    text_h = layers.text_height("dim", scale)
+    x, y = geom.xy(at)
+    base_y = y + height
+    # Apex down on the point and the top edge level: the isosceles right triangle's half-base
+    # equals its height, which is what puts a 90-degree angle at the apex.
+    made: list[Any] = [
+        be.polyline([(x, y), (x - height, base_y), (x + height, base_y)], closed=True, layer=layer)
+    ]
+    side = -1.0 if mirror else 1.0
+    start = (x + side * height, base_y)
+    end = (start[0] + side * (layers.text_width(label, text_h) + text_h * 0.5), base_y)
+    made.append(be.line(start, end, layer=layer))
+    # The text hugs the triangle end of the line and reads left-to-right in both orientations:
+    # left-aligned when the line runs right, right-aligned when it runs left. A mirrored mark
+    # whose text mirrored with it would read backwards.
+    made.append(
+        be.text(
+            (start[0], base_y + text_h * 0.3),
+            label,
+            text_h,
+            layer=layer,
+            align="right" if mirror else "left",
+        )
+    )
+    return made
+
+
+def draw_north_arrow(
+    be: Backend,
+    at: Point,
+    *,
+    label: str = "\u5317",
+    layer: str = "A-ANNO",
+) -> list[Any]:
+    """A north arrow (指北针): a circle with a filled needle pointing up the sheet, label above.
+
+    `at` is the circle's centre. The circle's diameter, the needle's tail width and the label's
+    height are paper measures, so the compass is the same size on the paper at any plot scale.
+    The needle is a SOLID triangle spanning the circle's diameter — tip at the top, tail at the
+    bottom at the width the standard gives — filled the way `draw_column` fills a section.
+    """
+    scale = be.text_scale()
+    radius = NORTH_ARROW_DIAMETER_MM * scale / 2.0
+    text_h = layers.text_height("text", scale)
+    x, y = geom.xy(at)
+    # A needle spanning the circle rather than a head filling half of it: at the standard's 3 mm
+    # tail it is the thin pointer a reader recognises as 指北针, and it says "north" across the
+    # whole compass instead of only from its centre.
+    half_tail = NORTH_ARROW_TAIL_MM * scale / 2.0
+    head = [(x, y + radius), (x - half_tail, y - radius), (x + half_tail, y - radius)]
+    made: list[Any] = [
+        be.circle((x, y), radius, layer=layer),
+        be.polyline(head, closed=True, layer=layer),
+    ]
+    # The fill is what makes the triangle read as an arrowhead; a backend that cannot fill it
+    # still draws the direction, the same trade a wall's poché makes.
+    with contextlib.suppress(Exception):
+        made.append(be.hatch(head, "SOLID", 1.0, layer=layer, solid=True))
+    made.append(be.text((x, y + radius + text_h), label, text_h, layer=layer, align="center"))
+    return made
+
+
+def draw_section_mark(
+    be: Backend,
+    p1: Point,
+    p2: Point,
+    label: str,
+    *,
+    side: str = "left",
+    layer: str = "A-ANNO",
+) -> list[Any]:
+    """A section mark (剖切符号): the cut line p1 to p2, a viewing tick at each end, name beside.
+
+    Each tick is drawn on `side` of the travel direction p1 to p2 — 'left' is 90 degrees
+    counter-clockwise from the travel, 'right' 90 clockwise — and is the direction the section
+    is viewed from. The tick and the label at the 'text' paper height are paper measures, so the
+    mark is the same size on the paper at any plot scale. `p1` and `p2` must be distinct: with no
+    length there is no travel direction for a tick to be perpendicular to.
+    """
+    if side not in ("left", "right"):
+        raise ValueError(f"side must be 'left' or 'right', got {side!r}")
+    if geom.dist(p1, p2) < 1e-9:
+        raise ValueError("a section mark needs two distinct points")
+    name = str(label or "").strip()
+    if not name:
+        raise ValueError("a section mark needs the section's name, e.g. label='1-1'")
+    a, b = geom.xy(p1), geom.xy(p2)
+    scale = be.text_scale()
+    tick = SECTION_TICK_MM * scale
+    text_h = layers.text_height("text", scale)
+    across = geom.angle_of(a, b) + (90.0 if side == "left" else -90.0)
+    made: list[Any] = [be.line(a, b, layer=layer)]
+    for end in (a, b):
+        made.append(be.line(end, geom.polar(end, across, tick), layer=layer))
+        # Beyond the tick's outer end, where a section number is read without covering either
+        # the direction line or the cut line.
+        made.append(
+            be.text(
+                geom.polar(end, across, tick + text_h * 0.5),
+                name,
+                text_h,
+                layer=layer,
+                align="center",
+            )
+        )
     return made
 
 

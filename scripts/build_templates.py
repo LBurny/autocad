@@ -206,6 +206,22 @@ def build_one(spec: templates.TemplateSpec, out_dir: str | Path) -> tuple[Any, l
 
     be = make_backend("dxf", path=str(target), create=True)
     ops.setup_layers(be, standard=spec.standard)
+
+    standard = standards.in_force(spec.standard)
+    if standard is None:
+        raise SystemExit(
+            f"template '{spec.key}' names standard '{spec.standard}', which is not loaded; "
+            f"this package ships: {', '.join(standards.current().keys())}"
+        )
+    # The standard whose layer table the artefact was just built with, recorded inside it the
+    # way `drawing_new(template=...)` records it. The artefact is a file a user opens, and
+    # opening it directly has to be checked against the standard it holds, not against
+    # whatever this process happens to have in force. Measured missing: the shipped 50104 plan
+    # carried that standard's own line weights (A-WALL 0.70, A-DIM 0.25) with an empty journal,
+    # so `drawing_open` adopted the package's gbt50001 for it and a save then recorded gbt50001
+    # as the standard the drawing was drawn under.
+    be.journal.note_meta(standard=standards.identity(standard))
+
     paper = sheet.resolve_paper(spec.paper, spec.orientation)
     scale = sheet.resolve_scale(spec.scale)
     be.set_page_setup(paper, scale)
@@ -215,12 +231,6 @@ def build_one(spec: templates.TemplateSpec, out_dir: str | Path) -> tuple[Any, l
         ops.draw_sheet(be, paper, scale, title_block_fields(spec))
     be.save(str(target))
 
-    standard = standards.in_force(spec.standard)
-    if standard is None:
-        raise SystemExit(
-            f"template '{spec.key}' names standard '{spec.standard}', which is not loaded; "
-            f"this package ships: {', '.join(standards.current().keys())}"
-        )
     errors = [
         issue
         for issue in standards.check(standard, snapshot_of(be))
@@ -229,10 +239,17 @@ def build_one(spec: templates.TemplateSpec, out_dir: str | Path) -> tuple[Any, l
     return be, errors
 
 
+def _shipped() -> templates.Templates:
+    """The package's own templates only — never a project's, which the working directory may
+    name through ``acadmcp.json``: the build and its fingerprint gate cover exactly what ships.
+    """
+    return templates.load()
+
+
 def build_all(out_dir: str | Path) -> list[dict[str, Any]]:
     """Build every shipped template into ``out_dir``, with its conformance errors."""
     report: list[dict[str, Any]] = []
-    for spec in templates.current().specs():
+    for spec in _shipped().specs():
         _be, errors = build_one(spec, out_dir)
         report.append(
             {"key": spec.key, "path": str(Path(out_dir) / f"{spec.key}.dxf"), "errors": errors}
@@ -264,7 +281,7 @@ def run_check() -> int:
 
         drift: list[str] = []
         for row in report:
-            spec = templates.resolve_template(row["key"])
+            spec = _shipped().resolve(row["key"])
             committed = ROOT / spec.artefact
             if not committed.is_file():
                 drift.append(f"  {spec.key}: {spec.artefact} is not committed")
@@ -298,7 +315,7 @@ def run_dwt() -> int:
     from acadmcp.backends.com import _call
 
     written: list[str] = []
-    for spec in templates.current().specs():
+    for spec in _shipped().specs():
         source = ROOT / spec.artefact
         if not source.is_file():
             print(f"skipped {spec.key}: {spec.artefact} is not built yet")

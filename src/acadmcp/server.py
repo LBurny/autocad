@@ -192,6 +192,7 @@ class _Session:
             self.kind = "dxf"
             ops.setup_layers(self.backend)
             _stamp_catalog(self.backend)
+            _stamp_standard(self.backend)
         return self.backend
 
     def reset(self, backend: Backend, kind: str) -> None:
@@ -282,6 +283,190 @@ def _adopt_catalog(be: Backend) -> tuple[Any, bool, dict[str, Any]]:
     return chosen, stamp, out
 
 
+# ---------------------------------------------------------------------------
+# the standard a drawing remembers
+# ---------------------------------------------------------------------------
+#
+# The standard is ambient too — the package file plus whichever project standards files are
+# found by walking up from the working directory — so the same drawing reopened elsewhere
+# would be checked against something else. The catalogue's treatment, in the standards'
+# vocabulary: the identity (tables and all) is stamped into the journal where a drawing
+# begins, and reported back. It rides the same journal meta the catalogue does, so the dxf
+# XRecord and the COM sidecar serialise it without any new plumbing, and it needs no payload
+# version bump — an optional meta key is how the catalogue set the precedent.
+
+
+def _stamp_standard(be: Backend, standard: Any = None) -> None:
+    """Record which drafting standard this drawing is being drawn under.
+
+    None means the standard in force (``standards.in_force("")``); a caller that knows which
+    one applies — a template names its own — passes it explicitly. A backend whose journal
+    lives in the DWG (the plugin) accepts the stamp on its local Journal only, the same
+    documented limitation the catalogue's stamp has; a backend with no journal at all is left
+    alone rather than made to grow one.
+    """
+    journal = getattr(be, "journal", None)
+    if journal is None or not hasattr(journal, "note_meta"):
+        return
+    std = standard if standard is not None else standards.in_force("")
+    if std is None:
+        return
+    journal.note_meta(standard=standards.identity(std))
+
+
+def _recorded_standard(be: Backend) -> dict[str, Any] | None:
+    """The standard identity a drawing recorded, read straight off its journal, or None.
+
+    Read off the journal rather than through a report because this is asked on every drawing
+    call (to see whether a stamp is still needed) and must not hash a standard to answer a
+    yes/no question.
+    """
+    meta = getattr(getattr(be, "journal", None), "meta", None)
+    if not isinstance(meta, dict):
+        return None
+    recorded = meta.get("standard")
+    return recorded if isinstance(recorded, dict) else None
+
+
+def _ensure_standard_stamp(be: Backend) -> None:
+    """Stamp the standard the first time a drawing is touched, and not again per call."""
+    if _recorded_standard(be) is None:
+        _stamp_standard(be)
+
+
+def _restamp_standard(be: Backend) -> None:
+    """Re-record the standard this drawing is drawn under, on save.
+
+    The catalogue re-stamps on save so a drawing says what drew it even if its file was
+    edited afterwards, and this keeps that benefit — but **by the recorded name, not the
+    ambient one**. A drawing started from a template was drawn under the template's standard,
+    and re-stamping whatever this process happens to have in force would relabel it: measured
+    on a drawing made from an 'acme' template in an 'acme' project, an ambient re-stamp on
+    save recorded the package's `gbt50001` and the template's own standard was lost. The
+    same-named standard in force refreshes the tables (the point of re-stamping); when that
+    name is not loaded the recorded copy stands untouched, because the drawing's own tables
+    are still the best record of what drew it.
+    """
+    recorded = _recorded_standard(be)
+    if recorded is None:
+        _stamp_standard(be)
+        return
+    name = str(recorded.get("name", "")).strip()
+    refreshed = standards.in_force(name) if name else None
+    if refreshed is not None and refreshed.name == name:
+        _stamp_standard(be, refreshed)
+
+
+def _standard_warning(be: Backend, source: str = "") -> str:
+    """The disagreement between a drawing's recorded standard and the one in force, or "".
+
+    Two cases, and they are different claims. A standard of the *same name* whose tables differ
+    is the one a reviewer has to be told about: a project that restated one row of the
+    drawing's standard changes its digest, and the drawing's layers were set from the other
+    tables. A recorded name this session has **not got at all** is the stronger case and not a
+    digest comparison — there is nothing to compare it with. Both are reported; a standard of
+    the same name and the same tables is not a disagreement and says nothing.
+
+    Measured wrong the first way: with a project's standards file in force and a drawing
+    recording an 'acme' standard the project does not define, `drawing_open` answered
+    `standard_source: project` with no warning while the journal's `acme` record became
+    `gbt50001` — so the drawing's own account of what drew it was dropped, in silence, by the
+    tool that exists to keep it. Two differently-named standards still say nothing about each
+    other's digests, which was the original point and remains true.
+    """
+    recorded = _recorded_standard(be)
+    if not isinstance(recorded, dict):
+        return ""
+    name = str(recorded.get("name", "")).strip().lower()
+    digest = recorded.get("digest")
+    if not name or not digest:
+        return ""
+    winner = f"the {source} standard" if source else "the standard in force"
+    loaded = standards.current().get(name)
+    if loaded is None:
+        return (
+            f"this drawing was drawn under '{name}' "
+            f"({recorded.get('label') or 'no label'}), which this session has not loaded; "
+            f"{winner} wins, but its layers and text heights are not the ones it was drawn "
+            "with"
+        )
+    if loaded.digest() == digest:
+        return ""
+    return (
+        f"this drawing was drawn under a different '{name}' "
+        f"({recorded.get('label') or 'no label'}); {winner} wins, but its layers and text "
+        "heights may not be the ones it was drawn with"
+    )
+
+
+def _adopt_standard(be: Backend) -> tuple[Any, bool, dict[str, Any]]:
+    """Choose the standard a drawing about to be edited resolves against.
+
+    Precedence mirrors the catalogue's and it is a decision, not an accident: a project's own
+    standards files win, then the copy embedded in the drawing, then the package's own. The
+    local standard is the authority — a drawing from another office must not silently be
+    checked against tables this one never saw — but the disagreement is *reported*, never
+    hidden.
+
+    Returns the chosen standard, whether it still needs stamping, and the report keys.
+    """
+    project = bool(settings.current().standards)
+    recorded = _recorded_standard(be)
+    recorded_name = (
+        str(recorded.get("name", "")).strip().lower() if isinstance(recorded, dict) else ""
+    )
+
+    if project:
+        # A project restated its own tables, so the same-named local standard — not the
+        # drawing's copy — is what this session draws and checks under.
+        chosen, source, stamp = (
+            standards.in_force(recorded_name) or standards.in_force(),
+            "project",
+            True,
+        )
+    elif recorded is not None:
+        # No local standard, so the copy the drawing carries is adopted — and, where its name
+        # is one the package already has, that existing standard stands and the drawing's copy
+        # is not adopted over it (`Standards.adopt` is where that rule lives).
+        adopted = standards.current().adopt(recorded)
+        chosen = adopted if adopted is not None else standards.in_force()
+        source, stamp = "drawing", False
+    else:
+        chosen, source, stamp = standards.in_force(), "package", True
+
+    out: dict[str, Any] = {"standard_source": source}
+    # The drawing declared which standard it is under, so the session draws and reports under
+    # that one — `in_force()`'s own meaning. Without this a reopened GB/T 50103 drawing still
+    # reported the package's gbt50001 as in force, which a sandbox run found and reported as a
+    # mismatch with no warning attached.
+    if chosen is not None:
+        standards.select(chosen.name)
+    warning = _standard_warning(be, source)
+    if warning:
+        out["standard_warning"] = warning
+    return chosen, stamp, out
+
+
+def _drawing_standard(be: Backend) -> dict[str, Any]:
+    """What the drawing recorded about its standard, and whether the same-named one in force
+    agrees — `RecordingBackend.drawing_catalog`'s shape, in the standards' vocabulary.
+
+    Read-only: it adopts nothing and stamps nothing, so `drawing_status` can report the state
+    of a drawing without changing it.
+    """
+    recorded = _recorded_standard(be)
+    name = str(recorded.get("name", "")).strip().lower() if isinstance(recorded, dict) else ""
+    loaded = standards.current().get(name) if name else standards.in_force()
+    return {
+        "standard": recorded,
+        "loaded": (
+            {"name": loaded.name, "label": loaded.label, "digest": loaded.digest()}
+            if loaded is not None
+            else None
+        ),
+    }
+
+
 @contextlib.contextmanager
 def _auto_step(op: str, params: dict[str, Any], label: str | None = None) -> Iterator[Backend]:
     """Wrap one tool call in a step, when the backend journals.
@@ -296,6 +481,7 @@ def _auto_step(op: str, params: dict[str, Any], label: str | None = None) -> Ite
     """
     be = _state.require()
     _ensure_catalog_stamp(be)
+    _ensure_standard_stamp(be)
     stepper = getattr(be, "step", None)
     if stepper is None or getattr(be, "open_step", ""):
         yield be
@@ -486,7 +672,11 @@ def drawing_status() -> StatusReply:
 
     `standard` is the drafting standard in force: how many are loaded, which one is in
     force, and every file or row the loader had to skip — so a project's own GB/T file is
-    visible here rather than only in how the layers came out.
+    visible here rather than only in how the layers came out. `drawing_standard` is what the
+    drawing itself recorded — the standard it was drawn under, name and tables — and whether
+    the same-named standard in force agrees (`standard_warning`). Reading this changes
+    nothing: it adopts and stamps nothing, so an old drawing with no recorded standard
+    reports `drawing_standard` with a null `standard` and behaves exactly as before.
     """
     be = _state.require()
     out = dict(be.info())
@@ -502,6 +692,11 @@ def drawing_status() -> StatusReply:
     recorder = getattr(be, "drawing_catalog", None)
     if recorder is not None:
         out["drawing_catalog"] = recorder()
+    if getattr(be, "journal", None) is not None:
+        out["drawing_standard"] = _drawing_standard(be)
+        warning = _standard_warning(be)
+        if warning:
+            out["standard_warning"] = warning
     return out
 
 
@@ -552,6 +747,10 @@ def drawing_new(
     _state.reset(be, kind)
     ops.setup_layers(be)
     _stamp_catalog(be)
+    # The ambient standard, until a template restates one below — `_start_from_template`
+    # stamps the template's own standard over this, because that is the one the drawing is
+    # drawn under, and the point of recording it.
+    _stamp_standard(be)
     sheet_report = _start_from_template(be, spec) if spec is not None else {}
     return {"ok": True, **be.info(), **sheet_report, **_switch_note(dropped)}
 
@@ -572,6 +771,12 @@ def _start_from_template(be: Backend, spec: templates.TemplateSpec) -> dict[str,
             "driver writes them. Use drawing_new(backend='dxf', template=...)"
         )
     ops.setup_layers(be, standard=spec.standard)
+    # The template's own standard, not the ambient one: the layers just set came from it, so
+    # it is what this drawing must be checked against after it is reopened anywhere — and it
+    # becomes the standard this session draws under, so `in_force` does not keep reporting the
+    # package default while the drawing is under something else.
+    standards.select(spec.standard)
+    _stamp_standard(be, standards.in_force(spec.standard))
     paper = sheet.resolve_paper(spec.paper, spec.orientation)
     ratio = sheet.resolve_scale(spec.scale)
     be.set_page_setup(paper, ratio)
@@ -612,6 +817,12 @@ def drawing_open(path: str) -> dict[str, Any]:
     the copy embedded in the drawing, then the package's starter. A difference between the
     two is reported (`catalog_warning`), not hidden — the local standard wins, but the
     elements may not be the ones the drawing was drawn with.
+
+    The drafting standard is adopted the same way — a project's own standards files, then the
+    standard the drawing recorded, then the package's — and a difference between the recorded
+    standard and the same-named one in force is reported as `standard_warning`. Adopting the
+    drawing's copy is what lets a drawing opened on a machine that has never seen its standards
+    file still be checked against the standard it was drawn under.
     """
     dropped = _session_drawing()
     be = make_backend("dxf", path=path)
@@ -619,7 +830,16 @@ def drawing_open(path: str) -> dict[str, Any]:
     chosen, stamp, provenance = _adopt_catalog(be)
     if stamp:
         _stamp_catalog(be, chosen)
-    return {"ok": True, **be.info(), **provenance, **_switch_note(dropped)}
+    standard_chosen, standard_stamp, standard_provenance = _adopt_standard(be)
+    if standard_stamp:
+        _stamp_standard(be, standard_chosen)
+    return {
+        "ok": True,
+        **be.info(),
+        **provenance,
+        **standard_provenance,
+        **_switch_note(dropped),
+    }
 
 
 @mcp.tool(annotations=_MUTATING)
@@ -729,6 +949,9 @@ def acad_connect(
         raise BackendError(f"unknown mode {mode!r}; expected 'com' or 'plugin'")
     _state.reset(be, kind)
     ops.setup_layers(be)
+    # Stamped where the drawing begins, the same way drawing_new does, so a live session
+    # records the standard it is drawn under even before its first drawing call.
+    _stamp_standard(be)
     return {"ok": True, **be.info(), **_switch_note(dropped)}
 
 
@@ -801,13 +1024,16 @@ def drawing_save(path: str | None = None) -> dict[str, Any]:
     On the com backend this saves through AutoCAD, and saving a live drawing to
     .dwg renames that document — pass a .dxf path for a non-destructive copy.
 
-    A save stamps the catalogue that drew the drawing into the journal. On the com backend
-    AutoCAD cannot store the journal inside the .dwg, so it is written to a sidecar file
-    beside the drawing — the reply names it, because a file appearing next to somebody's
-    drawing unannounced is not acceptable.
+    A save stamps the catalogue that drew the drawing into the journal, and refreshes the
+    standard it was drawn under — by the name it recorded, so a drawing started from a
+    template keeps the template's standard. On the com backend AutoCAD cannot store the
+    journal inside the .dwg, so it is written to a sidecar file beside the drawing — the
+    reply names it, because a file appearing next to somebody's drawing unannounced is not
+    acceptable.
     """
     be = _state.require()
     _stamp_catalog(be)
+    _restamp_standard(be)
     saved = be.save(path)
     out: dict[str, Any] = {"ok": True, "path": saved}
     sidecar = getattr(be, "sidecar_path", None)
@@ -995,9 +1221,12 @@ def _standard_snapshot(be: Backend) -> dict[str, Any]:
 def _standard_report(be: Backend, standard: str = "") -> dict[str, Any]:
     """The drawing checked against the drafting standard in force.
 
-    `standard` names one of the loaded GB/T standards; empty uses the standard in force
-    (`drawing_status`'s `standard` block says which that is, and every file the loader had
-    to skip). An unknown name is refused by name.
+    `standard` names one of the loaded GB/T standards. Empty prefers the standard the
+    drawing itself recorded — the one it was drawn under, adopted on `drawing_open` so it
+    resolves on a machine that never had its file — and falls back to the standard in force
+    (`drawing_status`'s `standard` block says which that is, and every file the loader had to
+    skip). An old drawing that recorded nothing behaves exactly as it did before this
+    preference existed: empty means `standards.in_force("")`. An unknown name is refused by name.
 
     The checks are the standard's own, and the ones AutoCAD's CHECKSTANDARDS runs: the unit
     is the millimetre this package draws in; every text height is in the standard's nominal
@@ -1012,11 +1241,21 @@ def _standard_report(be: Backend, standard: str = "") -> dict[str, Any]:
     lineweight need a `layer_table()` read no backend exposes yet, so this wave compares
     the layer *names* in use (see `acadmcp.standards`'s docstring).
     """
-    std = standards.in_force(standard)
+    wanted = standard
+    if not wanted:
+        # The drawing's own standard first: a session that started from a template drew under
+        # that template's standard, and checking it against the ambient one would be a verdict
+        # about the wrong tables. Only when it resolves — an unknown name falls back rather
+        # than refusing, because a caller who named no standard did not ask for that refusal.
+        recorded = _recorded_standard(be)
+        candidate = str(recorded.get("name", "")).strip() if isinstance(recorded, dict) else ""
+        if candidate and standards.current().get(candidate) is not None:
+            wanted = candidate
+    std = standards.in_force(wanted)
     if std is None:
         names = ", ".join(standards.current().keys()) or "none"
         raise BackendError(
-            f"no standard {standard!r} is loaded, so there is nothing to check against; "
+            f"no standard {wanted!r} is loaded, so there is nothing to check against; "
             f"this session has: {names}. Empty `standard` uses the standard in force"
         )
     issues = standards.check(std, _standard_snapshot(be))
@@ -1067,8 +1306,9 @@ def drawing_check(
       valid ones); empty runs them all.
     - "standard" checks the drawing against the GB/T drafting standard in force: the unit,
       the layers in use, every text height against the nominal series as a *paper* height,
-      and that the sheet states its 比例. `standard` names the standard; empty uses the
-      one in force.
+      and that the sheet states its 比例. `standard` names the standard; empty prefers the
+      one the drawing itself recorded — the standard it was drawn under — and falls back to
+      the standard in force. An old drawing that recorded none behaves as before.
 
     The reply carries each ran check's own report under `checks`, keyed by name, and
     `counts` totals the error/warning/info findings across them. None of the checks draws:
@@ -1171,6 +1411,9 @@ def drawing_replay(backend: str = "plugin", path: str | None = None) -> dict[str
         raise BackendError(f"cannot replay onto backend {backend!r}; expected 'plugin' or 'dxf'")
 
     ops.setup_layers(target)
+    # The replayed steps were drawn under the source drawing's standard; the target records
+    # the standard in force here, the same one its layers were just set from.
+    _stamp_standard(target)
     failed: list[dict[str, Any]] = []
     for record in applicable:
         try:
@@ -2012,6 +2255,7 @@ def _placed(be: Backend, op: str, label: str, params: dict[str, Any], work: Any)
         summary = work()
         return {"ok": True, **(summary if isinstance(summary, dict) else {})}
     _ensure_catalog_stamp(be)
+    _ensure_standard_stamp(be)
     begin(op, label=label, params=params)
     try:
         summary = work()

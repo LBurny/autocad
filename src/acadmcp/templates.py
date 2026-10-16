@@ -17,7 +17,8 @@ Three rules, both of them the catalogue's:
   an object — each is skipped and *counted* in :attr:`Templates.skipped`, never raised. A
   templates file that failed to read must not take the drawing session with it.
 * **Later files win, key by key.** The package's file is read first and a project's merges over
-  it, so a project adds a template or corrects one and inherits the rest.
+  it, so a project adds a template or corrects one and inherits the rest. A project names its
+  files in ``acadmcp.json``'s ``templates`` list, exactly the way it names its standards.
 * **A key nobody shipped refuses by name, listing what does exist.** ``gb_a2_arch`` is not
   guessed at and not rounded to ``gb_a3_arch``; the refusal names the templates that are there,
   because the caller's next move is to pick one of them.
@@ -49,6 +50,9 @@ class TemplateSpec:
     scale: str
     title_fields: dict[str, str] = field(default_factory=dict)
     artefact: str = ""
+    #: The file that declared this spec, empty for a package one. Not in `describe()`: it is
+    #: where the artefact resolves from, not a field a caller reads or the output schema pins.
+    source_file: str = ""
 
     def describe(self) -> dict[str, Any]:
         """The row a caller reads, and the shape ``template_list`` returns."""
@@ -82,12 +86,17 @@ class Templates:
     def load(cls, paths: list[str | Path] | None = None) -> Templates:
         """Read the package templates and then any project ones, later keys winning."""
         registry = cls()
-        for path in [PACKAGE_TEMPLATES, *(paths or [])]:
+        registry.add_file(PACKAGE_TEMPLATES, package=True)
+        for path in paths or []:
             registry.add_file(Path(path))
         return registry
 
-    def add_file(self, path: Path) -> None:
-        """Merge one templates file in. A file that cannot be read is reported, not fatal."""
+    def add_file(self, path: Path, *, package: bool = False) -> None:
+        """Merge one templates file in. A file that cannot be read is reported, not fatal.
+
+        A project entry records the file that declared it so its artefact resolves beside that
+        file; a package entry records nothing, since the shipped artefacts are repository paths.
+        """
         source_file = Path(path)
         try:
             payload = json.loads(source_file.read_text(encoding="utf-8"))
@@ -113,7 +122,12 @@ class Templates:
             return
 
         for index, entry in enumerate(entries):
-            spec = _read_template(entry, where=f"{source_file}[{index}]", skipped=self.skipped)
+            spec = _read_template(
+                entry,
+                where=f"{source_file}[{index}]",
+                skipped=self.skipped,
+                source_file="" if package else str(source_file),
+            )
             if spec is not None:
                 self.templates[spec.key] = spec
 
@@ -157,7 +171,9 @@ class Templates:
         }
 
 
-def _read_template(entry: Any, *, where: str, skipped: list[str]) -> TemplateSpec | None:
+def _read_template(
+    entry: Any, *, where: str, skipped: list[str], source_file: str = ""
+) -> TemplateSpec | None:
     """One template out of a file, or None with the reason appended to `skipped`.
 
     Tolerant about what is absent and strict about what is wrong: a missing label defaults to
@@ -199,6 +215,7 @@ def _read_template(entry: Any, *, where: str, skipped: list[str]) -> TemplateSpe
         # Derived rather than required: where the artefact lives is a fact about this package,
         # not something a hand-written entry should have to restate.
         artefact=str(entry.get("artefact", f"templates/{key}.dxf")).strip(),
+        source_file=source_file,
     )
 
 
@@ -210,12 +227,15 @@ def load(paths: list[str | Path] | None = None) -> Templates:
 def current() -> Templates:
     """The templates for this process, loaded once.
 
-    The package's file only: a project's templates, if it ever has any, will be named by its
-    ``acadmcp.json`` the way its standards are — until then there is one source to read.
+    The package's file first, then the project's own, named by its ``acadmcp.json``
+    ``templates`` list and merged key by key — the standards rule. `settings` is imported here
+    rather than at module scope so this stays a pure module with no import cycle.
     """
     global _current
     if _current is None:
-        _current = Templates.load()
+        from . import settings
+
+        _current = Templates.load(settings.current().templates)
     return _current
 
 
@@ -243,11 +263,16 @@ def template_rows() -> list[dict[str, Any]]:
 
 
 def artefact_path(spec: TemplateSpec) -> Path:
-    """Where a spec's committed artefact lives: the repository root joined to `artefact`.
+    """Where a spec's committed artefact lives.
 
-    Resolved against this file rather than the working directory, so the path is the same
-    whichever directory the build or a test is run from.
+    A project template resolves `artefact` beside the file that declared it — that file is the
+    only thing that knows where the project keeps its sheets, and the path is relative there for
+    the same reason a settings path is, because nobody commits an absolute one. A package
+    template, which records no source file, resolves against the repository root exactly as
+    before, so the shipped artefacts and the fingerprint gate keep the path they always had.
     """
+    if spec.source_file:
+        return Path(spec.source_file).resolve().parent / spec.artefact
     return Path(__file__).resolve().parents[2] / spec.artefact
 
 

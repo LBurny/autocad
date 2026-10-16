@@ -10,8 +10,12 @@
     "    ('not transcribed') instead of interpolating a neighbouring value. Nothing in this",
     "    file was recalled from memory, and no value here is guessable from the others.",
     "",
-    "Tables: layers, text_heights, line_width_groups (empty, pending transcription), scales (a",
-    "pointer at sheet.SCALES, never a second copy), title_block."
+    "Tables: layers, text_heights, line_width_groups (the 0.7 group transcribed; the 0.5b row",
+    "and every other b value are still pending), scales (a pointer at sheet.SCALES, never a",
+    "second copy), title_block, and gbt50103's own dimensioning (the metres rule alone).",
+    "",
+    "A standard may also set `extends` to name ONE parent standard: the parent's resolved tables",
+    "merge under the child's own rows, so a specialised standard restates only its deltas."
   ],
   "standards": [
     {
@@ -55,8 +59,18 @@
           "20": { "height": 20.0, "source": "GB/T 50001 图纸字高名义系列" }
         },
         "line_width_groups": {
-          "_source": "GB/T 50001 线宽组 — b, 0.7b, 0.5b, 0.35b",
-          "_note": "Deliberately empty. No line width here has been read off the standard, and a table nobody has transcribed must refuse by name ('not transcribed') rather than be interpolated or recalled. Transcribe the office's own b-series into its project standards file and these rows are overridden; until then every lookup in this table fails by name, on purpose."
+          "_source": "GB/T 50001 线宽组 — b, 0.7b, 0.5b, 0.35b — and the b series. The b series is read from secondary sources (题库 pages quoting the standard) and is stated the same way everywhere; the 0.7 group's widths are 用户提供设计院规范文档 图面基本规范 (依 GB/T 18229)'s 粗 0.7 / 中粗 0.5 / 细 0.25.",
+          "_note": "Two readings of the group rows are in circulation and this file does not choose between them: sources give an A0 sheet's group as 1.4:1.0:0.7:0.35, which reads as rows b/0.7b/0.5b/0.25b, while the standard's own row names are b/0.7b/0.5b/0.35b (0.35b of 1.4 is 0.5, not 0.35). Resolve against the standard's own table before relying on a row above b=0.7. A lookup in a row nobody transcribed refuses by name rather than being interpolated.",
+          "_b_series": {
+            "values_mm": [1.4, 1.0, 0.7, 0.5, 0.35, 0.25, 0.18, 0.13],
+            "source": "题库 (引 GB/T 50001): '图线的宽度b,1.4、1.0、0.7、0.5、0.35、0.25、0.18、0.13'"
+          },
+          "0.7": {
+            "b": 0.7,
+            "0.7b": 0.5,
+            "0.35b": 0.25,
+            "source": "用户提供设计院规范文档 图面基本规范 (依 GB/T 18229)"
+          }
         },
         "scales": {
           "_see": "sheet.SCALES",
@@ -72,6 +86,95 @@
             "text_height": 5.0,
             "source": "GB/T 10609.1; mirrors sheet.TITLE_BLOCK_WIDTH / _HEIGHT / _ROWS / _TEXT"
           }
+        },
+        "symbols": {
+          "_source": "GB/T 50001 常用符号 — the conventional sizes, read from secondary sources (题库/百科 pages quoting the standard) rather than from the standard's own text. Recorded here so a project can restate a row and so a divergence from what this package actually draws is visible instead of assumed.",
+          "_note": "No tool draws from this table. It is the sourced record kept beside the ops' own constants (ops.LEVEL_TRIANGLE_MM, NORTH_ARROW_DIAMETER_MM, NORTH_ARROW_TAIL_MM, SECTION_TICK_MM) so the two can be compared. Where a source is self-contradictory it is recorded as such, not resolved by picking one.",
+          "level_mark": {
+            "shape": "等腰直角三角形",
+            "height_mm": 3.0,
+            "line": "细实线",
+            "source": "题库 (引 GB/T 50001): '标高符号应以等腰直角三角形表示,用细实线绘制,高约3mm'"
+          },
+          "north_arrow": {
+            "circle_diameter_mm": 24.0,
+            "pointer_tail_width_mm": 3.0,
+            "line": "细实线",
+            "source": "题库 (引 GB/T 50001), stated identically by several: '指北针外圆用细实线绘制,圆的直径为24mm,指针尾部宽度为3mm' — one source says 圆用粗实线 instead; unresolved."
+          },
+          "section_mark": {
+            "cut_line_mm": [6.0, 10.0],
+            "view_line_mm": [4.0, 6.0],
+            "line": "粗实线",
+            "source": "题库 (引 GB/T 50001), several agreeing: '剖切位置符号长度为6-10mm,剖切投射向符号长度为4-6mm'"
+          },
+          "index_mark": {
+            "circle_diameter_mm": 10.0,
+            "line": "细实线",
+            "source": "360百科 剖面详图索引符号: '索引符号由直径为10mm的圆和其水平直径组成,圆及其水平直径均应以细实线绘制'"
+          },
+          "grid_bubble": {
+            "circle_diameter_mm": [8.0, 10.0],
+            "line": "细实线",
+            "axis_line": "细单点长划线",
+            "source": "题库 (引 GB/T 50001): '定位轴线应用细单点长划线绘制,轴线编号应注写在轴线端部圆圈内,圆圈应用细实线绘制,直径为8-10mm'"
+          }
+        },
+        "fonts": {
+          "_source": "GB/T 14691-1993 技术制图 字体 — read from secondary sources (题库) quoting the standard.",
+          "_note": "The ratio is what makes 长仿宋体 long: 字宽 = 字高 / √2. No backend sets a width factor today (every text style is drawn at XScale 1.0), so text drawn by this package is wider than the standard's face. The table records the rule; giving the backends a width factor is separate work.",
+          "long_fangsong": {
+            "height_to_width": 1.4142,
+            "ratio": "√2 : 1",
+            "source": "题库 (引 GB/T 14691-1993): '长仿宋体的字高与字宽比例为√2:1(约1.414:1)'"
+          }
+        }
+      }
+    },
+    {
+      "name": "gbt50103",
+      "label": "GB/T 50103-2010 总图制图标准",
+      "extends": "gbt50001",
+      "tables": {
+        "dimensioning": {
+          "_source": "用户提供设计院规范文档 总平面布置图节 (依 GB/T 50103-2010)",
+          "_note": "Only the metres rule is transcribed. The decimals figure and the site-plan layer names are still pending transcription from the standard text itself, so no site-plan layer row is added here — the names would have to be invented, and a standard's layer names are the drawing office's to state (this standard inherits gbt50001's layer rows and nothing else). Nothing formats a dimension from this table yet: today it is data a lookup may refuse on, not behaviour.",
+          "units": {
+            "unit": "m",
+            "source": "同上"
+          }
+        }
+      }
+    },
+    {
+      "name": "gbt50104",
+      "label": "GB/T 50104-2010 建筑制图标准",
+      "extends": "gbt50001",
+      "tables": {
+        "layers": {
+          "_source": "lineweights: 用户提供设计院规范文档 图面基本规范 (依 GB/T 18229) 的线宽组 (the 0.7 group of gbt50001/line_width_groups); colour and linetype: gbt50001/layers, restated row by row because a child row replaces its parent's whole row, not just the fields it states.",
+          "_note": "The mapping onto the layers is this package's, not the document's: 0.7 (b) for A-WALL and for the sheet's frame — 图框为粗实线, the document's 图幅与图框节依 GB/T 14689 — 0.5 (0.7b) for the openings, the structure and the cores, and 0.25 (0.35b) for the pattern, the annotation and the sheet's own text. The widths are the document's; a drawing office restates the rows it draws differently in its project standards file. text_heights is deliberately not restated: the document's 2.5–10 series is a subset of the one inherited from gbt50001.",
+          "A-WALL": { "color": 2, "linetype": "CONTINUOUS", "lineweight": 0.7, "source": "用户提供设计院规范文档 图面基本规范 (依 GB/T 18229) 粗 0.7" },
+          "A-WALL-PATT": { "color": 8, "linetype": "CONTINUOUS", "lineweight": 0.25, "source": "用户提供设计院规范文档 图面基本规范 (依 GB/T 18229) 细 0.25" },
+          "A-DOOR": { "color": 4, "linetype": "CONTINUOUS", "lineweight": 0.5, "source": "用户提供设计院规范文档 图面基本规范 (依 GB/T 18229) 中粗 0.5" },
+          "A-WINDOW": { "color": 4, "linetype": "CONTINUOUS", "lineweight": 0.5, "source": "用户提供设计院规范文档 图面基本规范 (依 GB/T 18229) 中粗 0.5" },
+          "A-COLUMN": { "color": 7, "linetype": "CONTINUOUS", "lineweight": 0.5, "source": "用户提供设计院规范文档 图面基本规范 (依 GB/T 18229) 中粗 0.5" },
+          "S-COLUMN": { "color": 7, "linetype": "CONTINUOUS", "lineweight": 0.5, "source": "用户提供设计院规范文档 图面基本规范 (依 GB/T 18229) 中粗 0.5" },
+          "S-BEAM": { "color": 7, "linetype": "CONTINUOUS", "lineweight": 0.5, "source": "用户提供设计院规范文档 图面基本规范 (依 GB/T 18229) 中粗 0.5" },
+          "A-STAIR": { "color": 2, "linetype": "CONTINUOUS", "lineweight": 0.5, "source": "用户提供设计院规范文档 图面基本规范 (依 GB/T 18229) 中粗 0.5" },
+          "A-LIFT": { "color": 6, "linetype": "CONTINUOUS", "lineweight": 0.5, "source": "用户提供设计院规范文档 图面基本规范 (依 GB/T 18229) 中粗 0.5" },
+          "A-SHAFT": { "color": 30, "linetype": "CONTINUOUS", "lineweight": 0.5, "source": "用户提供设计院规范文档 图面基本规范 (依 GB/T 18229) 中粗 0.5" },
+          "A-ROOM-BOUND": { "color": 8, "linetype": "CONTINUOUS", "lineweight": 0.25, "source": "用户提供设计院规范文档 图面基本规范 (依 GB/T 18229) 细 0.25" },
+          "A-ROOM-NAME": { "color": 7, "linetype": "CONTINUOUS", "lineweight": 0.25, "source": "用户提供设计院规范文档 图面基本规范 (依 GB/T 18229) 细 0.25" },
+          "A-ROOM-AREA": { "color": 7, "linetype": "CONTINUOUS", "lineweight": 0.25, "source": "用户提供设计院规范文档 图面基本规范 (依 GB/T 18229) 细 0.25" },
+          "A-DIM": { "color": 3, "linetype": "CONTINUOUS", "lineweight": 0.25, "source": "用户提供设计院规范文档 图面基本规范 (依 GB/T 18229) 细 0.25" },
+          "A-AXIS": { "color": 1, "linetype": "CENTER", "lineweight": 0.25, "source": "用户提供设计院规范文档 图面基本规范 (依 GB/T 18229) 细 0.25" },
+          "A-AXIS-TEXT": { "color": 1, "linetype": "CONTINUOUS", "lineweight": 0.25, "source": "用户提供设计院规范文档 图面基本规范 (依 GB/T 18229) 细 0.25" },
+          "A-EQUIP": { "color": 6, "linetype": "CONTINUOUS", "lineweight": 0.5, "source": "用户提供设计院规范文档 图面基本规范 (依 GB/T 18229) 中粗 0.5" },
+          "A-ANNO": { "color": 7, "linetype": "CONTINUOUS", "lineweight": 0.25, "source": "用户提供设计院规范文档 图面基本规范 (依 GB/T 18229) 细 0.25" },
+          "A-HATCH": { "color": 9, "linetype": "CONTINUOUS", "lineweight": 0.25, "source": "用户提供设计院规范文档 图面基本规范 (依 GB/T 18229) 细 0.25" },
+          "A-SHEET": { "color": 7, "linetype": "CONTINUOUS", "lineweight": 0.7, "source": "用户提供设计院规范文档 图面基本规范 (依 GB/T 18229) 粗 0.7; 图幅与图框 (依 GB/T 14689)" },
+          "A-SHEET-TEXT": { "color": 7, "linetype": "CONTINUOUS", "lineweight": 0.25, "source": "用户提供设计院规范文档 图面基本规范 (依 GB/T 18229) 细 0.25" }
         }
       }
     }

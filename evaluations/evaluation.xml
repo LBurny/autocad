@@ -47,8 +47,8 @@
     <answer>DoorWidth</answer>
   </qa_pair>
   <qa_pair>
-    <question>In the acadmcp element catalogue, exactly one element type carries an empty tag prefix, so placing it consumes no tag number. What is that element's key?</question>
-    <answer>weld_symbol</answer>
+    <question>In the acadmcp element catalogue, which element types carry an empty tag prefix, so placing one consumes no tag number? Give every key in alphabetical order, joined by ", ".</question>
+    <answer>level_mark, north_arrow, section_mark, weld_symbol</answer>
   </qa_pair>
   <qa_pair>
     <question>According to the acadmcp element catalogue, the recessed fluorescent light element (荧光灯) is imported from a block in which library drawing file? Answer with the file name only, not the directory.</question>

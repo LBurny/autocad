@@ -504,3 +504,121 @@ def test_the_refusal_names_the_opening_it_belongs_to(be, monkeypatch):
         "opening at 1000.0: no element 'nope' in the catalogue",
         "opening at 4000.0: no element 'gone' in the catalogue",
     ]
+
+
+# ---------------------------------------------------------------------------
+# the drafting symbols: level mark, north arrow, section mark
+#
+# Op-only like `column` — no library block stands for a level mark — so one element name
+# draws them on every backend. Placed through the same `place_element` the other entries use.
+# ---------------------------------------------------------------------------
+
+
+def _shipped(key: str) -> Element:
+    return catalog.Catalog.load().get(key)
+
+
+def _pts(prim: dict) -> list[tuple[float, float]]:
+    flat = prim["points"]
+    return [(round(x, 6), round(y, 6)) for x, y in zip(flat[0::2], flat[1::2], strict=False)]
+
+
+def _longest_line(be) -> dict:
+    lines = [p for p in _primitives(be) if p["kind"] == "line"]
+    return max(
+        lines,
+        key=lambda p: (
+            (p["points"][2] - p["points"][0]) ** 2 + (p["points"][3] - p["points"][1]) ** 2
+        ),
+    )
+
+
+def test_the_symbol_entries_are_op_only():
+    """A level mark or a north arrow has no block in any sample library, so each is drawn
+    parametrically — the `column` shape — and reaches every backend."""
+    for key in ("level_mark", "north_arrow", "section_mark"):
+        element = _shipped(key)
+        assert element.kind == "op" and element.block == "" and element.op == key, key
+        assert element.layer, key
+
+
+def test_every_symbol_entry_places_its_twin_on_the_headless_backend():
+    for key in ("level_mark", "north_arrow", "section_mark"):
+        fresh = make_backend("dxf")
+        with fresh.step("place_element"):
+            made = ops.place_element(fresh, _shipped(key), (1000.0, 1000.0))
+        assert made, key
+        assert any(p["kind"] == "text" for p in _primitives(fresh)), key
+
+
+def test_a_placed_level_mark_lands_its_apex_on_the_point(be):
+    with be.step("place_element"):
+        ops.place_element(be, _shipped("level_mark"), (5000.0, 3000.0))
+
+    tri = next(p for p in _primitives(be) if p["kind"] == "polyline")
+    assert (5000.0, 3000.0) in _pts(tri)
+
+
+def test_a_level_marks_level_travels_through_params(be):
+    with be.step("place_element"):
+        ops.place_element(be, _shipped("level_mark"), (0.0, 0.0), params={"text": "\u00b13.000"})
+
+    assert [p["text"] for p in _primitives(be) if p["kind"] == "text"] == ["\u00b13.000"]
+
+
+def test_a_north_arrows_label_travels_through_params(be):
+    with be.step("place_element"):
+        ops.place_element(be, _shipped("north_arrow"), (0.0, 0.0), params={"label": "N"})
+
+    assert [p["text"] for p in _primitives(be) if p["kind"] == "text"] == ["N"]
+
+
+def test_a_section_mark_takes_its_cut_direction_from_the_tools_rotation(be):
+    """The uniform signature carries one point, so `at` is the mark's first end and the cut
+    direction comes from the tool's own `rotation`, with `length` from params."""
+    with be.step("place_element"):
+        ops.place_element(
+            be, _shipped("section_mark"), (0.0, 0.0), rotation=90.0, params={"length": 4000.0}
+        )
+
+    cut = _longest_line(be)["points"]
+    assert cut[0] == pytest.approx(0.0)
+    assert cut[1] == pytest.approx(0.0)
+    assert cut[2] == pytest.approx(0.0)
+    assert cut[3] == pytest.approx(4000.0)
+
+
+def test_a_placed_section_mark_uses_its_catalogue_defaults(be):
+    with be.step("place_element"):
+        ops.place_element(be, _shipped("section_mark"), (0.0, 0.0))
+
+    assert [p["text"] for p in _primitives(be) if p["kind"] == "text"] == ["1-1", "1-1"]
+    cut = _longest_line(be)["points"]
+    assert (cut[2] - cut[0]) == pytest.approx(6000.0)  # the entry's own default length
+
+
+def test_a_north_arrow_refuses_to_be_rotated(be):
+    with pytest.raises(ValueError) as caught:
+        ops.place_element(be, _shipped("north_arrow"), (0.0, 0.0), rotation=15.0)
+
+    assert "rotat" in str(caught.value)
+    assert _primitives(be) == []
+
+
+def test_a_symbol_refuses_a_scale(be):
+    """A symbol's size is the sheet's, so a uniform scale would draw off-series geometry on
+    the paper — refused by name rather than drawn unscaled."""
+    with pytest.raises(ValueError) as caught:
+        ops.place_element(be, _shipped("level_mark"), (0.0, 0.0), scale=2.0)
+
+    assert "scal" in str(caught.value)
+    assert _primitives(be) == []
+
+
+def test_an_unknown_symbol_param_is_refused_with_the_vocabulary(be):
+    with pytest.raises(ValueError) as caught:
+        ops.place_element(be, _shipped("north_arrow"), (0.0, 0.0), params={"diameter": 50.0})
+
+    message = str(caught.value)
+    assert "diameter" in message and "label" in message
+    assert _primitives(be) == []
