@@ -9,14 +9,16 @@ async def draw(tools):
         closed=True,
         openings=[{"start": 1000, "width": 900, "kind": "door", "tag": "M0921"}],
     )
-    await tools.call("draw_door", hinge=[1000, 0], rotation=0, width=900)
+    await tools.call("draw_opening", kind="door", at=[1000, 0], rotation=0, width=900)
 
-    crit = await tools.call("drawing_critique")
+    crit = (await tools.call("drawing_check", check="critique"))["checks"]["critique"]
     assert crit["counts"]["error"] == 0, crit["issues"]
     print("sandbox: clean drawing critiques clean")
 
-    await tools.call("draw_door", hinge=[0, 9000], rotation=0, width=900)
-    crit = await tools.call("drawing_critique", focus="door_without_opening")
+    await tools.call("draw_opening", kind="door", at=[0, 9000], rotation=0, width=900)
+    crit = (await tools.call("drawing_check", check="critique", focus="door_without_opening"))[
+        "checks"
+    ]["critique"]
     assert crit["counts"]["error"] == 1, crit
     try:
         await tools.call("drawing_finalize")

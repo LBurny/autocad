@@ -167,8 +167,9 @@ def run(report: Report) -> None:
 
         # --- what the wire actually carries for a step ----------------------
         # The plugin owns this journal, so its step row is all any of the read tools ever
-        # see: `drawing_summary`, `drawing_critique` (which `drawing_finalize` gates on),
-        # `drawing_check_standard`, `catalog_suggest` and `element_capture` all read the
+        # see: `drawing_summary`, `drawing_check`'s critique lens (which
+        # `drawing_finalize` gates on) and its standard lens, `catalog_suggest` and
+        # `element_capture` all read the
         # arguments and the geometry off it. This is the only place that claim can be checked
         # against the real C#, and both halves of it have been wrong: `primitives` went out as
         # a *count*, and `params` was missing altogether, which made every one of those tools
@@ -464,7 +465,7 @@ def place_elements(report: Report) -> None:
 
     # A frame of studs, a wall of windows and a pair of doors, at sizes the catalogue's
     # variants select rather than sizes written here.
-    frame = server.place_grid("stud", xs=[0, 6000, 12000], ys=[0, 6000], variant="50 x 150")
+    frame = server.place_element("stud", xs=[0, 6000, 12000], ys=[0, 6000], variant="50 x 150")
     report.check("a grid of elements places in one step", frame["ok"], frame["message"])
     report.check(
         "one per axis intersection, each numbered from the drawing",
@@ -472,7 +473,7 @@ def place_elements(report: Report) -> None:
         f"placed={frame['placed']} tags={frame['tags']}",
     )
 
-    wall = server.place_along(
+    wall = server.place_element(
         "window", start=[0, 6000], end=[12000, 6000], spacing=3000, variant="1200"
     )
     report.check("a run of elements places in one step", wall["ok"], wall["message"])

@@ -54,4 +54,20 @@
     <question>According to the acadmcp element catalogue, the recessed fluorescent light element (荧光灯) is imported from a block in which library drawing file? Answer with the file name only, not the directory.</question>
     <answer>Architectural - Metric.dwg</answer>
   </qa_pair>
+  <qa_pair>
+    <question>Open evaluations/fixtures/floor_plan.dxf, then page listing_entities with limit=50, following next_offset until has_more comes back false. How many listing_entities calls does the full walk take? Answer with the number only.</question>
+    <answer>5</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Open evaluations/fixtures/floor_plan.dxf and list the entities on the layer that carries the room area labels (A-ROOM-AREA). What is the largest area figure labelled, quoted exactly as the label reads (for example 12.34m²)?</question>
+    <answer>40.60m²</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Open evaluations/fixtures/floor_plan.dxf. On the layer that carries the doors, each door leaf is drawn as lines and each swing as an arc. How many door swings does the plan show? Answer with the number only.</question>
+    <answer>9</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Call drawing_help with the term 'HATCH' to find the tool that hatches a closed boundary, then read that tool's own schema. What layer does it hatch onto when the caller does not say? Answer with just the layer name.</question>
+    <answer>A-HATCH</answer>
+  </qa_pair>
 </evaluation>

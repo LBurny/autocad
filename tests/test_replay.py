@@ -76,7 +76,7 @@ def test_a_replayed_sheet_reopens_with_its_scale_and_verifies(session, tmp_path)
     reopened = server.drawing_open(target)
     assert reopened["ok"] is True
     assert reopened["sheet"]["paper"] == "A3" and reopened["sheet"]["scale"] == "1:200"
-    verdict = server.drawing_verify()
+    verdict = server.drawing_check("verify")["checks"]["verify"]
     assert verdict["verdict"] == "matches"
     assert verdict["expected_entities"] == verdict["actual_entities"] > 0
 
@@ -196,7 +196,7 @@ def test_the_replayed_insert_reports_where_it_landed(tmp_path):
     assert len(rows) == 1
     assert rows[0]["at"] == [1234.0, 5678.0]
     assert rows[0]["rotation"] == 15.0
-    assert server.drawing_verify()["verdict"] == "matches"
+    assert server.drawing_check("verify")["checks"]["verify"]["verdict"] == "matches"
 
 
 def test_a_placement_the_catalogue_cannot_resolve_is_still_reported(tmp_path):

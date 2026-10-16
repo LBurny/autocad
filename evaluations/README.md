@@ -1,6 +1,6 @@
 # Evaluations
 
-Ten read-only questions against this MCP server, in the format the mcp-builder
+Fourteen read-only questions against this MCP server, in the format the mcp-builder
 guide's harness (`evaluation.py`, copied here with its `connections.py`) runs.
 `fixtures/floor_plan.dxf` is a checked-in copy of `examples/floor_plan_demo.py`'s
 output, so the answers are stable; every answer was verified by driving the

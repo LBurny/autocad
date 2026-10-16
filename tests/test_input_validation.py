@@ -47,12 +47,12 @@ def test_opening_with_a_bad_kind_is_rejected():
 
 def test_door_swing_is_an_enum():
     with pytest.raises(BackendError, match="swing"):
-        _tool("draw_door")(hinge=[0, 0], swing="sideways")
+        _tool("draw_opening")("door", [0, 0], swing="sideways")
 
 
 def test_stair_axis_is_an_enum():
     with pytest.raises(BackendError, match="axis"):
-        _tool("draw_stair")(corner1=[0, 0], corner2=[2600, 5000], axis="z")
+        _tool("draw_core")("stair", [0, 0], [2600, 5000], axis="z")
 
 
 def test_text_align_is_an_enum():
@@ -235,12 +235,12 @@ def test_a_point_with_a_non_numeric_member_is_refused_readably():
         ("draw_circle", {"center": [0], "radius": 100}),
         ("add_text", {"pos": [0], "text": "x"}),
         ("add_leader_note", {"anchor": [0], "text": "x"}),
-        ("draw_door", {"hinge": [0]}),
-        ("draw_window", {"start": [0]}),
+        ("draw_opening", {"kind": "door", "at": [0]}),
+        ("draw_opening", {"kind": "window", "at": [0]}),
         ("draw_column", {"center": [0]}),
-        ("draw_stair", {"corner1": [0], "corner2": [2600, 5000]}),
-        ("draw_lift", {"corner1": [0], "corner2": [2600, 5000]}),
-        ("draw_equipment", {"corner1": [0], "corner2": [2600, 5000]}),
+        ("draw_core", {"kind": "stair", "corner1": [0], "corner2": [2600, 5000]}),
+        ("draw_core", {"kind": "lift", "corner1": [0], "corner2": [2600, 5000]}),
+        ("draw_core", {"kind": "equipment", "corner1": [0], "corner2": [2600, 5000]}),
     ],
 )
 def test_every_point_tool_refuses_a_short_point_readably(tool, kwargs):

@@ -106,6 +106,11 @@ def test_the_drawings_own_count_is_reported_beside_the_walk_never_reconciled():
     assert report["verdict"] == "matches" and report["reported_entities"] == 9
 
 
+def _verify(**kwargs):
+    """The verify lens of the merged drawing_check tool, unwrapped."""
+    return server.drawing_check("verify", **kwargs)["checks"]["verify"]
+
+
 @pytest.fixture()
 def fresh_dxf():
     server._state.reset(make_backend("dxf"), "dxf")
@@ -114,7 +119,7 @@ def fresh_dxf():
 
 
 def test_the_record_and_the_drawing_agree_through_save_reopen_undo_and_redo(fresh_dxf, tmp_path):
-    """The invariant `drawing_verify` rests on, pinned on all four paths."""
+    """The invariant the verify lens rests on, pinned on all four paths."""
     server.draw_wall_with_openings(
         points=[[0, 0], [6000, 0], [6000, 4000], [0, 4000]],
         closed=True,
@@ -124,25 +129,25 @@ def test_the_record_and_the_drawing_agree_through_save_reopen_undo_and_redo(fres
     server.draw_room(boundary=[[0, 0], [6000, 0], [6000, 4000], [0, 4000]], name="A", thickness=200)
     server.place_element(type="door", at=[1000, 0], variant="900", tag=True)
 
-    first = server.drawing_verify()
+    first = _verify()
     assert first["verdict"] == "matches" and first["expected_entities"] == 15
     assert first["backend"] == "dxf"
 
     target = str(tmp_path / "verified.dxf")
     server.drawing_save(target)
-    assert server.drawing_verify()["verdict"] == "matches"
+    assert _verify()["verdict"] == "matches"
 
     server.drawing_open(target)
-    reopened = server.drawing_verify()
+    reopened = _verify()
     assert reopened["verdict"] == "matches" and reopened["expected_entities"] == 15
 
     server.drawing_undo()
-    after_undo = server.drawing_verify()
+    after_undo = _verify()
     assert after_undo["verdict"] == "matches" and after_undo["expected_entities"] == 10
     assert after_undo["undone_entities"] == 5
 
     server.drawing_redo()
-    assert server.drawing_verify()["expected_entities"] == 15
+    assert _verify()["expected_entities"] == 15
 
 
 def test_a_missing_entity_is_reported_rather_than_passed_over(fresh_dxf):
@@ -152,14 +157,14 @@ def test_a_missing_entity_is_reported_rather_than_passed_over(fresh_dxf):
     be = server._state.backend
     be.msp.delete_entity(next(iter(be.msp)))
 
-    report = server.drawing_verify()
+    report = _verify()
     assert report["verdict"] == "missing" and report["difference"] == -1
 
 
-def test_drawing_verify_asks_for_a_second_look_when_the_walk_was_cut_short(fresh_dxf):
+def test_the_verify_lens_asks_for_a_second_look_when_the_walk_was_cut_short(fresh_dxf):
     server.draw_line([0, 0], [1000, 0])
     server.draw_line([0, 0], [0, 1000])
-    report = server.drawing_verify(limit=1)
+    report = _verify(limit=1)
     assert report["verdict"] == "walk_truncated" and report["ok"] is None
     assert report["actual_entities"] == 2, "the count is a floor and says so"
 
@@ -173,10 +178,10 @@ def test_a_limit_equal_to_the_entity_count_is_not_reported_as_a_truncation(fresh
     for i in range(5):
         server.draw_line([i * 100, 0], [i * 100, 500])
 
-    report = server.drawing_verify(limit=5)
+    report = _verify(limit=5)
     assert report["verdict"] == "matches" and report["truncated"] is False
     assert report["actual_entities"] == 5
-    assert server.drawing_verify(limit=4)["verdict"] == "walk_truncated"
+    assert _verify(limit=4)["verdict"] == "walk_truncated"
 
 
 def test_an_opened_drawing_with_no_steps_is_no_baseline_not_unaccounted(fresh_dxf, tmp_path):
@@ -194,12 +199,12 @@ def test_an_opened_drawing_with_no_steps_is_no_baseline_not_unaccounted(fresh_dx
     doc.saveas(target)
 
     server.drawing_open(target)
-    report = server.drawing_verify()
+    report = _verify()
     assert report["verdict"] == "no_baseline" and report["ok"] is None
     assert report["expected_entities"] == 0 and report["actual_entities"] == 7
     assert report["warnings"], "a drawing with nothing to check against must say so"
 
 
-def test_drawing_verify_refuses_a_limit_that_walks_nothing(fresh_dxf):
+def test_the_verify_lens_refuses_a_limit_that_walks_nothing(fresh_dxf):
     with pytest.raises(ValueError, match="limit"):
-        server.drawing_verify(limit=0)
+        _verify(limit=0)

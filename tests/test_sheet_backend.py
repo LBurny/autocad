@@ -272,11 +272,11 @@ def test_an_empty_drawing_frames_the_origin_rather_than_failing(session):
 def test_the_sheet_is_one_undoable_step_that_takes_its_own_entities_back(session):
     """One tool call is one step, the rule every drawing tool follows — paperspace included."""
     _tool("draw_line")([0, 0], [6000, 0])
-    before = _tool("drawing_verify")()
+    before = _tool("drawing_check")("verify")["checks"]["verify"]
     assert before["verdict"] == "matches"
 
     _tool("drawing_sheet")(paper="A3", scale="1:100", title="图")
-    after = _tool("drawing_verify")()
+    after = _tool("drawing_check")("verify")["checks"]["verify"]
     assert after["verdict"] == "matches", "the paperspace frame counts as part of the drawing"
     assert after["expected_entities"] == before["expected_entities"] + _sheet_entities(2)
 
@@ -285,7 +285,7 @@ def test_the_sheet_is_one_undoable_step_that_takes_its_own_entities_back(session
     assert rows[-1]["entities"] == _sheet_entities(2)
 
     _tool("drawing_undo")()
-    back = _tool("drawing_verify")()
+    back = _tool("drawing_check")("verify")["checks"]["verify"]
     assert back["verdict"] == "matches"
     assert back["expected_entities"] == before["expected_entities"]
     assert back["actual_entities"] == before["actual_entities"]
@@ -295,7 +295,7 @@ def test_a_redo_of_the_sheet_draws_it_again(session):
     _tool("drawing_sheet")(paper="A3", scale="1:100")
     _tool("drawing_undo")()
     _tool("drawing_redo")()
-    report = _tool("drawing_verify")()
+    report = _tool("drawing_check")("verify")["checks"]["verify"]
     assert report["verdict"] == "matches"
     assert report["actual_entities"] == _sheet_entities(1)
 
@@ -311,10 +311,12 @@ def test_the_sheet_survives_a_save_and_reopen_as_drawing_content(session, tmp_pa
     assert reopened["entities"] == _sheet_entities(2)
     status = _tool("drawing_status")()
     assert status["sheet"]["scale"] == "1:100"
-    assert _tool("drawing_verify")()["verdict"] == "matches"
+    assert _tool("drawing_check")("verify")["checks"]["verify"]["verdict"] == "matches"
 
     _tool("drawing_undo")()
-    assert _tool("drawing_verify")()["actual_entities"] == 0, "an undone sheet erases its frame"
+    assert _tool("drawing_check")("verify")["checks"]["verify"]["actual_entities"] == 0, (
+        "an undone sheet erases its frame"
+    )
 
 
 def test_the_sheet_is_reported_by_drawing_status(session):

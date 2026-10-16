@@ -35,6 +35,9 @@ EVALUATION = "evaluations/evaluation.xml"
 #: The limit the evaluation asks about when it asks whether listing is cut short.
 EVAL_LISTING_LIMIT = 200
 
+#: The page size the evaluation's paging question walks the fixture with.
+EVAL_PAGE_LIMIT = 50
+
 #: A pair with no derivation is reported rather than skipped: an answer nothing checks is
 #: exactly the kind that went stale here.
 NO_DERIVATION = "<no derivation>"
@@ -76,11 +79,42 @@ def _journal_version() -> int:
     return int(Journal().to_dict()["version"])
 
 
-def _fixture_layers() -> list[str]:
+def _fixture_entities() -> list[tuple[str, str]]:
+    """(layer, dxftype) per entity. The fixture is modelspace-only, so this is the whole walk."""
     import ezdxf
 
     doc = ezdxf.readfile(ROOT / FIXTURE)
-    return [str(e.dxf.get("layer", "0")) for e in doc.modelspace()]
+    return [(str(e.dxf.get("layer", "0")), e.dxftype()) for e in doc.modelspace()]
+
+
+def _fixture_layers() -> list[str]:
+    return [layer for layer, _ in _fixture_entities()]
+
+
+def _fixture_texts(layer: str) -> list[str]:
+    """The string content of every TEXT entity on a layer."""
+    import ezdxf
+
+    doc = ezdxf.readfile(ROOT / FIXTURE)
+    return [
+        str(e.dxf.get("text", ""))
+        for e in doc.modelspace()
+        if e.dxftype() == "TEXT" and str(e.dxf.get("layer", "")) == layer
+    ]
+
+
+def _default_layer_for(term: str) -> str:
+    """The layer the term's one tool draws onto when the caller does not say.
+
+    The lookup must return exactly one tool — the evaluation's question says "the tool" —
+    so a second match is the gate failing loudly, not something to pick from.
+    """
+    import inspect
+
+    from acadmcp import server, terms
+
+    ((name, _),) = terms.lookup(term)
+    return inspect.signature(getattr(server, name)).parameters["layer"].default
 
 
 def _elements() -> list:
@@ -115,6 +149,7 @@ def eval_answers() -> list[tuple[str, str, str]]:
     """
     rows = _fixture_layers()
     layers = Counter(rows)
+    entities = _fixture_entities()
     from pathlib import PureWindowsPath
 
     derived = {
@@ -136,6 +171,22 @@ def eval_answers() -> list[tuple[str, str, str]]:
         "imported from a block in which library drawing file": PureWindowsPath(
             _by_key("light").source
         ).name,
+        # The paging question's answer is the page walk, not the count: ceil at the page
+        # size the question names, over the same universe listing_entities walks (the
+        # fixture carries no paper-space entities, so the modelspace walk is the walk).
+        "How many listing_entities calls does the full walk take": str(
+            -(-len(rows) // EVAL_PAGE_LIMIT)
+        ),
+        # The largest area label, by the number the label reads — the original string is
+        # the answer, so "40.60m²" survives with its padding rather than becoming "40.6".
+        "largest area figure labelled": max(
+            _fixture_texts("A-ROOM-AREA"), key=lambda t: float(t[: -len("m²")])
+        ),
+        # A door swing is an arc on the door layer; the leaves are lines.
+        "How many door swings does the plan show": str(
+            sum(1 for layer, kind in entities if layer == "A-DOOR" and kind == "ARC")
+        ),
+        "hatch onto when the caller does not say": _default_layer_for("HATCH"),
     }
     out: list[tuple[str, str, str]] = []
     for pair in ET.parse(ROOT / EVALUATION).getroot().findall("qa_pair"):

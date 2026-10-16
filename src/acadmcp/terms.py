@@ -5,7 +5,7 @@ tools were not ranked badly — they were unsearchable. The fix is data: one rec
 naming the AutoCAD commands it stands for, and the phrases — Chinese among them — that
 somebody would actually type.
 
-This module is deliberately not a search engine. At 56 tools the whole surface fits in a
+This module is deliberately not a search engine. At 48 tools the whole surface fits in a
 client's context, so nothing needs ranking; what is needed is a way from the word a person
 used to the tool that does it, which is `lookup` and the `term` argument of `drawing_help`.
 `tests/test_terms.py` refuses to let a tool exist without a record here — the same rule the
@@ -40,11 +40,9 @@ class Term:
 #: a duplicated command is usually a copy-paste mistake, and the gate in `tests/test_terms.py`
 #: fails on one rather than letting it pass quietly. Each entry here is a command that two
 #: tools legitimately stand for — MLINE for the wall run and the run an opening is cut into,
-#: UNDO for the one undo stack `drawing_undo` and `drawing_rollback_to` both walk,
-#: CHECKSTANDARDS for `drawing_critique` (component checks) and `drawing_check_standard` (the
-#: standard's own rules), NEW for `drawing_new` and the `template_list` of what NEW starts
-#: from, and WBLOCK for the capture and the publish of what it captured.
-SHARED_CAD: tuple[str, ...] = ("MLINE", "UNDO", "CHECKSTANDARDS", "NEW", "WBLOCK")
+#: NEW for `drawing_new` and the `template_list` of what NEW starts from, and WBLOCK for the
+#: capture and the publish of what it captured.
+SHARED_CAD: tuple[str, ...] = ("MLINE", "NEW", "WBLOCK")
 
 
 #: Keyed by tool name, in the order the tools appear in `server.py`.
@@ -97,7 +95,16 @@ TOOL_TERMS: dict[str, Term] = {
     # --- the journal --------------------------------------------------------
     "drawing_undo": Term(
         cad=("UNDO",),
-        phrases=("undo", "撤销", "退回一步", "画错了"),
+        phrases=(
+            "undo",
+            "撤销",
+            "退回一步",
+            "画错了",
+            "rollback",
+            "回滚",
+            "退回到某一步",
+            "撤到指定步骤",
+        ),
     ),
     "drawing_redo": Term(
         cad=("REDO",),
@@ -107,25 +114,27 @@ TOOL_TERMS: dict[str, Term] = {
         cad=(),
         phrases=("history", "历史", "画了什么", "步骤列表"),
     ),
-    "drawing_rollback_to": Term(
-        cad=("UNDO",),
-        phrases=("rollback", "回滚", "退回到某一步", "撤到指定步骤"),
-    ),
     "drawing_summary": Term(
         cad=("AREA",),
         phrases=("summary", "汇总", "图纸说明", "统计", "面积表"),
     ),
-    "drawing_verify": Term(
-        cad=("AUDIT",),
-        phrases=("verify", "检查图纸", "核对", "查错", "图纸和记录对不对"),
-    ),
-    "drawing_critique": Term(
-        cad=("CHECKSTANDARDS",),
-        phrases=("critique", "构件核查", "组件检查", "门画对了吗"),
-    ),
-    "drawing_check_standard": Term(
-        cad=("CHECKSTANDARDS", "STANDARDS"),
-        phrases=("标准检查", "图层规范", "制图标准"),
+    "drawing_check": Term(
+        cad=("AUDIT", "CHECKSTANDARDS", "STANDARDS"),
+        phrases=(
+            "check",
+            "verify",
+            "检查图纸",
+            "核对",
+            "查错",
+            "图纸和记录对不对",
+            "critique",
+            "构件核查",
+            "组件检查",
+            "门画对了吗",
+            "标准检查",
+            "图层规范",
+            "制图标准",
+        ),
     ),
     "drawing_finalize": Term(
         cad=(),
@@ -196,29 +205,45 @@ TOOL_TERMS: dict[str, Term] = {
             "楼梯间",
         ),
     ),
-    "draw_door": Term(
+    "draw_opening": Term(
         cad=(),
-        phrases=("door", "门", "画门", "单扇门", "门洞", "卷帘门", "卷帘", "防火门"),
-    ),
-    "draw_window": Term(
-        cad=(),
-        phrases=("window", "窗", "画窗", "窗户", "窗洞", "幕墙", "百叶"),
+        phrases=(
+            "door",
+            "门",
+            "画门",
+            "单扇门",
+            "门洞",
+            "卷帘门",
+            "卷帘",
+            "防火门",
+            "window",
+            "窗",
+            "画窗",
+            "窗户",
+            "窗洞",
+            "幕墙",
+            "百叶",
+        ),
     ),
     "draw_column": Term(
         cad=("SOLID",),
         phrases=("column", "承重柱", "结构柱", "柱子", "框架柱"),
     ),
-    "draw_stair": Term(
-        cad=(),
-        phrases=("stair", "楼梯", "画楼梯", "梯段", "踏步"),
-    ),
-    "draw_lift": Term(
-        cad=(),
-        phrases=("lift", "电梯", "电梯井", "升降梯", "竖井", "电梯间", "候梯厅"),
-    ),
-    "draw_equipment": Term(
+    "draw_core": Term(
         cad=(),
         phrases=(
+            "stair",
+            "楼梯",
+            "画楼梯",
+            "梯段",
+            "踏步",
+            "lift",
+            "电梯",
+            "电梯井",
+            "升降梯",
+            "竖井",
+            "电梯间",
+            "候梯厅",
             "equipment",
             "设备",
             "机房设备",
@@ -261,13 +286,23 @@ TOOL_TERMS: dict[str, Term] = {
         phrases=("library", "图块", "动态块", "dwg 图库", "库里有什么"),
     ),
     "place_element": Term(
-        cad=("INSERT",),
+        cad=("INSERT", "DIVIDE", "MEASURE", "ARRAY"),
         phrases=(
             "place element",
             "插入图块",
             "放置构件",
             "放门",
             "放窗",
+            "place along",
+            "沿墙布置",
+            "等分布置",
+            "一排窗",
+            "按间距排",
+            "place grid",
+            "阵列",
+            "柱网布柱",
+            "按轴网布置",
+            "成排布置",
             # The library's own members, reachable only through this tool: a draughtsman
             # types 钢梁 or 焊接符号, and the honest answer is "place_element", because that
             # is what draws them.
@@ -292,14 +327,6 @@ TOOL_TERMS: dict[str, Term] = {
     "catalog_suggest": Term(
         cad=(),
         phrases=("沉淀建议", "重复", "建议入库"),
-    ),
-    "place_along": Term(
-        cad=("DIVIDE", "MEASURE"),
-        phrases=("place along", "沿墙布置", "等分布置", "一排窗", "按间距排"),
-    ),
-    "place_grid": Term(
-        cad=("ARRAY",),
-        phrases=("place grid", "阵列", "柱网布柱", "按轴网布置", "成排布置"),
     ),
     # --- the step journal and the plugin -----------------------------------
     "step_begin": Term(
@@ -347,7 +374,7 @@ def lookup(query: str) -> list[tuple[str, str]]:
     depends on dictionary order. `what` is one of "cad", "phrase" or "name".
 
     The contained-in-the-query direction is not a nicety: a Chinese compound carries the word
-    inside it. 卷帘门 is a door, and searching for the compound has to reach `draw_door`
+    inside it. 卷帘门 is a door, and searching for the compound has to reach `draw_opening`
     without 卷帘门 having to be listed verbatim — the reverse direction alone found nothing,
     which is how a word the README itself uses came back empty.
 

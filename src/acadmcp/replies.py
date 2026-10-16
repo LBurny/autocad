@@ -22,6 +22,7 @@ CAD imports, and none from this package either.
 from typing import Any, TypedDict
 
 __all__ = [
+    "CheckReply",
     "CheckStandardReply",
     "CritiqueReply",
     "ElementTypesReply",
@@ -90,7 +91,7 @@ class SummaryReply(TypedDict, total=False):
 
 
 class VerifyReply(TypedDict, total=False):
-    """``drawing_verify`` — verify.reconcile's shape, plus backend.
+    """The ``verify`` lens of ``drawing_check`` — verify.reconcile's shape, plus backend.
 
     `ok` is None, not missing, for the two verdicts that are neither pass nor
     fail (walk_truncated, no_baseline): a bool there would force a false one.
@@ -112,7 +113,7 @@ class VerifyReply(TypedDict, total=False):
 
 
 class CritiqueReply(TypedDict, total=False):
-    """``drawing_critique`` — critique.run's shape, plus ok."""
+    """The ``critique`` lens of ``drawing_check`` — critique.run's shape, plus ok."""
 
     ok: bool
     issues: list[dict[str, Any]]  # {check, severity, message, step?, ...}
@@ -123,7 +124,7 @@ class CritiqueReply(TypedDict, total=False):
 
 
 class CheckStandardReply(TypedDict, total=False):
-    """``drawing_check_standard``."""
+    """The ``standard`` lens of ``drawing_check``."""
 
     ok: bool
     standard: str
@@ -131,6 +132,16 @@ class CheckStandardReply(TypedDict, total=False):
     digest: str
     issues: list[dict[str, Any]]  # {rule, severity, detail, entities}
     counts: dict[str, int]  # {error, warning}
+
+
+class CheckReply(TypedDict, total=False):
+    """``drawing_check`` — one envelope; the checks that ran, keyed by name."""
+
+    ok: bool
+    check: str  # verify | critique | standard | all — what was asked for
+    checks: dict[str, Any]  # "verify" -> VerifyReply, "critique" -> CritiqueReply,
+    # "standard" -> CheckStandardReply
+    counts: dict[str, int]  # error/warning/info totals across the checks that ran
 
 
 class EntitiesReply(TypedDict, total=False):

@@ -113,7 +113,7 @@ def test_a_chinese_question_reaches_the_tool_that_answers_it():
         ("房间面积", "draw_room"),
         ("中文乱码", "set_text_style"),
         ("撤销", "drawing_undo"),
-        ("阵列", "place_grid"),
-        ("图纸和记录对不对", "drawing_verify"),
+        ("阵列", "place_element"),
+        ("图纸和记录对不对", "drawing_check"),
     ]:
         assert expected in [name for name, _ in terms.lookup(query)], query

@@ -340,7 +340,7 @@ def test_catalog_suggest_reports_repetition_through_the_tool(_tool_session):
     different things and rightly suggest nothing.
     """
     for _ in range(3):
-        server.draw_door(hinge=[1000, 0], width=900)
+        server.draw_opening("door", [1000, 0], width=900)
 
     out = server.catalog_suggest(min_count=3)
 

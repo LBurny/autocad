@@ -87,20 +87,20 @@ def test_rollback_to_leaves_the_named_step_standing():
     server.draw_line([0, 0], [1000, 0])
     server.draw_circle([500, 500], 100)
     server.draw_line([0, 0], [0, 1000])
-    report = server.drawing_rollback_to(1)
+    report = server.drawing_undo(to_step=1)
     assert report["ok"] and [s["index"] for s in report["undone"]] == [3, 2]
     assert server._state.backend.info()["entities"] == 1
 
 
 def test_rollback_to_zero_empties_the_drawing():
     server.draw_line([0, 0], [1000, 0])
-    server.drawing_rollback_to(0)
+    server.drawing_undo(to_step=0)
     assert server._state.backend.info()["entities"] == 0
 
 
 def test_rollback_to_an_index_past_the_end_changes_nothing():
     server.draw_line([0, 0], [1000, 0])
-    report = server.drawing_rollback_to(99)
+    report = server.drawing_undo(to_step=99)
     assert report["undone"] == [] and server._state.backend.info()["entities"] == 1
 
 

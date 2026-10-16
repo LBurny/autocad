@@ -101,29 +101,29 @@ uv run python examples/floor_plan_demo.py --com      # draw into running AutoCAD
 
 **Sheet and plot**: `drawing_sheet`, `drawing_plot_pdf`
 
-**Journal**: `drawing_undo`, `drawing_redo`, `drawing_history`,
-`drawing_rollback_to`, `drawing_replay`, `drawing_summary`
+**Journal**: `drawing_undo` (by count, or `to_step=` aimed at a step),
+`drawing_redo`, `drawing_history`, `drawing_replay`, `drawing_summary`
 
-**Checks**: `drawing_verify`, `drawing_critique`, `drawing_finalize`, the gate
-that refuses a drawing until both are clean
+**Checks**: `drawing_check` (the `verify`/`critique`/`standard` lenses) and
+`drawing_finalize`, the gate that refuses a drawing until the first two are clean
 
 **Layers and text**: `layer_create`, `set_text_style`
 
 **Primitives**: `draw_line`, `draw_polyline`, `draw_rect`, `draw_circle`
 
 **Architecture**: `draw_wall`, `draw_wall_with_openings`, `draw_room`,
-`draw_door`, `draw_window`, `draw_column`
+`draw_opening` (`kind="door"|"window"`), `draw_column`
 
-**Core and services**: `draw_stair`, `draw_lift`, `draw_equipment`
+**Core and services**: `draw_core` (`kind="stair"|"lift"|"equipment"|"shaft"`)
 
 **Annotation**: `draw_axis_grid`, `add_text`, `add_leader_note`,
 `add_dimension`, `add_hatch`
 
-**Library elements**: `library_list`, `element_types`, `place_element`,
-`place_along`, `place_grid`, `element_capture`
+**Library elements**: `library_list`, `element_types`, `place_element`
+(single, run and grid placements), `element_capture`
 
-**Standards, templates and the accumulating library**: `drawing_check_standard`,
-`template_list`, `element_publish`, `catalog_suggest`
+**Standards, templates and the accumulating library**: `template_list`,
+`element_publish`, `catalog_suggest`
 
 **Prompts**: `floor_plan`, `headless_to_live`, `drawing_review`
 
@@ -144,13 +144,13 @@ draw_wall_with_openings(
 )
 ```
 
-`place_along` and `place_grid` repeat a library block at every position, sized
+`place_element` also repeats a library block along a run or across a grid, sized
 through its dynamic parameters and numbered from the tags already in the drawing.
 The whole run lands as one undoable step:
 
 ```python
-place_grid("stud", xs=[0, 6000, 12000], ys=[0, 6000])  # a frame of columns
-place_along("window", start=[0, 0], end=[12000, 0], spacing=3000, variant="1200")
+place_element("stud", xs=[0, 6000, 12000], ys=[0, 6000])  # a frame of columns
+place_element("window", start=[0, 0], end=[12000, 0], spacing=3000, variant="1200")
 ```
 
 The block behind each element is a plain JSON catalogue, and `element_types`
@@ -210,7 +210,7 @@ by name.
 - A room boundary is the wall centreline ring, and the area is measured to the
   inner face, so a 4000×3000 ring with 200 mm walls reports 3.8×2.8 m.
 - Steps are the unit of review. `step_begin` and `step_commit` group drawing calls
-  into one step, which is what the palette and `drawing_rollback_to` act on.
+  into one step, which is what the palette and `drawing_undo(to_step=...)` act on.
 
 ## Notes and limits
 
@@ -231,7 +231,7 @@ by name.
 
 ```
 src/acadmcp/
-  geom.py        pure 2D geometry (no CAD deps)     server.py     the 56-tool MCP surface
+  geom.py        pure 2D geometry (no CAD deps)     server.py     the 48-tool MCP surface
   ops.py         backend-agnostic operations        journal.py    step bookkeeping
   backends/      dxf / com / plugin drivers         catalog.py    the element catalogue
   catalog_ops.py the parametric twins               summary.py    design summary from the journal

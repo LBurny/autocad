@@ -39,7 +39,7 @@ WORKFLOW:
    and the label shrinks to fit the room.
 5. Columns and fixtures: place_element(type="column", at=[x, y]); element_types
    lists what the catalogue offers, and the catalogue places on every backend.
-6. Cores: draw_stair, draw_lift, draw_equipment(kind="shaft").
+6. Cores: draw_core(kind="stair"|"lift"|"equipment"|"shaft").
 7. draw_axis_grid(...) for the structural grid, then add_dimension(points=[...])
    for the dimension chains.
 8. drawing_sheet(paper="A3", scale="{scale}") — read plan_mm and fits in the
@@ -51,22 +51,23 @@ VERIFY — all five, every time:
 - drawing_screenshot() and LOOK at it; zoom into regions with
   drawing_screenshot(window=[min_x, min_y, max_x, max_y]) until the room labels
   are legible in the shot.
-- drawing_verify() — the verdict must be "matches"; "unaccounted" means
-  something drew outside a step, "missing" means entities were lost.
+- drawing_check(check="verify") — the verdict must be "matches"; "unaccounted"
+  means something drew outside a step, "missing" means entities were lost.
 - drawing_summary() — rooms with areas, opening and element counts; read it
   back against the brief you were given.
-- drawing_critique() — the components against the journal: a door off its wall
-  or on an uncut one, an opening past its run, a tag breaking convention, a
-  plan the viewport cannot hold.
-- drawing_check_standard() — the drawing against the drafting standard: the unit,
-  the layers in use, every text height against the standard's nominal series, and
-  that the sheet states its 比例. It reports, it never blocks — but read it.
+- drawing_check(check="critique") — the components against the journal: a door
+  off its wall or on an uncut one, an opening past its run, a tag breaking
+  convention, a plan the viewport cannot hold.
+- drawing_check(check="standard") — the drawing against the drafting standard:
+  the unit, the layers in use, every text height against the standard's nominal
+  series, and that the sheet states its 比例. It reports, it never blocks —
+  but read it. (check="all" runs the three lenses in one call.)
 
 Then drawing_finalize() — the done-gate. It refuses while verify or critique
 find errors, so "finished" is never a claim you make unverified.
 
 RECOVERY: drawing_history() lists the steps; drawing_undo() takes back the last
-call; drawing_rollback_to(index) erases everything after a named step.
+call; drawing_undo(to_step=index) erases everything after a named step.
 """
 
 
@@ -90,7 +91,7 @@ WORKFLOW:
    Steps the target cannot apply — a library insert onto the dxf backend, going
    the other way — are skipped and REPORTED in the reply's skipped list, never
    silently dropped. Read that list.
-6. drawing_verify() on the live side must say "matches", and
+6. drawing_check(check="verify") on the live side must say "matches", and
    drawing_screenshot() now shows the AutoCAD window itself.
 
 RULES:
@@ -111,15 +112,16 @@ CHECKS:
    the same geometry the room tool used), openings, elements, and annotation
    counts. Rows it cannot read are counted in unreadable, never skipped
    silently; a non-zero unreadable is itself a finding.
-2. drawing_verify() — the journal reconciled against the drawing. "matches"
-   means every applied step's entities are present; "unaccounted" means the
-   drawing holds more than any step recorded (something drew outside a step);
-   "missing" means fewer (a save dropped them, or an erase went too far).
-3. drawing_critique() — the components against the journal: doors off walls or
-   on uncut ones, openings past their run, tags breaking convention, text
-   masquerading as a dimension, a sheet too small for the plan. An error here
-   is a finding even when verify says "matches": verify counts entities, the
-   critique checks they are right.
+2. drawing_check(check="verify") — the journal reconciled against the drawing.
+   "matches" means every applied step's entities are present; "unaccounted"
+   means the drawing holds more than any step recorded (something drew outside
+   a step); "missing" means fewer (a save dropped them, or an erase went too
+   far).
+3. drawing_check(check="critique") — the components against the journal: doors
+   off walls or on uncut ones, openings past their run, tags breaking
+   convention, text masquerading as a dimension, a sheet too small for the
+   plan. An error here is a finding even when verify says "matches": verify
+   counts entities, the critique checks they are right.
 4. drawing_screenshot() — then zoom into each region with
    drawing_screenshot(window=[min_x, min_y, max_x, max_y]) until the room labels
    are legible in the shot; a label too small to read at review scale is a

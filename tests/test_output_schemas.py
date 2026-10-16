@@ -36,9 +36,7 @@ TOOL_REPLIES = {
     "drawing_status": replies.StatusReply,
     "drawing_history": replies.HistoryReply,
     "drawing_summary": replies.SummaryReply,
-    "drawing_verify": replies.VerifyReply,
-    "drawing_critique": replies.CritiqueReply,
-    "drawing_check_standard": replies.CheckStandardReply,
+    "drawing_check": replies.CheckReply,
     "listing_entities": replies.EntitiesReply,
     "element_types": replies.ElementTypesReply,
     "template_list": replies.TemplateListReply,
@@ -62,7 +60,7 @@ def drawing():
     )
     tool["draw_room"].fn(boundary=[[0, 0], [4000, 0], [4000, 3000], [0, 3000]], name="办公室")
     for _ in range(3):
-        tool["draw_door"].fn(hinge=[6000, 0], width=900, rotation=0, swing="left")
+        tool["draw_opening"].fn(kind="door", at=[6000, 0], width=900, rotation=0, swing="left")
     tool["add_text"].fn(pos=[1000, 1500], text="标注", height=300)
     yield tool
     server._state.backend = None

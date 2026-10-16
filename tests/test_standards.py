@@ -909,12 +909,12 @@ def _tool_session():
     server._state.backend = None
 
 
-def test_drawing_check_standard_reports_an_off_series_text(_tool_session):
+def test_the_standard_lens_reports_an_off_series_text(_tool_session):
     """Tool level: a sheet plus a 260 mm text, whose 2.6 mm paper height is off the series."""
     server.drawing_sheet(paper="A3", scale="1:100")
     server.add_text([0, 0], "注", height=260)
 
-    report = server.drawing_check_standard()
+    report = server.drawing_check("standard")["checks"]["standard"]
 
     assert report["ok"] is True
     assert report["standard"] == "gbt50001"
@@ -923,9 +923,9 @@ def test_drawing_check_standard_reports_an_off_series_text(_tool_session):
     assert report["counts"]["error"] == len(errors) >= 1
 
 
-def test_drawing_check_standard_refuses_an_unknown_standard_by_name(_tool_session):
+def test_the_standard_lens_refuses_an_unknown_standard_by_name(_tool_session):
     with pytest.raises(BackendError, match="no standard"):
-        server.drawing_check_standard(standard="nope")
+        server.drawing_check("standard", standard="nope")
 
 
 def test_a_template_drawn_drawing_passes_the_layer_rule(_tool_session):
@@ -933,7 +933,7 @@ def test_a_template_drawn_drawing_passes_the_layer_rule(_tool_session):
     package drew fail its own standard."""
     server.drawing_new(backend="dxf", template="gb_a3_arch")
 
-    report = server.drawing_check_standard()
+    report = server.drawing_check("standard")["checks"]["standard"]
 
     warned = [i["detail"]["layer"] for i in report["issues"] if i["rule"] == "layer_not_in_standard"]
     assert warned == []
@@ -945,7 +945,7 @@ def test_undoing_the_frame_leaves_a_sheetless_drawing_the_checker_reports(_tool_
     server.drawing_sheet(paper="A3", scale="1:100")
     server.drawing_undo(count=1)
 
-    report = server.drawing_check_standard()
+    report = server.drawing_check("standard")["checks"]["standard"]
 
     assert any(i["rule"] == "no_sheet" for i in report["issues"])
     assert report["counts"]["warning"] >= 1

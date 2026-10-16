@@ -233,15 +233,15 @@ Tools:
 | `library_list(source)` | the blocks in the open drawing, or in a library .dwg, with each dynamic block's parameters |
 | `element_types(category)` | what the catalogue offers, and whether it still matches the library |
 | `place_element(type, at, variant, params, rotation, tag)` | one element, one step |
-| `place_along(type, start, end, count, spacing, inset)` | a run: a row of columns, a wall of windows |
-| `place_grid(type, xs, ys)` | every intersection of two coordinate lists: a frame |
+| `place_element(type, start, end, count, spacing, inset)` | a run: a row of columns, a wall of windows |
+| `place_element(type, xs, ys)` | every intersection of two coordinate lists: a frame |
 
 A whole run is one step, so "take back that row of columns" is one action. Tags are
 numbered from the tags the drawing already has (`M-1`, `M-2`, …) and never from a stored
 counter: a counter is a second copy of a fact the drawing holds, and the two part company
-the first time somebody edits by hand. `place_along` takes its rotation from the direction
-of the run, which is what makes a row of doors lie in the wall rather than all face the
-same way.
+the first time somebody edits by hand. A run placement takes its rotation from the
+direction of the run, which is what makes a row of doors lie in the wall rather than all
+face the same way.
 
 A project supplies its own `acadmcp.json` to point `{library}` at its own block library,
 add its own catalogue file (merged over the package's, so it restates only what it

@@ -20,14 +20,14 @@ def test_document_numbers_match_the_tree():
 def test_every_evaluation_answer_is_re_derived_from_the_tree():
     """An answer nothing derives is an answer that goes stale unnoticed — one did."""
     answers = numbers.eval_answers()
-    assert len(answers) == 10
+    assert len(answers) == 14
     wrong = [(q, said, want) for q, said, want in answers if said != want]
     assert not wrong, "\n".join(
         f"evaluation.xml says {said!r}, the tree derives {want!r}\n  {q}" for q, said, want in wrong
     )
 
 
-def test_the_ten_evaluation_pairs_are_the_ten_derivations():
+def test_every_evaluation_pair_has_a_derivation():
     """A pair with no derivation must fail rather than pass unexamined."""
     underived = [q for q, _, want in numbers.eval_answers() if want == numbers.NO_DERIVATION]
     assert not underived, f"nothing derives these evaluation pairs: {underived}"

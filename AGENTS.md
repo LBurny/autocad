@@ -32,6 +32,9 @@ src/acadmcp/
                         which the SDK publishes as outputSchema and validates the wire's
                         structuredContent against — an undeclared key is dropped silently.
                         Annotations only; no imports.
+  params.py             the parameter descriptions: one per tool parameter, injected into
+                        the served inputSchema at import — the signature carries the type,
+                        this carries the meaning. Data plus the injection; no imports.
   data/                 the shipped data: elements.json (the catalogue), standards.json
                         (GB/T tables) and templates.json (the two template specifications)
   terms.py              the tool vocabulary: the AutoCAD command and the Chinese phrase for
@@ -42,7 +45,7 @@ src/acadmcp/
                         and the PDF paper-size read-back. Pure — it imports layers for the
                         measured character width and nothing else, and no CAD library.
   capture.py            Win32 window capture, and finding the AutoCAD frame
-  server.py             the MCP tool surface (56 tools, each annotated by behaviour class),
+  server.py             the MCP tool surface (48 tools, each annotated by behaviour class),
                         the audit middleware and the server instructions
   journal.py            the backend-neutral step journal (undo/redo bookkeeping). No CAD imports.
   acad_plugin_client.py the socket client for the in-AutoCAD plugin
@@ -67,6 +70,8 @@ tests/                  test_geom.py, test_backends.py, test_journal.py, test_re
                         test_tool_surface.py (annotations, naming, pagination),
                         test_verify.py (the journal's count against the drawing's),
                         test_terms.py (every tool has a vocabulary entry),
+                        test_param_descriptions.py (every served parameter
+                        has a description, the table free of ghosts),
                         test_prompts.py (the prompt registry against the tool registry),
                         test_audit_middleware.py (tool-call logging, the instructions),
                         test_critique.py (component checks against the journal),
@@ -242,7 +247,11 @@ The split is deliberate; keep it when editing.
   `replies.py`: the SDK publishes that TypedDict as the tool's `outputSchema` and
   validates `structuredContent` against it, **dropping any key the TypedDict does
   not declare** — so a new reply key is added to the TypedDict in the same edit,
-  and `test_output_schemas.py` fails the round trip if it is not.
+  and `test_output_schemas.py` fails the round trip if it is not. And every tool
+  parameter's description lives in `params.py`, injected into the served
+  inputSchema at import: the signature carries the type, the table carries the
+  meaning, and `test_param_descriptions.py` fails on a parameter added without a
+  description or a table entry left behind by a rename.
 - **All three backends journal.** `backends/recording.py` owns the step
   lifecycle (record primitives → apply as one batch → keep the handles);
   `journal.py` owns the undo bookkeeping. A backend implements only
@@ -287,7 +296,7 @@ style's font does **not** repaint existing text — `set_text_style` issues
 `?` under every font tested, including `gbcbig.shx`, `simhei.ttf` and `simsun.ttc`.
 
 **Text height is a paper measure, so every text call site is scale-aware.** GB/T's
-nominal series (2.5/3.5/5/7/10/14/20) is what `drawing_check_standard` measures
+nominal series (2.5/3.5/5/7/10/14/20) is what `drawing_check`'s standard lens measures
 against, as *paper* height = model height ÷ the sheet's scale — and the shipped
 constants were off it even at 1:100 (H_TEXT 300 → 3.0 mm, H_TAG 180 → 1.8 mm),
 while a factory drawn at 1:200 produced 81 `text_height_off_series` errors in one
@@ -529,7 +538,7 @@ reported, not silently skipped.
 each `draw_*` tool; an explicit `step_begin` overrides it (while one is open, drawing
 records into it and nothing commits). Undo/redo are backend-neutral
 (`drawing_undo`/`drawing_redo`/`drawing_history`); on the plugin backend they delegate
-to the DWG journal so the palette never disagrees. `drawing_rollback_to(index)` aims the
+to the DWG journal so the palette never disagrees. `drawing_undo(to_step=index)` aims the
 same undo at a named step rather than making a caller count — `Journal.rollback_to`
 existed with no tool in front of it — and `drawing_history` now returns machine-readable
 `steps` rows beside its rendered text, so an index can be picked without counting. On the
@@ -614,8 +623,8 @@ insert one (the plugin does; `dxf` and `com` do not) and the parametric twin oth
 `Backend.supports_insert` is a **class attribute** — `False` on `RecordingBackend`, `True` on
 `PluginBackend` — and not a probe, because inside a step the `dxf` and `com` refusals are
 deferred to the commit, so a caller cannot find out by trying, and which half to draw has to
-be decided before anything is drawn. This is what made `place_element`/`place_along`/
-`place_grid` work headless: before it, all three began with `_require_plugin()` and an AI
+be decided before anything is drawn. This is what made `place_element`'s three
+placements work headless: before it, they began with `_require_plugin()` and an AI
 writing a plan in DXF could not place a single door. The shipped catalogue's `door` and
 `window` therefore carry twins, and `column` is **op-only** — a 承力柱 is a filled rectangle
 whose size is its whole identity, so it needs no library and works on every backend.
@@ -649,7 +658,7 @@ round trip.** A round trip materialises ezdxf's own defaults onto every paper la
 comes back as `paper_size` "A3", 420×297, `plot_type` 5, margins 7.5/20, `unit_factor` 1.0. So the
 paper *fields* alone cannot tell a real sheet from a drawing that never had one — and a reopened
 sheetless drawing therefore reported a phantom A3 at 1:1, which let `drawing_plot_pdf` plot a
-frameless file and quietly bypassed the assumed-scale fallback in `drawing_check_standard`.
+frameless file and quietly bypassed the assumed-scale fallback in the standard check.
 `_sheet_from_layout` now adopts a layout only when it carries the *evidence* of a setup: its name
 matches its own paper name (case-insensitive) — because `set_page_setup` renames the layout to the
 paper name, so a real sheet reopens as "A3" while the phantom keeps "Layout1" — or, for a layout a
@@ -780,12 +789,12 @@ test can keep it that way.** `HANDLERS` was keyed `"add_axis_grid"` while `serve
 `draw_axis_grid`, so `annotation.axis_grids` was 0 for every real drawing — and
 `tests/test_summary.py` fed the handler that same impossible op name, so the suite stayed
 green. `HANDLERS` also carried a `"draw_shaft"` key for a tool that does not exist
-(`draw_equipment(kind="shaft")` records `draw_equipment`). The fix is not just the two keys:
+(`draw_core(kind="equipment"|"shaft")` records `draw_equipment`). The fix is not just the two keys:
 the test now reads the op names out of `server.py` with a regex over `_auto_step("…")` and
 `_placement(be, "…")`, so the table cannot drift from its producers again. The same shape of
 bug is worth looking for wherever a dict is keyed by a string a human typed.
 
-**`drawing_verify` reconciles the journal against the drawing, and reading it found a
+**The verify lens reconciles the journal against the drawing, and reading it found a
 contract two backends were not both meeting.** `Backend.step_rows` documents a row carrying
 "how many entities it drew", and `RecordingBackend` does — but `PluginBackend` handed back
 the plugin's own rows verbatim, which carry `handles` and `primitives` and no `entities` at
@@ -861,8 +870,8 @@ text width, and anything that sizes a caption to sit inside a box has to use
 
 **The plugin's step row *is* the journal on a live drawing, so a key it omits is a tool
 answering confidently and wrongly.** When the plugin owns the journal nothing reaches this
-process, and `drawing_summary`, `drawing_critique` (which `drawing_finalize` gates on),
-`drawing_check_standard`, `catalog_suggest` and `element_capture` all read the row for the
+process, and `drawing_summary`, `drawing_check`'s critique lens (which `drawing_finalize`
+gates on) and its standard lens, `catalog_suggest` and `element_capture` all read the row for the
 arguments and the geometry. `RpcServer.Row` sent `primitives` as a *count* and omitted
 `params` altogether, so on a live drawing the summary reported an empty plan and one
 "recorded no readable parameters" warning per step, the critique found nothing to complain

@@ -39,6 +39,7 @@ from . import (
     geom,
     layers,
     ops,
+    params,
     prompts,
     settings,
     sheet,
@@ -55,8 +56,7 @@ from .backends.base import Backend, BackendError
 from .backends.plugin import PluginBackend
 from .catalog import Element
 from .replies import (
-    CheckStandardReply,
-    CritiqueReply,
+    CheckReply,
     ElementTypesReply,
     EntitiesReply,
     HistoryReply,
@@ -64,7 +64,6 @@ from .replies import (
     SuggestReply,
     SummaryReply,
     TemplateListReply,
-    VerifyReply,
 )
 from .steps import StepSession, describe_steps
 
@@ -86,9 +85,10 @@ The fast path:
 4. place_element, draw_axis_grid, add_dimension — then drawing_sheet(paper=...,
    scale=...) and read its fits flag.
 5. Verify before reporting done: drawing_screenshot() and look at it,
-   drawing_verify() must say "matches", drawing_summary() read back against the
-   brief, and drawing_critique() checks the components against the journal —
-   then drawing_finalize(), the done-gate, which refuses while an error stands.
+   drawing_check() — verify must say "matches", summary is read back against the
+   brief via drawing_summary(), and the critique checks the components against
+   the journal — then drawing_finalize(), the done-gate, which refuses while an
+   error stands.
 
 One tool call is one journal step: drawing_undo() takes the last call back, and
 drawing_replay(backend="plugin") carries a headless draft into live AutoCAD.
@@ -390,7 +390,7 @@ def drawing_help(term: str | None = None) -> dict[str, Any]:
             "hint": ""
             if matches
             else (
-                "no tool matched. This index covers the vocabulary of the 56 tools — an "
+                "no tool matched. This index covers the vocabulary of the 48 tools — an "
                 "AutoCAD command name, an English phrase or a Chinese one. It does not cover "
                 "the element catalogue: for those, call element_types() (钢立柱, 焊接符号, "
                 "钢梁 and the rest live there), and call drawing_help() with no term for the "
@@ -410,10 +410,11 @@ def drawing_help(term: str | None = None) -> dict[str, Any]:
             "drawing_redo/drawing_history manage the journal",
             "draw_axis_grid(...) to lay out the structural grid",
             "draw_wall / draw_wall_with_openings / draw_room for the envelope and partitions",
-            "draw_door, draw_window, draw_column for openings and structure",
-            "place_element / place_along / place_grid to repeat a library element — a frame"
-            " of columns, a wall of windows — sized through the block's dynamic parameters",
-            "draw_stair, draw_lift, draw_equipment(kind='shaft') for the core and risers",
+            "draw_opening (door|window) and draw_column for openings and structure",
+            "place_element places a library element once (at), along a run (start+end) or "
+            "on a grid (xs+ys) — a frame of columns, a wall of windows — sized through the "
+            "block's dynamic parameters",
+            "draw_core(kind='stair'|'lift'|'equipment'|'shaft') for the core and risers",
             "draw_room again with walls=False to label a room whose walls exist",
             "add_dimension / add_text / add_hatch for annotation",
             "drawing_sheet(paper='A3', scale='1:100', title=...) to put it on a named sheet — a "
@@ -442,13 +443,14 @@ def drawing_help(term: str | None = None) -> dict[str, Any]:
             "checking_your_work": (
                 "drawing_summary first — rooms, areas, openings and counts as data. "
                 "drawing_history is what was drawn, one line per step. "
-                "drawing_verify checks the drawing against the journal's own account of "
-                "it, which is what catches a save that dropped entities. "
-                "drawing_screenshot last, and pass `window` to frame a detail."
+                "drawing_check runs the read-only lenses — verify reconciles the drawing "
+                "against the journal's own account of it, which is what catches a save "
+                "that dropped entities. drawing_screenshot last, and pass `window` to "
+                "frame a detail."
             ),
             "recovering": (
-                "Every tool call is one journal step: drawing_undo(count) or "
-                "drawing_rollback_to(index) takes back exactly what was drawn, and "
+                "Every tool call is one journal step: drawing_undo(count=...) or "
+                "drawing_undo(to_step=index) takes back exactly what was drawn, and "
                 "drawing_history gives the indices to aim at."
             ),
             "finding_a_tool": (
@@ -820,18 +822,32 @@ def drawing_save(path: str | None = None) -> dict[str, Any]:
 
 
 @mcp.tool(annotations=_DESTRUCTIVE)
-def drawing_undo(count: int = 1) -> dict[str, Any]:
-    """Take back the last `count` drawing steps, on any backend.
+def drawing_undo(count: int | None = None, to_step: int | None = None) -> dict[str, Any]:
+    """Take back drawing steps, on any backend — by count, or aimed at a named step.
 
-    A wrong coordinate costs this one call plus the redraw of the single step —
-    not a redraw of the whole plan. On the plugin backend this is the drawing's
-    own journal rolling back, so the palette and this call never disagree.
+    With no argument, takes back the last step: a wrong coordinate costs this one call
+    plus the redraw of the single step — not a redraw of the whole plan. `count` takes
+    back that many. `to_step` instead erases everything drawn *after* that step (0 empties
+    the drawing): `drawing_history` lists the steps, so you can name the one you want
+    standing rather than count. Give count or to_step, not both.
+
+    On the plugin backend this is the drawing's own journal rolling back, so the palette
+    and this call never disagree — but an *accepted* step blocks a rollback there, and the
+    refusal is reported rather than swallowed; override it explicitly with
+    step_control(action='rollback_to', index=..., force=True).
     """
+    if count is not None and to_step is not None:
+        raise ValueError("give count or to_step, not both — both say how far back to go")
     be = _state.require()
+    if to_step is not None:
+        rollback = getattr(be, "rollback_to", None)
+        if rollback is None:
+            raise BackendError(f"backend {be.name!r} keeps no journal; nothing can be rolled back")
+        return {"ok": True, **rollback(int(to_step))}
     undo = getattr(be, "undo", None)
     if undo is None:
         raise BackendError(f"backend {be.name!r} keeps no journal; nothing can be undone")
-    return {"ok": True, **undo(int(count))}
+    return {"ok": True, **undo(int(count) if count is not None else 1)}
 
 
 @mcp.tool(annotations=_MUTATING)
@@ -858,7 +874,7 @@ def drawing_history() -> HistoryReply:
 
     `rendered` is the text a person reads; `steps` is the same history as machine-readable
     rows (index, op, label, params, state), so an agent can pick an index to aim
-    drawing_rollback_to at without counting.
+    drawing_undo(to_step=...) at without counting.
     """
     be = _state.require()
     history = getattr(be, "history", None)
@@ -886,35 +902,25 @@ def drawing_summary() -> SummaryReply:
     return {"ok": True, **summary.summarise(be.step_rows(), catalog=_recorded_catalog(be))}
 
 
-@mcp.tool(annotations=_READONLY)
-def drawing_verify(limit: int = 20000) -> VerifyReply:
-    """Check the drawing against the journal's own account of what it drew.
+def _verify_report(be: Backend, limit: int = 20000) -> dict[str, Any]:
+    """The drawing reconciled against the journal's own account of what it drew.
 
-    `verdict` is "matches" when every applied step's entities are there, "unaccounted" when
-    the drawing holds more than any step recorded (something drew outside a step), and
+    The verdicts: "matches" when every applied step's entities are there, "unaccounted"
+    when the drawing holds more than any step recorded (something drew outside a step),
     "missing" when it holds fewer (a save dropped them, or an erase went too far).
-    "walk_truncated" means the listing hit `limit`, so the count is a floor and no verdict is
-    possible — raise `limit` and ask again. "no_baseline" means the drawing holds entities and
-    records no steps at all, so there is nothing to reconcile: a file opened with
-    `drawing_open` carries no record of what was already in it, and that is reported rather
-    than called a fault.
-
-    A step's row carries an entity count rather than handles, so this says the total is
-    wrong without saying which entity is; `by_op` points at what was drawing when the books
-    stopped agreeing. `empty_steps` lists applied steps that recorded nothing, which is
-    ordinary for one that only ensured a layer and suspicious for one that draws.
-
-    On the com backend `reported_entities` is the drawing's own count, which can exceed the
-    listing because it includes proxy entities the listing skips; the two are reported side
-    by side rather than reconciled.
+    "walk_truncated" means the listing hit `limit`, so the count is a floor and no verdict
+    is possible — raise `limit` and ask again. "no_baseline" means the drawing holds
+    entities and records no steps at all, so there is nothing to reconcile: a file opened
+    with `drawing_open` carries no record of what was already in it, and that is reported
+    rather than called a fault.
     """
     if int(limit) < 1:
         raise ValueError(f"limit must be at least 1, got {limit}")
-    be = _state.require()
-    # One more row than asked for: a walk returning exactly `limit` has either reached the end
-    # or been cut short there, and the count alone cannot tell those apart. The extra row costs
-    # nothing and makes `truncated` a fact instead of a guess — a caller who reads the entity
-    # count out of drawing_status and passes it as `limit` used to get a false warning.
+    # One more row than asked for: a walk returning exactly `limit` has either reached the
+    # end or been cut short there, and the count alone cannot tell those apart. The extra
+    # row costs nothing and makes `truncated` a fact instead of a guess — a caller who
+    # reads the entity count out of drawing_status and passes it as `limit` used to get a
+    # false warning.
     entities = be.entities(limit=int(limit) + 1)
     info = be.info()
     reported = info.get("entities") if isinstance(info, dict) else None
@@ -928,23 +934,18 @@ def drawing_verify(limit: int = 20000) -> VerifyReply:
     return report
 
 
-@mcp.tool(annotations=_READONLY)
-def drawing_critique(focus: str = "") -> CritiqueReply:
-    """Check the drawing's components against the journal's own record of them.
+def _critique_report(be: Backend, focus: str = "") -> dict[str, Any]:
+    """The drawing's components checked against the journal's own record of them.
 
-    `drawing_verify` asks "is everything the journal recorded still there"; this asks
-    "is what was drawn right": a door whose hinge sits on no recorded wall or on a wall
-    no opening was cut into, an opening measured past the end of its run, a tag that
-    breaks the M0921/C1521 convention or duplicates another, a text masquerading as a
-    dimension, a plan the sheet's viewport cannot hold at its scale. The checks read the
-    journal — present on every drawing this server made, on every backend — never an
-    optional side record, so an empty `issues` really means nothing was found. A row that
-    cannot be read is counted in `unreadable`, never raised.
-
-    `focus` runs one check by its code (an unknown code is refused, naming the valid
-    ones); empty runs them all. `counts` breaks the findings down by severity.
+    Verify asks "is everything the journal recorded still there"; this asks "is what was
+    drawn right": a door whose hinge sits on no recorded wall or on a wall no opening was
+    cut into, an opening measured past the end of its run, a tag that breaks the
+    M0921/C1521 convention or duplicates another, a text masquerading as a dimension, a
+    plan the sheet's viewport cannot hold at its scale. The checks read the journal —
+    present on every drawing this server made, on every backend — never an optional side
+    record, so an empty `issues` really means nothing was found. A row that cannot be read
+    is counted in `unreadable`, never raised.
     """
-    be = _state.require()
     tag_prefixes = {
         e.key: e.tag_prefix for e in catalog.current().elements.values() if e.tag_prefix
     }
@@ -991,9 +992,8 @@ def _standard_snapshot(be: Backend) -> dict[str, Any]:
     }
 
 
-@mcp.tool(annotations=_READONLY)
-def drawing_check_standard(standard: str = "") -> CheckStandardReply:
-    """Check the drawing against the drafting standard in force.
+def _standard_report(be: Backend, standard: str = "") -> dict[str, Any]:
+    """The drawing checked against the drafting standard in force.
 
     `standard` names one of the loaded GB/T standards; empty uses the standard in force
     (`drawing_status`'s `standard` block says which that is, and every file the loader had
@@ -1005,9 +1005,8 @@ def drawing_check_standard(standard: str = "") -> CheckStandardReply:
     sheet's layers already at 1:1 — a rule the reply's `assumed_scale` names when the
     drawing carries no sheet to take a denominator from); every layer in use is one the
     standard's table names (a warning, because a project's own layers are legitimate); and
-    the sheet states its 比例. Like `drawing_critique` this reports and never draws: each
-    finding carries `rule`, `severity`, `detail` and the `entities` it is about. It is
-    advisory — `drawing_finalize` does not gate on it this wave.
+    the sheet states its 比例. It reports and never draws: each finding carries `rule`,
+    `severity`, `detail` and the `entities` it is about.
 
     Deferred and named, never faked: the layer *definitions'* own colour, linetype and
     lineweight need a `layer_table()` read no backend exposes yet, so this wave compares
@@ -1020,7 +1019,6 @@ def drawing_check_standard(standard: str = "") -> CheckStandardReply:
             f"no standard {standard!r} is loaded, so there is nothing to check against; "
             f"this session has: {names}. Empty `standard` uses the standard in force"
         )
-    be = _state.require()
     issues = standards.check(std, _standard_snapshot(be))
     counts = {"error": 0, "warning": 0}
     for issue in issues:
@@ -1037,25 +1035,94 @@ def drawing_check_standard(standard: str = "") -> CheckStandardReply:
     }
 
 
+#: The checks drawing_check runs, in the order they run. Each maps to its helper, which
+#: takes the backend and its own slice of the tool's parameters.
+_CHECKS = ("verify", "critique", "standard")
+
+
+@mcp.tool(annotations=_READONLY)
+def drawing_check(
+    check: str = "all",
+    focus: str = "",
+    standard: str = "",
+    limit: int = 20000,
+) -> CheckReply:
+    """Check the drawing — one tool for the three read-only lenses over the journal.
+
+    `check` picks the lens, or "all" (the default) for the full picture in one call:
+
+    - "verify" reconciles the drawing against the journal's own account of what it drew.
+      `verdict` is "matches" when every applied step's entities are there, "unaccounted"
+      when the drawing holds more than any step recorded, "missing" when it holds fewer,
+      "walk_truncated" when the entity listing hit `limit` (raise it and ask again), and
+      "no_baseline" for a drawing this server did not draw. `by_op` points at what was
+      drawing when the books stopped agreeing; `empty_steps` lists applied steps that
+      recorded nothing. A step's row carries an entity count rather than handles, so this
+      says the total is wrong without saying which entity is.
+    - "critique" checks the components against the journal: a door whose hinge sits on no
+      recorded wall or on a wall no opening was cut into, an opening measured past the end
+      of its run, a tag that breaks the M0921/C1521 convention or duplicates another, a
+      text masquerading as a dimension, a plan the sheet's viewport cannot hold at its
+      scale. `focus` runs one check by its code (an unknown code is refused, naming the
+      valid ones); empty runs them all.
+    - "standard" checks the drawing against the GB/T drafting standard in force: the unit,
+      the layers in use, every text height against the nominal series as a *paper* height,
+      and that the sheet states its 比例. `standard` names the standard; empty uses the
+      one in force.
+
+    The reply carries each ran check's own report under `checks`, keyed by name, and
+    `counts` totals the error/warning/info findings across them. None of the checks draws:
+    an empty `issues` really means nothing was found.
+    """
+    check = check.strip().lower() or "all"
+    if check != "all" and check not in _CHECKS:
+        raise ValueError(f"check must be one of {', '.join(_CHECKS)} or 'all', got {check!r}")
+    ran = list(_CHECKS) if check == "all" else [check]
+    if focus and "critique" not in ran:
+        raise ValueError(f"focus is only read by the critique check, which {check!r} does not run")
+    if standard and "standard" not in ran:
+        raise ValueError(
+            f"standard is only read by the standard check, which {check!r} does not run"
+        )
+    if int(limit) != 20000 and "verify" not in ran:
+        raise ValueError(f"limit is only read by the verify check, which {check!r} does not run")
+    be = _state.require()
+    checks: dict[str, Any] = {}
+    if "verify" in ran:
+        checks["verify"] = _verify_report(be, int(limit))
+    if "critique" in ran:
+        checks["critique"] = _critique_report(be, focus)
+    if "standard" in ran:
+        checks["standard"] = _standard_report(be, standard)
+    counts = {"error": 0, "warning": 0, "info": 0}
+    for report in checks.values():
+        for severity, n in (report.get("counts") or {}).items():
+            if severity in counts:
+                counts[severity] += n
+    return {"ok": True, "check": check, "checks": checks, "counts": counts}
+
+
 @mcp.tool(annotations=_READONLY)
 def drawing_finalize() -> dict[str, Any]:
     """The done-gate: verify and critique the drawing before it may be called finished.
 
-    Refuses while anything is wrong — `drawing_verify`'s verdict must be "matches" and
-    `drawing_critique` must hold no error-severity finding — and the refusal names what
-    failed, so a floating door or a lost entity is reported, not shipped. A drawing this
-    server did not draw gets "no_baseline" and is refused for that reason: the gate only
-    vouches for what the journal accounts for. Warnings do not block; they are reported.
+    Refuses while anything is wrong — the verify verdict must be "matches" and the
+    critique must hold no error-severity finding (both are drawing_check's lenses) — and
+    the refusal names what failed, so a floating door or a lost entity is reported, not
+    shipped. A drawing this server did not draw gets "no_baseline" and is refused for that
+    reason: the gate only vouches for what the journal accounts for. Warnings do not
+    block; they are reported.
 
     A sheet is not required: a sheetless plan is finalizable, because a sheet is furniture
     around the drawing, not part of what the gate vouches for.
     """
-    report = drawing_verify()
+    be = _state.require()
+    report = _verify_report(be)
     verdict = report.get("verdict")
     problems: list[str] = []
     if verdict != "matches":
-        problems.append(f"drawing_verify says {verdict!r}, not 'matches'")
-    crit = drawing_critique()
+        problems.append(f"verify says {verdict!r}, not 'matches'")
+    crit = _critique_report(be)
     errors = [i for i in crit["issues"] if i["severity"] == "error"]
     if errors:
         shown = "; ".join(i["message"] for i in errors[:5])
@@ -1071,24 +1138,6 @@ def drawing_finalize() -> dict[str, Any]:
         "openings": len(summ.get("openings", [])),
         "elements": len(summ.get("elements", [])),
     }
-
-
-@mcp.tool(annotations=_DESTRUCTIVE)
-def drawing_rollback_to(index: int) -> dict[str, Any]:
-    """Erase everything drawn after step `index`, newest first.
-
-    Aim the undo at a step instead of counting: `drawing_history` lists the steps, so you
-    can name the one you want standing. Index 0 is before the first step, which empties the
-    drawing. On the plugin backend the DWG's own journal performs the rollback, so the
-    palette and this call never disagree — but an *accepted* step blocks a rollback, and
-    that refusal is reported rather than swallowed; override it explicitly with
-    step_control(action='rollback_to', index=..., force=True).
-    """
-    be = _state.require()
-    rollback = getattr(be, "rollback_to", None)
-    if rollback is None:
-        raise BackendError(f"backend {be.name!r} keeps no journal; nothing can be rolled back")
-    return {"ok": True, **rollback(int(index))}
 
 
 @mcp.tool(annotations=_DESTRUCTIVE)
@@ -1529,65 +1578,68 @@ def draw_room(
 
 
 @mcp.tool(annotations=_MUTATING)
-def draw_door(
-    hinge: Any,
-    width: float = layers.DOOR_WIDTH,
+def draw_opening(
+    kind: str,
+    at: Any,
+    width: float | None = None,
     wall_thickness: float = layers.WALL_THICKNESS,
     rotation: float = 0.0,
-    open_angle: float = 90.0,
     swing: str = "left",
+    open_angle: float = 90.0,
     tag: str | None = None,
 ) -> dict[str, Any]:
-    """Draw a single-leaf door: jambs, leaf and swing arc.
+    """Draw a door or window symbol spanning an opening in an existing wall.
 
-    `hinge` is the hinge-side jamb on the wall centreline; `rotation` is the wall
-    direction in degrees; swing is "left" or "right".
+    `kind` is "door" or "window" — a closed set for the same reason `swing` is: a
+    misspelt kind drew nothing useful and said ok. `at` is the jamb the symbol starts
+    at, on the wall centreline (a door's hinge end); `rotation` is the wall direction
+    in degrees. `width` defaults to the kind's standard (900 for a door, 1500 for a
+    window). `swing` ("left"/"right" relative to the wall direction) and `open_angle`
+    are a door's; a window takes neither. When the wall is being drawn,
+    draw_wall_with_openings cuts the opening and draws the symbol in one step — prefer
+    it there.
+
+    The step records the legacy op ("draw_door" / "draw_window") and its own parameter
+    names, so a journal drawn before this merge reads the same as one drawn after.
     """
-    hinge_pt = _pt(hinge)
+    if kind not in ("door", "window"):
+        raise ValueError(f"kind must be 'door' or 'window', got {kind!r}")
+    pt = _pt(at)
+    if kind == "door":
+        w = layers.DOOR_WIDTH if width is None else float(width)
+        params = {
+            "hinge": pt,
+            "width": w,
+            "wall_thickness": float(wall_thickness),
+            "rotation": float(rotation),
+            "open_angle": float(open_angle),
+            "swing": swing,
+            "tag": tag,
+        }
+        with _auto_step("draw_door", params) as be:
+            ops.draw_door(
+                be,
+                pt,
+                w,
+                float(wall_thickness),
+                rotation=float(rotation),
+                open_angle=float(open_angle),
+                swing=swing,
+                tag=tag,
+            )
+        return {"ok": True}
+    if swing != "left" or float(open_angle) != 90.0:
+        raise ValueError("swing and open_angle belong to kind='door'; a window has neither")
+    w = layers.WINDOW_WIDTH if width is None else float(width)
     params = {
-        "hinge": hinge_pt,
-        "width": float(width),
-        "wall_thickness": float(wall_thickness),
-        "rotation": float(rotation),
-        "open_angle": float(open_angle),
-        "swing": swing,
-        "tag": tag,
-    }
-    with _auto_step("draw_door", params) as be:
-        ops.draw_door(
-            be,
-            hinge_pt,
-            float(width),
-            float(wall_thickness),
-            rotation=float(rotation),
-            open_angle=float(open_angle),
-            swing=swing,
-            tag=tag,
-        )
-    return {"ok": True}
-
-
-@mcp.tool(annotations=_MUTATING)
-def draw_window(
-    start: Any,
-    width: float = layers.WINDOW_WIDTH,
-    wall_thickness: float = layers.WALL_THICKNESS,
-    rotation: float = 0.0,
-    tag: str | None = None,
-) -> dict[str, Any]:
-    """Draw a window symbol spanning an opening, starting at the given jamb."""
-    start_pt = _pt(start)
-    params = {
-        "start": start_pt,
-        "width": float(width),
+        "start": pt,
+        "width": w,
         "wall_thickness": float(wall_thickness),
         "rotation": float(rotation),
         "tag": tag,
     }
     with _auto_step("draw_window", params) as be:
-        ops.draw_window(
-            be, start_pt, float(width), float(wall_thickness), rotation=float(rotation), tag=tag
-        )
+        ops.draw_window(be, pt, w, float(wall_thickness), rotation=float(rotation), tag=tag)
     return {"ok": True}
 
 
@@ -1619,66 +1671,68 @@ def draw_column(
 
 
 @mcp.tool(annotations=_MUTATING)
-def draw_stair(
+def draw_core(
+    kind: str,
     corner1: Any,
     corner2: Any,
     steps: int = 9,
     axis: str = "x",
-    up_label: str | None = "\u4e0a",
-    down_label: str | None = "\u4e0b",
+    up_label: str | None = "上",
+    down_label: str | None = "下",
+    tag: str | None = None,
+    name: str | None = None,
 ) -> dict[str, Any]:
-    """Draw a stair flight: outline, treads, direction arrow and 上/下 labels.
+    """Draw the rectangle-bound core elements: a stair flight, a lift, fixed equipment.
 
-    `axis` is the travel direction ("x" or "y").
+    `kind` is "stair", "lift", "equipment" or "shaft" — a closed set for the same reason
+    `swing` is: a misspelt "shfts" drew an ordinary equipment box and said ok, so a riser
+    silently became a machine. corner1/corner2 bound the element's rectangle.
+
+    - "stair": outline, treads, direction arrow and the 上/下 labels. `axis` is the
+      travel direction ("x" or "y"); `steps` the tread count.
+    - "lift": the shaft with its car outline and X cross. `tag` labels it.
+    - "equipment": a rectangular piece of fixed equipment with `name` as its caption,
+      shrunk to fit the rectangle.
+    - "shaft": a service riser (强电井/弱电井/水井) — the same captioned rectangle plus
+      a diagonal cross, on A-SHAFT.
+
+    Each kind reads only its own options and refuses the others by name, and the step
+    records the legacy op ("draw_stair" / "draw_lift" / "draw_equipment"), so a journal
+    drawn before this merge reads the same as one drawn after.
     """
+    if kind not in ("stair", "lift", "equipment", "shaft"):
+        raise ValueError(f"kind must be 'stair', 'lift', 'equipment' or 'shaft', got {kind!r}")
     a, b = _pt(corner1), _pt(corner2)
-    params = {
-        "corner1": a,
-        "corner2": b,
-        "steps": int(steps),
-        "axis": axis,
-        "up_label": up_label,
-        "down_label": down_label,
-    }
-    with _auto_step("draw_stair", params) as be:
-        result = ops.draw_stair(
-            be,
-            a,
-            b,
-            steps=int(steps),
-            axis=axis,
-            up_label=up_label,
-            down_label=down_label,
-        )
-    return {"ok": True, **result}
-
-
-@mcp.tool(annotations=_MUTATING)
-def draw_lift(corner1: Any, corner2: Any, tag: str | None = None) -> dict[str, Any]:
-    """Draw a lift/elevator shaft with its car outline and X cross."""
-    a, b = _pt(corner1), _pt(corner2)
-    params = {"corner1": a, "corner2": b, "tag": tag}
-    with _auto_step("draw_lift", params) as be:
-        ops.draw_lift(be, a, b, tag=tag)
-    return {"ok": True}
-
-
-@mcp.tool(annotations=_MUTATING)
-def draw_equipment(
-    corner1: Any, corner2: Any, name: str | None = None, kind: str = "equipment"
-) -> dict[str, Any]:
-    """Draw a rectangular piece of fixed equipment with a caption.
-
-    kind="shaft" draws a service riser instead (强电井/弱电井/水井): the same
-    captioned rectangle plus a diagonal cross, on A-SHAFT.
-
-    `kind` is a closed set for the same reason `swing` and `axis` are: a misspelt
-    "shfts" drew an ordinary equipment box and said ok, so a riser silently became
-    a machine.
-    """
-    if kind not in ("equipment", "shaft"):
-        raise ValueError(f"kind must be 'equipment' or 'shaft', got {kind!r}")
-    a, b = _pt(corner1), _pt(corner2)
+    stair_only = {"steps": steps, "axis": axis, "up_label": up_label, "down_label": down_label}
+    stair_defaults = {"steps": 9, "axis": "x", "up_label": "上", "down_label": "下"}
+    if kind == "stair":
+        if tag is not None or name is not None:
+            raise ValueError("tag and name belong to lift/equipment/shaft; a stair has neither")
+        params = {
+            "corner1": a,
+            "corner2": b,
+            "steps": int(steps),
+            "axis": axis,
+            "up_label": up_label,
+            "down_label": down_label,
+        }
+        with _auto_step("draw_stair", params) as be:
+            result = ops.draw_stair(
+                be, a, b, steps=int(steps), axis=axis, up_label=up_label, down_label=down_label
+            )
+        return {"ok": True, **result}
+    stray = [k for k in stair_only if stair_only[k] != stair_defaults[k]]
+    if stray:
+        raise ValueError(f"{', '.join(stray)} belong to kind='stair', not {kind!r}")
+    if kind == "lift":
+        if name is not None:
+            raise ValueError("name belongs to equipment/shaft; a lift takes tag")
+        params = {"corner1": a, "corner2": b, "tag": tag}
+        with _auto_step("draw_lift", params) as be:
+            ops.draw_lift(be, a, b, tag=tag)
+        return {"ok": True}
+    if tag is not None:
+        raise ValueError(f"tag belongs to kind='lift'; {kind} takes name")
     params = {"corner1": a, "corner2": b, "name": name, "kind": kind}
     with _auto_step("draw_equipment", params) as be:
         if kind == "shaft":
@@ -2267,34 +2321,105 @@ def _check_catalog(loaded: catalog.Catalog) -> list[str]:
 @mcp.tool(annotations=_MUTATING)
 def place_element(
     type: str,  # noqa: A002 - the tool surface speaks the caller's language
-    at: Any,
+    at: Any = None,
+    start: Any = None,
+    end: Any = None,
+    count: int | None = None,
+    spacing: float | None = None,
+    inset: float = 0.0,
+    xs: Any = None,
+    ys: Any = None,
     variant: str | None = None,
     params: dict[str, Any] | None = None,
-    rotation: float = 0.0,
+    rotation: float | None = None,
     scale: float = 1.0,
     tag: bool = True,
     tag_offset: float | None = None,
 ) -> dict[str, Any]:
-    """Place one catalogue element, as a single step, on whatever backend is active.
+    """Place catalogue elements, as a single step, on whatever backend is active.
+
+    Three placement shapes, chosen by which coordinates are passed — pass exactly one:
+
+    - `at` places one element. `at` is the element's *own* reference point, and it
+      differs per kind: a door's is its **hinge** (the jamb end of the opening, not its
+      centre), a window's is the opening's centre, a column's its centre, a lift's its
+      corner. When placing into openings cut by draw_wall_with_openings, prefer that
+      tool's `element` key — it does the hinge maths itself — or read the jamb off the
+      reply's `opening_positions`.
+    - `start` + `end` repeats the element along the run: `count` (that many, evenly
+      spread, ends included) or `spacing` (every that far, starting at `start`).
+      `inset` pulls the ends in, which is what keeps a column off a corner.
+    - `xs` + `ys` places one at every intersection of the two coordinate lists — a
+      frame of columns takes the same positions the axis grid was drawn to.
 
     Where the backend can insert library blocks — the plugin — the block's definition is
-    imported into the drawing if it is not there yet and the reference is placed at `at`.
-    Everywhere else the entry's parametric twin is drawn instead, so the same element name
-    works headless: a plan can be written in DXF with no AutoCAD, then replayed into it.
+    imported into the drawing if it is not there yet and the reference is placed.
+    Everywhere else the entry's parametric twin is drawn instead, so the same element
+    name works headless: a plan can be written in DXF with no AutoCAD, then replayed
+    into it.
 
     `variant` picks a size from the catalogue ("900" for a 900 mm door) and `params`
     overrides individual properties on top. With tag=True the next free tag number is
     derived from the tags already in the drawing — numbers are never stored, so a tag
-    added by hand cannot desynchronise them.
-
-    `at` is the element's *own* reference point, and it differs per kind: a door's is its
-    **hinge** (the jamb end of the opening, not its centre), a window's is the opening's
-    centre, a column's its centre, a lift's its corner. When placing into openings cut by
-    draw_wall_with_openings, prefer that tool's `element` key — it does the hinge maths
-    itself — or read the jamb off the reply's `opening_positions`.
+    added by hand cannot desynchronise them. `rotation` defaults to the run's direction
+    for start+end (a row of doors lies in the wall) and to 0 elsewhere; `scale` and
+    `tag_offset` are single-placement only.
     """
     be = _placement_backend()
     element = _entry(type)
+    mode = _placement_mode(at, start, end, xs, ys, count, spacing, inset, scale, tag_offset)
+
+    if mode == "along":
+        return _placement(
+            be,
+            "place_along",
+            f"{len(_positions(start, end, count, spacing, inset))} x {element.label}",
+            {
+                "type": element.key,
+                "start": geom.xy(start),
+                "end": geom.xy(end),
+                "count": count,
+                "spacing": spacing,
+                "rotation": None if rotation is None else float(rotation),
+                "tag": tag,
+            },
+            lambda: ops.place_along(
+                be,
+                element,
+                geom.xy(start),
+                geom.xy(end),
+                count=count,
+                spacing=spacing,
+                inset=float(inset),
+                rotation=None if rotation is None else float(rotation),
+                variant=variant,
+                params=params,
+                tag=tag,
+            ),
+        )
+    if mode == "grid":
+        return _placement(
+            be,
+            "place_grid",
+            f"{len(xs) * len(ys)} x {element.label}",
+            {
+                "type": element.key,
+                "xs": list(xs),
+                "ys": list(ys),
+                "rotation": 0.0 if rotation is None else float(rotation),
+                "tag": tag,
+            },
+            lambda: ops.place_grid(
+                be,
+                element,
+                list(xs),
+                list(ys),
+                variant=variant,
+                params=params,
+                rotation=0.0 if rotation is None else float(rotation),
+                tag=tag,
+            ),
+        )
 
     def work() -> dict[str, Any]:
         tags = ops._numbering(be, element, 1) if tag else []
@@ -2304,7 +2429,7 @@ def place_element(
             geom.xy(at),
             variant=variant,
             params=params,
-            rotation=float(rotation),
+            rotation=0.0 if rotation is None else float(rotation),
             scale=float(scale),
             tag=tags[0] if tags else None,
             tag_offset=tag_offset,
@@ -2320,7 +2445,7 @@ def place_element(
             "at": geom.xy(at),
             "variant": variant,
             "params": params or {},
-            "rotation": float(rotation),
+            "rotation": 0.0 if rotation is None else float(rotation),
             "scale": float(scale),
             "tag": tag,
         },
@@ -2328,96 +2453,55 @@ def place_element(
     )
 
 
-@mcp.tool(annotations=_MUTATING)
-def place_along(
-    type: str,  # noqa: A002
+def _placement_mode(
+    at: Any,
     start: Any,
     end: Any,
-    count: int | None = None,
-    spacing: float | None = None,
-    inset: float = 0.0,
-    variant: str | None = None,
-    params: dict[str, Any] | None = None,
-    rotation: float | None = None,
-    tag: bool = True,
-) -> dict[str, Any]:
-    """Repeat a catalogue element along a run, as one step.
+    xs: Any,
+    ys: Any,
+    count: Any,
+    spacing: Any,
+    inset: float,
+    scale: float,
+    tag_offset: Any,
+) -> str:
+    """Which of the three placement shapes was asked for, refusing the muddles by name.
 
-    Give either `count` (that many, evenly spread, ends included) or `spacing` (every that
-    far, starting at `start`). `inset` pulls the ends in, which is what keeps a column off
-    a corner. `rotation` defaults to the direction of the run, so a row of doors lies in
-    the wall rather than all facing the same way.
+    Exactly one coordinate set may be given, and a run/grid parameter passed for a
+    single placement (or the reverse) is a caller's mistake — a nominal `at` silently
+    ignoring `count` is how a frame of columns comes out as one column with ok: true.
     """
-    be = _placement_backend()
-    element = _entry(type)
-    return _placement(
-        be,
-        "place_along",
-        f"{len(_positions(start, end, count, spacing, inset))} x {element.label}",
-        {
-            "type": element.key,
-            "start": geom.xy(start),
-            "end": geom.xy(end),
-            "count": count,
-            "spacing": spacing,
-            "rotation": None if rotation is None else float(rotation),
-            "tag": tag,
-        },
-        lambda: ops.place_along(
-            be,
-            element,
-            geom.xy(start),
-            geom.xy(end),
-            count=count,
-            spacing=spacing,
-            inset=float(inset),
-            rotation=None if rotation is None else float(rotation),
-            variant=variant,
-            params=params,
-            tag=tag,
-        ),
-    )
-
-
-@mcp.tool(annotations=_MUTATING)
-def place_grid(
-    type: str,  # noqa: A002
-    xs: list[float],
-    ys: list[float],
-    variant: str | None = None,
-    params: dict[str, Any] | None = None,
-    rotation: float = 0.0,
-    tag: bool = True,
-) -> dict[str, Any]:
-    """Place a catalogue element at every intersection of two coordinate lists.
-
-    A frame of columns is dimensioned to its axis positions, so those are what this takes:
-    the same `xs` and `ys` the axis grid was drawn to.
-    """
-    be = _placement_backend()
-    element = _entry(type)
-    return _placement(
-        be,
-        "place_grid",
-        f"{len(xs) * len(ys)} x {element.label}",
-        {
-            "type": element.key,
-            "xs": list(xs),
-            "ys": list(ys),
-            "rotation": float(rotation),
-            "tag": tag,
-        },
-        lambda: ops.place_grid(
-            be,
-            element,
-            list(xs),
-            list(ys),
-            variant=variant,
-            params=params,
-            rotation=float(rotation),
-            tag=tag,
-        ),
-    )
+    chosen = []
+    if at is not None:
+        chosen.append("at")
+    if start is not None or end is not None:
+        chosen.append("start+end")
+    if xs is not None or ys is not None:
+        chosen.append("xs+ys")
+    if len(chosen) != 1:
+        raise ValueError(
+            "place_element takes exactly one placement shape: `at` for one element, "
+            f"`start`+`end` for a run, `xs`+`ys` for a grid — got {' + '.join(chosen) or 'none'}"
+        )
+    if (start is None) != (end is None):
+        raise ValueError("a run needs both `start` and `end`")
+    if (xs is None) != (ys is None):
+        raise ValueError("a grid needs both `xs` and `ys`")
+    if at is not None:
+        stray = [n for n, v in (("count", count), ("spacing", spacing)) if v is not None]
+        if float(inset) != 0.0:
+            stray.append("inset")
+        if stray:
+            raise ValueError(f"{', '.join(stray)} only make sense with start+end, not `at`")
+    else:
+        stray = []
+        if float(scale) != 1.0:
+            stray.append("scale")
+        if tag_offset is not None:
+            stray.append("tag_offset")
+        if stray:
+            raise ValueError(f"{', '.join(stray)} only make sense with `at`, not a run or grid")
+    return "at" if at is not None else ("along" if start is not None else "grid")
 
 
 @mcp.tool(annotations=_MUTATING)
@@ -2607,6 +2691,12 @@ def _surface_input_errors() -> None:
 
 
 _surface_input_errors()
+
+# The parameter description table — what the bare signatures cannot say. Applied here,
+# at import, so the served inputSchema carries it. Drift between the table and the
+# surface is returned by params.apply and gated by tests/test_param_descriptions.py,
+# never raised here: a stale table must not take the server down.
+params.apply(mcp._tool_manager.list_tools())
 
 
 def main() -> None:

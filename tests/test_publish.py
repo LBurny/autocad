@@ -411,7 +411,7 @@ def test_element_publish_closes_the_loop_over_the_tool_surface():
     entry arrives with its geometry fragment, and `place_element` imports the definition.
     """
     server.draw_wall(points=[[0, 0], [6000, 0]], thickness=200)
-    server.draw_door(hinge=[1000, 0], width=900)
+    server.draw_opening("door", [1000, 0], width=900)
     server.element_capture(steps=[1, 2], key="loop_door", layer="A-DOOR")
 
     report = server.element_publish(key="loop_door")
@@ -427,7 +427,7 @@ def test_element_publish_closes_the_loop_over_the_tool_surface():
     assert placed["ok"] is True
     be = server._state.backend
     assert [e.dxf.name for e in be.msp if e.dxftype() == "INSERT"] == ["ACADMCP_LOOP_DOOR"]
-    assert server.drawing_verify()["verdict"] == "matches"
+    assert server.drawing_check("verify")["checks"]["verify"]["verdict"] == "matches"
 
 
 def test_element_publish_refuses_a_key_that_is_not_in_the_catalogue(_tool_session):
@@ -454,7 +454,7 @@ def test_element_publish_names_the_undo_when_the_capture_was_undone(_tool_sessio
     """Tool level: the undone capture and the never-captured definition both arrive at
     publish_to as no fragment, and the recoveries differ — the wire has to say which."""
     server.draw_wall(points=[[0, 0], [6000, 0]], thickness=200)
-    server.draw_door(hinge=[1000, 0], width=900)
+    server.draw_opening("door", [1000, 0], width=900)
     server.element_capture(steps=[1, 2], key="undone_door", layer="A-DOOR")
     server.drawing_undo()
 
@@ -482,7 +482,7 @@ def test_a_capture_the_project_catalogue_lacks_survives_a_reopen(tmp_path, _tool
     catalog.reset()
     server.drawing_new(backend="dxf")
     server.draw_wall(points=[[0, 0], [6000, 0]], thickness=200)
-    server.draw_door(hinge=[1000, 0], width=900)
+    server.draw_opening("door", [1000, 0], width=900)
     server.element_capture(steps=[1, 2], key="orphan_door", layer="A-DOOR")
     path = str(tmp_path / "plan.dxf")
     server.drawing_save(path=path)

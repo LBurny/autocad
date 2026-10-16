@@ -26,33 +26,38 @@ def fresh_session():
     catalog.reset()
 
 
+def _critique(**kwargs):
+    """The critique lens of the merged drawing_check tool, unwrapped."""
+    return server.drawing_check("critique", **kwargs)["checks"]["critique"]
+
+
 def test_critique_tool_runs_end_to_end():
     server.draw_wall_with_openings(
         [[0, 0], [4000, 0], [4000, 3000], [0, 3000]],
         openings=[{"start": 1000, "width": 900, "kind": "door", "tag": "M0921"}],
         closed=True,
     )
-    server.draw_door([1000, 0], rotation=0, width=900)
-    out = server.drawing_critique()
+    server.draw_opening("door", [1000, 0], rotation=0, width=900)
+    out = _critique()
     assert out["ok"] and out["counts"]["error"] == 0
 
 
 def test_critique_reports_a_floating_door_as_an_error():
     server.draw_wall([[0, 0], [4000, 0]])
-    server.draw_door([0, 5000], rotation=0, width=900)
-    out = server.drawing_critique()
+    server.draw_opening("door", [0, 5000], rotation=0, width=900)
+    out = _critique()
     assert out["counts"]["error"] == 1
     assert out["issues"][0]["code"] == "door_without_opening"
 
 
 def test_critique_refuses_an_unknown_focus_with_a_readable_error():
     with pytest.raises(ValueError, match="bogus"):
-        server.drawing_critique(focus="bogus")
+        _critique(focus="bogus")
 
 
 def test_finalize_refuses_a_drawing_with_a_floating_door():
     server.draw_wall([[0, 0], [4000, 0]])
-    server.draw_door([0, 5000], rotation=0, width=900)
+    server.draw_opening("door", [0, 5000], rotation=0, width=900)
     with pytest.raises(BackendError, match="not finished"):
         server.drawing_finalize()
 

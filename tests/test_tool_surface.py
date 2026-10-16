@@ -22,7 +22,7 @@ def _tools() -> dict:
 
 def test_every_tool_carries_annotations():
     tools = _tools()
-    assert len(tools) == 56
+    assert len(tools) == 48
     missing = [name for name, t in tools.items() if t.annotations is None]
     assert not missing
 
@@ -44,13 +44,12 @@ def test_annotations_match_behaviour():
         "drawing_status",
         "drawing_history",
         "drawing_summary",
-        "drawing_verify",
+        "drawing_check",
         "listing_entities",
         "plugin_status",
         "step_list",
         "element_types",
         "library_list",
-        "drawing_check_standard",
         "template_list",
         "catalog_suggest",
     }
@@ -60,7 +59,6 @@ def test_annotations_match_behaviour():
 
     destructive = {
         "drawing_undo",
-        "drawing_rollback_to",
         "step_control",
         "drawing_new",
         "drawing_replay",

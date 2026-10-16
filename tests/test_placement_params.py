@@ -1,6 +1,6 @@
 """A placement step records what it drew, so a replay can reconstruct it.
 
-`place_element` / `place_along` / `place_grid` record their step params for the journal, and
+`place_element` (single, run and grid modes) records its step params for the journal, and
 rotation, scale and tag were dropped from that record — so `catalog_suggest` would group two
 placements differing only in rotation, and a replay could not rebuild the placement. This
 pins the recorded params; the behaviour is otherwise unchanged.
@@ -50,9 +50,7 @@ def test_place_element_records_the_defaults_too():
 
 
 def test_place_along_records_rotation_and_tag():
-    server.place_along(
-        type="column", start=[0, 0], end=[6000, 0], count=3, rotation=45.0, tag=False
-    )
+    server.place_element("column", start=[0, 0], end=[6000, 0], count=3, rotation=45.0, tag=False)
 
     params = _params()
     assert params["rotation"] == 45.0
@@ -62,13 +60,13 @@ def test_place_along_records_rotation_and_tag():
 def test_place_along_records_a_derived_rotation_as_none():
     """`rotation=None` means "derive from the run direction", which is a different fact from
     an explicit 0.0 — so the record keeps the None rather than a number nothing measured."""
-    server.place_along(type="column", start=[0, 0], end=[6000, 0], count=3, tag=False)
+    server.place_element("column", start=[0, 0], end=[6000, 0], count=3, tag=False)
 
     assert _params()["rotation"] is None
 
 
 def test_place_grid_records_rotation_and_tag():
-    server.place_grid(type="column", xs=[0, 6000], ys=[0], rotation=30.0, tag=False)
+    server.place_element("column", xs=[0, 6000], ys=[0], rotation=30.0, tag=False)
 
     params = _params()
     assert params["rotation"] == 30.0

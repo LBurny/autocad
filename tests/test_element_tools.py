@@ -125,7 +125,7 @@ def test_placing_one_element_sets_the_variant_size_on_the_block(plugin):
 def test_placing_a_run_numbers_from_the_tags_the_drawing_has(plugin):
     plugin.texts = ["M-1", "M-4"]
 
-    result = server.place_along("door", start=[0, 0], end=[6000, 0], count=3)
+    result = server.place_element("door", start=[0, 0], end=[6000, 0], count=3)
 
     assert result["placed"] == 3
     assert result["tags"] == ["M-5", "M-6", "M-7"]
@@ -134,7 +134,7 @@ def test_placing_a_run_numbers_from_the_tags_the_drawing_has(plugin):
 
 
 def test_a_run_lies_along_its_wall(plugin):
-    result = server.place_along("window", start=[0, 0], end=[0, 6000], count=2, variant="1200")
+    result = server.place_element("window", start=[0, 0], end=[0, 6000], count=2, variant="1200")
 
     assert result["rotation"] == 90
     assert all(placed["rotation"] == 90 for placed in _inserts(plugin))
@@ -142,7 +142,7 @@ def test_a_run_lies_along_its_wall(plugin):
 
 
 def test_a_grid_places_one_element_per_intersection(plugin):
-    result = server.place_grid("stud", xs=[0, 6000], ys=[10, 20, 30])
+    result = server.place_element("stud", xs=[0, 6000], ys=[10, 20, 30])
 
     assert result["placed"] == 6
     assert len(_inserts(plugin)) == 6
@@ -251,12 +251,12 @@ def test_place_element_is_one_undoable_step_on_dxf(fresh_dxf, monkeypatch):
     assert report["erased"] > 0 and server._state.backend.info()["entities"] == 0
 
 
-def test_place_along_on_dxf_lays_several_and_numbers_them(fresh_dxf, monkeypatch):
+def test_a_run_on_dxf_lays_several_and_numbers_them(fresh_dxf, monkeypatch):
     monkeypatch.setattr(
         catalog, "current", lambda paths=None: catalog.Catalog({"column": _op_element()})
     )
 
-    out = server.place_along("column", start=[0, 0], end=[6000, 0], count=3)
+    out = server.place_element("column", start=[0, 0], end=[6000, 0], count=3)
 
     assert out["ok"] and out["placed"] == 3
     assert out["tags"] == ["G-1", "G-2", "G-3"]
@@ -270,14 +270,14 @@ def test_a_second_placement_continues_the_numbering(fresh_dxf, monkeypatch):
         catalog, "current", lambda paths=None: catalog.Catalog({"column": _op_element()})
     )
 
-    server.place_along("column", start=[0, 0], end=[6000, 0], count=2)
-    second = server.place_along("column", start=[0, 3000], end=[6000, 3000], count=2)
+    server.place_element("column", start=[0, 0], end=[6000, 0], count=2)
+    second = server.place_element("column", start=[0, 3000], end=[6000, 3000], count=2)
 
     assert second["tags"] == ["G-3", "G-4"]
 
 
 def test_place_element_reports_the_tag_it_drew(fresh_dxf, monkeypatch):
-    """place_along and place_grid both answer with their `tags`; place_element answered
+    """the run and grid placements answer with their `tags`; a single placement answered
     only `placed: 1`, so the caller had to list entities to learn the number the tool
     had just drawn."""
     monkeypatch.setattr(

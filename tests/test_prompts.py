@@ -55,7 +55,7 @@ def test_floor_plan_names_the_core_ops():
         "draw_room",
         "place_element",
         "drawing_sheet",
-        "drawing_verify",
+        "drawing_check",
         "drawing_summary",
     ]:
         assert tool in text
@@ -79,5 +79,5 @@ def test_headless_to_live_names_replay_and_the_skip_rule():
 
 def test_drawing_review_forbids_an_unchecked_all_clear():
     text = _render("drawing_review")
-    assert "drawing_verify" in text
+    assert "drawing_check" in text
     assert "never" in text.lower()  # never claim "no issues" without running all three checks

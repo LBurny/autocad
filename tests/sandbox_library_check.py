@@ -138,9 +138,9 @@ async def draw(tools) -> None:  # noqa: ANN001 - the SDK's client wrapper, as it
         bool((status.get("standard") or {}).get("in_force")),
         str(status.get("standard")),
     )
-    checked = await tools.call("drawing_check_standard")
+    checked = (await tools.call("drawing_check", check="standard"))["checks"]["standard"]
     _check(
-        "drawing_check_standard is ok and returns an issues list",
+        "the standard lens is ok and returns an issues list",
         checked.get("ok") is True and isinstance(checked.get("issues"), list),
         str(checked),
     )
@@ -149,7 +149,7 @@ async def draw(tools) -> None:  # noqa: ANN001 - the SDK's client wrapper, as it
     # 3. a wall with three identical doors, which is the repetition suggest exists to find.
     await tools.call("draw_wall", points=[[0, 0], [9000, 0]], thickness=200)
     for _ in range(3):
-        await tools.call("draw_door", hinge=[2000, 0], width=900)
+        await tools.call("draw_opening", kind="door", at=[2000, 0], width=900)
     found = await tools.call("catalog_suggest", min_count=3)
     suggestions = found.get("suggestions") or []
     top = suggestions[0] if suggestions else {}
@@ -171,7 +171,7 @@ async def draw(tools) -> None:  # noqa: ANN001 - the SDK's client wrapper, as it
             captured.get("block") == BLOCK,
             str(captured),
         )
-        verified = await tools.call("drawing_verify")
+        verified = (await tools.call("drawing_check", check="verify"))["checks"]["verify"]
         _check(
             "the drawing still matches its journal after the capture",
             verified.get("verdict") == "matches",
@@ -204,7 +204,7 @@ async def draw(tools) -> None:  # noqa: ANN001 - the SDK's client wrapper, as it
     await tools.call("drawing_new", backend="dxf", template="gb_a3_arch")
     placed = await tools.call("place_element", type=KEY, at=[1000, 1000])
     _check("place_element placed the published element", placed.get("ok") is True, str(placed))
-    verified = await tools.call("drawing_verify")
+    verified = (await tools.call("drawing_check", check="verify"))["checks"]["verify"]
     _check(
         "the new drawing matches its journal",
         verified.get("verdict") == "matches",
