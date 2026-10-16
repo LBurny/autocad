@@ -282,7 +282,7 @@ class Catalog:
         return catalog
 
     @classmethod
-    def adopt(cls, payload: dict[str, Any] | None) -> Catalog:
+    def adopt(cls, payload: dict[str, Any] | None, origin_file: str | Path | None = None) -> Catalog:
         """Rebuild a catalogue from an identity embedded in a drawing.
 
         Tolerant, for the same reason loading is: a drawing whose embedded catalogue is
@@ -312,6 +312,14 @@ class Catalog:
                     for item in items
                 ]
             catalog.add_entries(entries, library=str(payload.get("library", "")), where="<drawing>")
+            if origin_file is not None:
+                # The drawing stands in as the catalogue file for what it carries: publish
+                # writes the fragment under `library/` beside the catalogue file, so an
+                # adopted entry's `geometry_file` resolves against the drawing's own
+                # directory. Where the drawing does not sit beside the catalogue, the
+                # resolution fails honestly ("is not there; republish"), as before.
+                for adopted_key in catalog.elements:
+                    catalog._files[adopted_key] = Path(origin_file)
             current().adopt_missing(catalog)
         return catalog
 
@@ -377,14 +385,17 @@ class Catalog:
         recorded digest disagrees with this catalogue's and the mismatch is reported there
         too, which is the same warning a differing catalogue has always produced.
 
-        An adopted entry has no catalogue file behind it, exactly like one `add_entries` reads
-        from a drawing: `source_file` says by name that a `geometry_file` cannot be resolved
-        for it rather than guessing a path.
+        An adopted entry's resolution base travels with it: `adopt(origin_file=...)` records
+        the drawing's own path as the file behind each entry, so a `geometry_file` resolves
+        beside the drawing. Entries adopted without an origin file keep the old answer —
+        `source_file` says None rather than guessing a path.
         """
         collisions = [key for key in other.elements if key in self.elements]
         for key, element in other.elements.items():
             if key not in self.elements:
                 self.elements[key] = element
+                if key in other._files:
+                    self._files[key] = other._files[key]
         return collisions
 
     def register(self, payload: dict[str, Any]) -> Element:
@@ -437,12 +448,13 @@ class Catalog:
         return sorted({e.source for e in self.elements.values() if e.source})
 
     def source_file(self, key: str) -> Path | None:
-        """The catalogue file an entry was read from, or None.
+        """The file an entry resolves its `geometry_file` against, or None.
 
-        None for a registered or adopted entry: a capture adds an entry at runtime and a
-        drawing's embedded copy has no file behind it, so a `geometry_file` relative to a
-        catalogue file cannot be resolved for one — and the caller is told by name rather
-        than the path being guessed.
+        The catalogue file an entry was read from, or — for one adopted from a drawing's
+        embedded copy — the drawing itself, which stands in as the catalogue file (publish
+        writes `library/` beside the catalogue, so a drawing saved beside it resolves).
+        None only for a runtime-captured entry: no file of any kind stands behind it, and
+        the caller is told by name rather than the path being guessed.
         """
         return self._files.get(str(key or "").strip().lower())
 
@@ -454,8 +466,8 @@ class Catalog:
         not a question it asks. For a captured entry the fragment is what a *fresh* drawing
         imports, so False means: the drawing that captured it can still place it, and any
         other needs element_publish first. False also when the fragment path cannot be
-        resolved at all — a runtime capture or a drawing-adopted entry has no catalogue
-        file to resolve against, which `source_file` says by returning None.
+        resolved at all — a runtime capture has no catalogue file behind it, and an adopted
+        entry whose drawing sits away from its catalogue resolves to nothing that exists.
         """
         if element.op != "insert_captured":
             return None

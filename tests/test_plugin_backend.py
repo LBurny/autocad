@@ -21,7 +21,12 @@ from acadmcp.backends.plugin import PluginBackend  # noqa: E402
 
 
 class FakeClient:
-    """Keeps the steps the way the plugin's journal does: 1-based, with state."""
+    """Keeps the steps the way the plugin's journal does: 1-based, with state.
+
+    The state vocabulary is the wire's own: RpcServer.Row serialises StepState.Done
+    as "done", not the Python journal's "applied" — a fake that said "applied" once
+    let an undo that matched nothing pass its test.
+    """
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
@@ -36,14 +41,14 @@ class FakeClient:
     def call(self, method: str, **payload: Any) -> Any:
         self.calls.append((method, payload))
         if method == "apply":
-            step = dict(payload["step"], index=len(self.steps) + 1, state="applied")
+            step = dict(payload["step"], index=len(self.steps) + 1, state="done")
             self.steps.append(step)
             return {"result": {"ok": True, "message": "", "step": step}}
         if method == "get_steps":
             return {"steps": list(self.steps)}
         if method == "rollback_to":
             for s in self.steps:
-                if s["index"] > payload["index"] and s["state"] == "applied":
+                if s["index"] > payload["index"] and s["state"] == "done":
                     s["state"] = "planned"
             return {"result": {"ok": True, "message": "", "touched": []}}
         if method in (
@@ -82,7 +87,7 @@ def test_undo_rolls_back_to_before_the_last_applied_step():
 
     assert ("rollback_to", {"index": 1}) in client.calls
     assert client.steps[1]["state"] == "planned"
-    assert client.steps[0]["state"] == "applied"
+    assert client.steps[0]["state"] == "done"
     assert report["undone"] == [{"index": 2, "op": "draw_circle", "label": ""}]
 
 
@@ -140,7 +145,7 @@ def test_step_rows_carry_the_entity_count_the_contract_puts_there():
     """
     be, client = _backend()
     client.steps = [
-        {"index": 1, "state": "applied", "op": "draw_room", "handles": ["1F", "20", "21"]}
+        {"index": 1, "state": "done", "op": "draw_room", "handles": ["1F", "20", "21"]}
     ]
 
     assert be.step_rows()[0]["entities"] == 3
@@ -149,7 +154,7 @@ def test_step_rows_carry_the_entity_count_the_contract_puts_there():
 def test_a_row_with_no_handles_says_it_cannot_count_rather_than_counting_zero():
     """An unknown count is unknown, not nought, and the reader is told so."""
     be, client = _backend()
-    client.steps = [{"index": 1, "state": "applied", "op": "draw-room"}]
+    client.steps = [{"index": 1, "state": "done", "op": "draw-room"}]
 
     assert be.step_rows()[0]["entities"] is None
 
@@ -157,7 +162,19 @@ def test_a_row_with_no_handles_says_it_cannot_count_rather_than_counting_zero():
 def test_a_row_that_already_counts_is_left_alone():
     be, client = _backend()
     client.steps = [
-        {"index": 1, "state": "applied", "op": "draw_room", "handles": [], "entities": 7}
+        {"index": 1, "state": "done", "op": "draw_room", "handles": [], "entities": 7}
     ]
 
     assert be.step_rows()[0]["entities"] == 7
+
+
+def test_undo_reports_how_many_entities_it_erased():
+    """Same reply shape as the recording backend: `erased` is the handle count of the
+    steps rolled back, so a caller scripting both backends reads one key."""
+    be, client = _backend()
+    client.steps = [
+        {"index": 1, "state": "done", "op": "draw_wall", "handles": ["1F", "20"], "label": ""},
+        {"index": 2, "state": "done", "op": "draw_door", "handles": ["21"], "label": ""},
+    ]
+    report = be.undo(1)
+    assert report["erased"] == 1

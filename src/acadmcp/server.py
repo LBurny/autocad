@@ -836,7 +836,12 @@ def drawing_undo(count: int = 1) -> dict[str, Any]:
 
 @mcp.tool(annotations=_MUTATING)
 def drawing_redo(count: int = 1) -> dict[str, Any]:
-    """Re-draw steps that drawing_undo took back (newest work first)."""
+    """Re-draw steps that drawing_undo took back, oldest first.
+
+    Undone steps always form a contiguous tail, so "oldest first" replays history in
+    the order it was drawn — after undo(count=2), one redo restores the earlier of the
+    two steps, not the later one.
+    """
     be = _state.require()
     redo = getattr(be, "redo", None)
     if redo is None:
@@ -1041,6 +1046,9 @@ def drawing_finalize() -> dict[str, Any]:
     failed, so a floating door or a lost entity is reported, not shipped. A drawing this
     server did not draw gets "no_baseline" and is refused for that reason: the gate only
     vouches for what the journal accounts for. Warnings do not block; they are reported.
+
+    A sheet is not required: a sheetless plan is finalizable, because a sheet is furniture
+    around the drawing, not part of what the gate vouches for.
     """
     report = drawing_verify()
     verdict = report.get("verdict")
@@ -2278,6 +2286,12 @@ def place_element(
     overrides individual properties on top. With tag=True the next free tag number is
     derived from the tags already in the drawing — numbers are never stored, so a tag
     added by hand cannot desynchronise them.
+
+    `at` is the element's *own* reference point, and it differs per kind: a door's is its
+    **hinge** (the jamb end of the opening, not its centre), a window's is the opening's
+    centre, a column's its centre, a lift's its corner. When placing into openings cut by
+    draw_wall_with_openings, prefer that tool's `element` key — it does the hinge maths
+    itself — or read the jamb off the reply's `opening_positions`.
     """
     be = _placement_backend()
     element = _entry(type)

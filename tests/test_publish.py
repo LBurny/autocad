@@ -532,3 +532,34 @@ def test_an_entry_with_no_fragment_carries_no_fragment_flag():
     )
     row = _element_row(server.element_types(check_library=False), "plain_col")
     assert "fragment_ready" not in row
+
+
+def test_a_drawing_adopted_entry_resolves_its_fragment_beside_the_drawing(tmp_path):
+    """Publish beside the drawing, reopen the drawing, then place from the adopted
+    catalogue — the capture → publish → reopen → place flow the cc-journal sandbox
+    exercised. The embedded entry has no catalogue *file* behind it, but the publish
+    convention (library/ beside the elements.json beside the drawing) lets the
+    drawing's own directory stand in as the resolution base."""
+    be = make_backend("dxf")
+    _capture_door(be)
+    entry = catalog.current().get(KEY)
+    catalog.current().publish_to(str(tmp_path / "elements.json"), entry, _fragment(be, entry))
+    be.note_catalog(catalog.current())
+    be.save(str(tmp_path / "a.dxf"))
+
+    # A fresh session reloads from files alone, and nothing names tmp_path/elements.json
+    # (publish with an explicit path creates no acadmcp.json), so the entry now reaches
+    # the session only through the drawing's embedded copy.
+    catalog.reset()
+    settings.reset()
+    reopened = make_backend("dxf", path=str(tmp_path / "a.dxf"))
+    embedded = reopened.embedded_catalog()
+    assert embedded is not None and embedded.get(KEY) is not None
+    catalog.use(embedded)
+
+    assert embedded.fragment_ready(embedded.get(KEY)) is True
+
+    fresh = make_backend("dxf")
+    with fresh.step("place_element"):
+        ops.place_element(fresh, embedded.get(KEY), (500.0, 500.0))
+    assert [e for e in fresh.msp if e.dxftype() == "INSERT"]

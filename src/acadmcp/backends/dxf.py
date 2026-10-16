@@ -783,7 +783,10 @@ class DxfBackend(RecordingBackend):
         payload = self.journal.meta.get("catalog")
         if not isinstance(payload, dict) or not payload:
             return None
-        return Catalog.adopt(payload)
+        # The drawing's own path becomes the adopted entries' resolution base, so a
+        # fragment published beside the drawing (`library/` next to the elements.json
+        # next to the file) resolves for a session that never saw the catalogue file.
+        return Catalog.adopt(payload, origin_file=self.path or None)
 
     def entities(self, layer: str | None = None, limit: int = 200) -> list[dict]:
         """Every entity the drawing holds, model and paper alike.

@@ -28,6 +28,12 @@ from ..standards import lineweight_centimm
 from .base import BackendError
 from .recording import RecordingBackend
 
+#: Step states on the wire that mean "in the drawing". The plugin serialises
+#: StepState.Done as "done" (RpcServer.Row lowercases the enum name), while the Python
+#: journal says "applied" — filtering wire rows for "applied" alone matched nothing,
+#: and an undo over a live plugin reported ok while erasing nothing.
+_APPLIED_WIRE_STATES = frozenset({"applied", "done"})
+
 
 class StepResult:
     """What the plugin reported about one committed step.
@@ -419,7 +425,7 @@ class PluginBackend(RecordingBackend):
         the palette and the MCP tools must never disagree about what is drawn.
         """
         steps = self.client.call("get_steps", offset=0, limit=10000)["steps"]
-        applied = [s for s in steps if s["state"] == "applied"]
+        applied = [s for s in steps if s["state"] in _APPLIED_WIRE_STATES]
         if not applied:
             return {"undone": [], "erased": 0, "missing": 0}
         doomed = applied[-max(1, int(count)) :]
@@ -433,6 +439,9 @@ class PluginBackend(RecordingBackend):
                 {"index": s["index"], "op": s["op"], "label": s.get("label", "")}
                 for s in reversed(doomed)
             ],
+            # The recording backend answers the same key with the same meaning, so a
+            # caller scripting both reads one shape.
+            "erased": sum(len(s.get("handles") or []) for s in doomed),
             "response": response.get("result", {}),
         }
 
@@ -490,7 +499,7 @@ class PluginBackend(RecordingBackend):
         doomed = [
             s
             for s in steps
-            if str(s.get("state", "")) == "applied" and int(s.get("index", 0)) > int(index)
+            if str(s.get("state", "")) in _APPLIED_WIRE_STATES and int(s.get("index", 0)) > int(index)
         ]
         response = StepSession(self.client).rollback_to(int(index))
         result = response.get("result", {}) if isinstance(response, dict) else {}

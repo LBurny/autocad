@@ -106,7 +106,7 @@ tests/                  test_geom.py, test_backends.py, test_journal.py, test_re
 ## Commands
 
 ```bash
-uv run pytest -q                      # 732 tests, ~15s, no AutoCAD required
+uv run pytest -q                      # 734 tests, ~15s, no AutoCAD required
 uv run pytest tests/test_terms.py -q  # adding a tool without a vocabulary entry fails here
 uv run pytest tests/test_prompts.py -q  # a prompt naming a tool that does not exist fails here
 uv run python scripts/check_doc_numbers.py   # docs and evaluation answers vs the tree
@@ -746,6 +746,25 @@ copy embedded in the drawing, then the package's starter; a difference is report
 than it writes (1), and the reason is specific: every `from_dict` failure lands in the dxf
 reader's `journal_unreadable`, which is *reported rather than raised*, so without the guard a
 future format would silently degrade to "no journal".
+
+**An adopted entry resolves its fragment beside the drawing.** `Catalog.adopt` takes the
+drawing's own path as `origin_file` and records it as each adopted entry's `source_file`, so
+a `geometry_file` published beside the catalogue (`library/<key>.dxf`) resolves for a session
+that never saw the catalogue file — the capture → publish → reopen → place flow, which a
+sandbox agent could not complete before this (the refusal said "publish it into a project
+catalogue file and reopen" even though it had). A drawing saved away from its catalogue still
+fails honestly: the fragment "is not there; republish". Measured against the sandbox's own
+artefacts: after reopening the capturing drawing, `fragment_ready` is True and a fresh
+drawing places the element.
+
+**The plugin wire spells `applied` as `done`.** `RpcServer.Row` lowercases the StepState enum
+name, while the Python journal's vocabulary is `applied`/`undone`. `PluginBackend.undo`
+filtered wire rows for `"applied"`, matched nothing, and reported `ok` while erasing nothing
+— measured live: 40 entities before the undo, 40 after, and the fake client in
+`test_plugin_backend.py` said `"applied"`, which is how the bug survived its own test. The
+fake now speaks the wire's vocabulary (`done`/`planned`), and the filters accept both
+spellings via `_APPLIED_WIRE_STATES`. `critique.py`/`suggest.py` already keep the dual
+vocabulary (`INACTIVE_STATES`); extend those tables, never translate one wire into the other.
 
 **`summary.py` derives, it never remembers.** A room's area is recomputed from the recorded
 boundary with the same `geom.inner_boundary` call `draw_room` makes, so a summary that
