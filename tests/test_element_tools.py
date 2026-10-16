@@ -274,3 +274,26 @@ def test_a_second_placement_continues_the_numbering(fresh_dxf, monkeypatch):
     second = server.place_along("column", start=[0, 3000], end=[6000, 3000], count=2)
 
     assert second["tags"] == ["G-3", "G-4"]
+
+
+def test_place_element_reports_the_tag_it_drew(fresh_dxf, monkeypatch):
+    """place_along and place_grid both answer with their `tags`; place_element answered
+    only `placed: 1`, so the caller had to list entities to learn the number the tool
+    had just drawn."""
+    monkeypatch.setattr(
+        catalog, "current", lambda paths=None: catalog.Catalog({"column": _op_element()})
+    )
+
+    out = server.place_element("column", at=[0, 0], variant="600")
+
+    assert out["tag"] == "G-1"
+
+
+def test_place_element_with_tag_false_reports_no_tag(fresh_dxf, monkeypatch):
+    monkeypatch.setattr(
+        catalog, "current", lambda paths=None: catalog.Catalog({"column": _op_element()})
+    )
+
+    out = server.place_element("column", at=[0, 0], variant="600", tag=False)
+
+    assert out["tag"] is None

@@ -104,6 +104,16 @@ class Backend(Protocol):
         """
         ...
 
+    def text_scale(self) -> float:
+        """Model millimetres per paper millimetre for text sizing — 100.0 at 1:100.
+
+        A text's paper height is its model height over this number, and the nominal
+        series the conformance check speaks in is paper heights, so ops draws each
+        role's paper height times this. A driver with no page setup answers 100.0, the
+        same assumption the check names when a drawing carries no sheet.
+        """
+        ...
+
     def plot_pdf(
         self, path: str, *, paper: Any, scale: tuple[int, int], theme: str = "light"
     ) -> str:

@@ -446,6 +446,27 @@ class Catalog:
         """
         return self._files.get(str(key or "").strip().lower())
 
+    def fragment_ready(self, element: Element) -> bool | None:
+        """Whether a captured element's geometry fragment resolves to a file on disk.
+
+        None for an entry with no fragment to resolve — anything whose `op` is not
+        `insert_captured` places from a library block or a parametric twin, so "ready" is
+        not a question it asks. For a captured entry the fragment is what a *fresh* drawing
+        imports, so False means: the drawing that captured it can still place it, and any
+        other needs element_publish first. False also when the fragment path cannot be
+        resolved at all — a runtime capture or a drawing-adopted entry has no catalogue
+        file to resolve against, which `source_file` says by returning None.
+        """
+        if element.op != "insert_captured":
+            return None
+        geometry_file = str(element.origin.get("geometry_file", "")).strip()
+        if not geometry_file:
+            return False
+        base = self.source_file(element.key)
+        if base is None:
+            return False
+        return (Path(base).parent / geometry_file).is_file()
+
     # --- the check that matters -------------------------------------------
 
     def check_against(self, blocks: dict[str, list[str]]) -> list[str]:

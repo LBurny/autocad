@@ -459,6 +459,8 @@ class DxfBackend(RecordingBackend):
             if found:
                 self.sheet = found
                 self._sheet_layout = layout
+                numerator, denominator = sheet.resolve_scale(found["scale"])
+                self._text_scale = denominator / numerator
                 return
 
     def set_page_setup(
@@ -492,6 +494,8 @@ class DxfBackend(RecordingBackend):
             target.dxf.current_style_sheet = style_sheet
         self._sheet_layout = target
         self.sheet = self._sheet_from_layout(target)
+        # Text sized after this lands on the nominal series at the scale actually plotted.
+        self._text_scale = denominator / numerator
         return dict(self.sheet)
 
     def save(self, path: str | None = None) -> str:

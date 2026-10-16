@@ -67,6 +67,13 @@ class RecordingBackend:
         self._label: str | None = None
         self._params: dict[str, Any] = {}
         self._pending: list[dict[str, Any]] = []
+        #: Model millimetres per paper millimetre for text sizing — 100 at 1:100.
+        #: set_page_setup rewrites it from the sheet's own ratio, so text drawn after
+        #: the sheet exists lands on the nominal series at the scale actually plotted.
+        self._text_scale = 100.0
+
+    def text_scale(self) -> float:
+        return self._text_scale
 
     # --- sheets ------------------------------------------------------------
     def _no_sheet(self, what: str) -> NoReturn:

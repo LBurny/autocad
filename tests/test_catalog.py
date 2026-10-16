@@ -361,6 +361,9 @@ class Recording:
         self.inserts.append({"block": block, "at": at, **kwargs})
         return len(self.inserts) - 1
 
+    def text_scale(self) -> float:
+        return 100.0
+
     def text(self, pos, content, height, *, layer="0", rotation=0.0, align="left"):
         self.texts.append({"text": content, "at": pos, "layer": layer})
         return len(self.texts) - 1

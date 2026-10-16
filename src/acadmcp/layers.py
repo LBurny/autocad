@@ -38,13 +38,66 @@ LAYERS: dict[str, tuple[int, str]] = {
     "A-SHEET-TEXT": (7, "CONTINUOUS"),
 }
 
-# Text heights in mm, matched to a 1:100 plot.
-H_TEXT = 300.0
-H_ROOM_NAME = 350.0
-H_ROOM_AREA = 250.0
-H_DIM = 250.0
-H_TAG = 180.0
-H_AXIS = 500.0
+#: GB/T 50001's nominal text-height series, in *paper* millimetres. The checkable copy
+#: lives in data/standards.json (gbt50001/text_heights) and a test keeps the two equal —
+#: drawing needs the series without reading the standard back.
+TEXT_HEIGHT_SERIES: tuple[float, ...] = (2.5, 3.5, 5.0, 7.0, 10.0, 14.0, 20.0)
+
+#: Paper text height per role, in mm, every one inside TEXT_HEIGHT_SERIES. A text's
+#: paper height is its model height over the plot scale, so drawing a role at its
+#: paper height times the scale — text_height() — passes the conformance check by
+#: construction, at any scale, rather than only at the 1:100 the constants assume.
+PAPER_HEIGHTS: dict[str, float] = {
+    "text": 3.5,
+    "room_name": 3.5,
+    "room_area": 2.5,
+    "dim": 2.5,
+    "tag": 2.5,
+    "axis": 5.0,
+}
+
+
+def text_height(role: str, scale: float = 100.0) -> float:
+    """The model-space height for `role` when the sheet plots at 1:`scale`.
+
+    `scale` is model millimetres per paper millimetre — the backend's text_scale(),
+    100.0 for 1:100. An unknown role is refused by name, the same rule a misspelt
+    hatch pattern follows.
+    """
+    try:
+        paper = PAPER_HEIGHTS[role]
+    except KeyError:
+        raise ValueError(
+            f"no text-height role {role!r}; the roles are: {', '.join(sorted(PAPER_HEIGHTS))}"
+        ) from None
+    return paper * scale
+
+
+def snap_to_series(height: float, scale: float = 100.0) -> float:
+    """The largest series height not exceeding `height`, in paper terms.
+
+    fit_text_height's answer is whatever the width forces — 320 mm for a squeezed
+    room name — which is 3.2 mm on paper at 1:100, off the series, and the
+    conformance check flags it. Rounding *down* to the next series value keeps the
+    text inside its box (rounding up would overflow it). Below the series minimum
+    the height is returned unchanged: a caption that only fits at 2 mm on paper is a
+    real constraint, not something a larger height fixes.
+    """
+    paper = height / scale
+    candidates = [nominal for nominal in TEXT_HEIGHT_SERIES if nominal <= paper + 1e-9]
+    if not candidates:
+        return height
+    return min(height, max(candidates) * scale)
+
+
+# Text heights in mm at 1:100 — text_height(role) at the default scale, kept as names
+# because the ops layer, the tests and the doc comments speak them.
+H_TEXT = text_height("text")
+H_ROOM_NAME = text_height("room_name")
+H_ROOM_AREA = text_height("room_area")
+H_DIM = text_height("dim")
+H_TAG = text_height("tag")
+H_AXIS = text_height("axis")
 
 #: Unit suffix for reported areas. Superscript-two rather than the single-codepoint
 #: U+33A1 square-metre sign: measured in AutoCAD, U+33A1 renders as "?" under the

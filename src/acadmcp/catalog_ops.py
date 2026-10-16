@@ -323,7 +323,15 @@ def _import_fragment_if_needed(be, block: str) -> None:
         return
     geometry_file = str(element.origin.get("geometry_file", "")).strip()
     if not geometry_file:
-        return
+        # The catalogue knows the element, so it was captured — but a capture's definition
+        # lives only in the drawing that captured it, and this drawing is not that one.
+        # Naming element_capture here would send the caller in a circle; publishing is the
+        # step that lets a fresh drawing place it.
+        raise BackendError(
+            f"'{element.key}' was captured but never published, so its block definition "
+            "lives only in the drawing that captured it. Open that drawing and publish it "
+            "(element_publish), or capture the element again here (element_capture)"
+        )
 
     base = loaded.source_file(element.key)
     if base is None:

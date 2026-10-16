@@ -485,3 +485,15 @@ def test_capture_refuses_a_capture_step(be):
 
     with pytest.raises(ValueError, match="cannot travel in a geometry fragment"):
         _capture(be, [3], key="capture_of_capture")
+
+
+def test_placing_an_unpublished_capture_in_a_fresh_drawing_names_element_publish(be):
+    """A captured entry is in the catalogue from the moment of capture, but its block
+    definition lives only in the drawing that captured it. Placing it into a fresh
+    drawing has to name publishing as the missing step — telling the caller to
+    *capture* an element they just captured sends them in a circle."""
+    _capture(be, _door_steps(be))
+    fresh = make_backend("dxf")
+    entry = catalog.current().elements[KEY]
+    with pytest.raises(BackendError, match="element_publish"):
+        ops.place_element(fresh, entry, (500.0, 500.0))

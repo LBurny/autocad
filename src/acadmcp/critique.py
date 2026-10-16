@@ -462,12 +462,23 @@ def _and_list(values: Sequence[int]) -> str:
     return ", ".join(parts[:-1]) + f" and {parts[-1]}"
 
 
+#: A dash-numbered tag (M-1, KZ-12) is derived per *instance* from the drawing's own
+#: numbering, so two of them means the numbering went stale. A dashless tag (M0921,
+#: C1821) is a *model* designation — the catalogue's variant names take that shape and
+#: a GB/T door schedule shares one across every door of that type — so sharing it is
+#: standard practice, not a duplicate.
+_INSTANCE_TAG = re.compile(r"^[A-Za-z]+-\d+$")
+
+
 def _check_tag_duplicates(
     rows: Sequence[dict[str, Any]], tag_prefixes: dict[str, str]
 ) -> list[Issue]:
-    """One tag names one component, so the same tag on two applied rows is a finding."""
+    """One instance tag names one component: the same dash-numbered tag on two rows
+    is a finding. Model designations are meant to be shared and are not."""
     by_tag: dict[str, list[int]] = {}
     for row, _kind, tag in _explicit_tags(rows):
+        if not _INSTANCE_TAG.match(tag):
+            continue
         steps = by_tag.setdefault(tag, [])
         if row["index"] not in steps:
             steps.append(row["index"])
@@ -475,8 +486,8 @@ def _check_tag_duplicates(
         Issue(
             "tag_duplicates",
             "warning",
-            f"tag {tag!r} is recorded on steps {_and_list(steps)}: one tag names one "
-            "component, so one of these is a duplicate",
+            f"tag {tag!r} is recorded on steps {_and_list(steps)}: instance tags are "
+            "numbered per component, so one of these is a duplicate",
             steps[0],
             {"tag": tag, "steps": steps},
         )

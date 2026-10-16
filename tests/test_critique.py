@@ -207,9 +207,20 @@ def test_an_untagged_opening_is_not_a_tag_problem():
     assert critique.run([untagged], PREFIXES, focus="tag_format")["issues"] == []
 
 
-def test_two_rows_with_the_same_tag_warn_naming_both_steps():
+def test_a_shared_model_number_is_not_a_duplicate():
+    """M0921 names a *model* — a GB/T door schedule shares it across every door of
+    that type, and the catalogue's own variants are named exactly this way. Flagging
+    it faults the drawing for standard practice."""
     first = _door((1000, 0), tag="M0921", index=1)
     second = _door((3000, 0), tag="M0921", index=5)
+    assert critique.run([first, second], PREFIXES, focus="tag_duplicates")["issues"] == []
+
+
+def test_a_dash_numbered_instance_tag_twice_is_a_duplicate():
+    """M-1 is derived per instance from the drawing's own numbering, so two of them
+    means the numbering went stale — that is the duplicate worth a warning."""
+    first = _door((1000, 0), tag="M-1", index=1)
+    second = _door((3000, 0), tag="M-1", index=5)
     report = critique.run([first, second], PREFIXES, focus="tag_duplicates")
     assert len(report["issues"]) == 1
     assert report["issues"][0]["detail"]["steps"] == [1, 5]

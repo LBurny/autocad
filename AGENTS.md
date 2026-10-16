@@ -88,6 +88,11 @@ tests/                  test_geom.py, test_backends.py, test_journal.py, test_re
                         test_live_screenshot.py (no restore, no rename on export),
                         test_output_schemas.py (the read tools' published schemas, and
                         no key lost between the reply and the wire),
+                        test_text_scale.py (paper heights × the sheet's scale, snapped
+                        to the GB/T series),
+                        test_dimension_readability.py (a reversed span never reads
+                        mirrored),
+                        test_room_label.py (label_offset reaches the label, both paths),
                         sandbox_driver.py (fresh-server sandbox for live drawing exercises),
                         sandbox_library_check.py (draw → check → suggest → capture → publish
                         → place in a fresh drawing, over the wire),
@@ -101,7 +106,7 @@ tests/                  test_geom.py, test_backends.py, test_journal.py, test_re
 ## Commands
 
 ```bash
-uv run pytest -q                      # 702 tests, ~14s, no AutoCAD required
+uv run pytest -q                      # 732 tests, ~15s, no AutoCAD required
 uv run pytest tests/test_terms.py -q  # adding a tool without a vocabulary entry fails here
 uv run pytest tests/test_prompts.py -q  # a prompt naming a tool that does not exist fails here
 uv run python scripts/check_doc_numbers.py   # docs and evaluation answers vs the tree
@@ -280,6 +285,30 @@ style's font does **not** repaint existing text — `set_text_style` issues
 
 **Area unit.** Use `m²` (U+00B2). The single-codepoint `㎡` (U+33A1) measures as
 `?` under every font tested, including `gbcbig.shx`, `simhei.ttf` and `simsun.ttc`.
+
+**Text height is a paper measure, so every text call site is scale-aware.** GB/T's
+nominal series (2.5/3.5/5/7/10/14/20) is what `drawing_check_standard` measures
+against, as *paper* height = model height ÷ the sheet's scale — and the shipped
+constants were off it even at 1:100 (H_TEXT 300 → 3.0 mm, H_TAG 180 → 1.8 mm),
+while a factory drawn at 1:200 produced 81 `text_height_off_series` errors in one
+sandbox run because nothing followed the sheet. Now: `layers.text_height(role,
+be.text_scale())` at every call site (a backend with no page setup answers 100.0,
+so a sheetless drawing behaves exactly as before), and anything shrunk by
+`fit_text_height` is passed through `layers.snap_to_series` afterwards, because a
+fitted height like 457 mm is off-series whatever the scale. A room too narrow for
+even 2.5 mm of paper text still fails the check — correctly; the fix is a wider
+room or a leader note, and one sandbox agent made exactly that call on its own.
+
+**An instance tag is unique; a model designation is shared.** `tag_duplicates` only
+flags the dash-numbered kind (M-1, KZ-12): M0921 on five doors is GB/T convention,
+not five findings, and flagging it taught sandbox agents to hand-edit good tags.
+
+**A reversed dimension span used to read mirrored, silently.** `dimension_between`
+now normalises the span (`_readable_span`, negating the offset with the swap) so
+either point order draws the same line on the same side. The checker's blind spot
+that remains: `door_without_opening` and `opening_fits_run` read `draw_door` /
+`draw_wall_with_openings` steps only, so a door placed by `place_element` is not
+yet checked against its opening — sandbox agents verify those by hand.
 
 **COM is not reliable without retries.** AutoCAD answers `RPC_E_CALL_REJECTED`
 while mid-command or repainting, which a few-hundred-entity run hits constantly.

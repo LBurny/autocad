@@ -268,6 +268,7 @@ def test_a_closed_ring_without_openings_is_one_mitred_wall(be):
         "clamped_openings": 0,
         "total_length": 144000.0,
         "symbols": 0,
+        "opening_positions": [],
         "closed": True,
     }
     assert (-120.0, -120.0) in _wall_vertices(be)
@@ -421,3 +422,56 @@ def test_a_room_can_draw_the_face_its_area_is_measured_to(be):
     assert (min(xs), max(xs)) == (100.0, 3900.0)
     assert (min(ys), max(ys)) == (100.0, 2900.0)
     assert report["area_m2"] == pytest.approx(3800 * 2800 / 1e6, rel=1e-6)
+
+
+def test_the_reply_names_where_each_opening_landed(be):
+    report = ops.draw_wall_with_openings(
+        be,
+        [(0, 0), (10000, 0)],
+        [
+            {"start": 2000, "width": 1000, "kind": "door"},
+            {"start": 6000, "width": 1500, "kind": "window"},
+        ],
+        200,
+    )
+    assert report["opening_positions"] == [
+        {"start": 2000.0, "width": 1000.0, "kind": "door", "at": [2500.0, 0.0]},
+        {"start": 6000.0, "width": 1500.0, "kind": "window", "at": [6750.0, 0.0]},
+    ]
+
+
+def test_opening_positions_on_a_closed_ring_report_the_caller_s_own_start(be):
+    # The ring is rebased internally so the run starts at the first opening, but the
+    # caller measured 12000 along the ring from its first vertex — the reply answers in
+    # the caller's own numbers, plus the absolute point they can check against intent.
+    report = ops.draw_wall_with_openings(
+        be,
+        [(0, 0), (10000, 0), (10000, 5000), (0, 5000)],
+        [{"start": 12000, "width": 900, "kind": "door"}],
+        200,
+        closed=True,
+    )
+    (pos,) = report["opening_positions"]
+    assert pos["start"] == 12000.0
+    assert pos["at"] == [10000.0, 2450.0]
+
+
+def test_a_dropped_opening_is_not_in_the_positions(be):
+    report = ops.draw_wall_with_openings(
+        be, [(0, 0), (5000, 0)], [{"start": 6000, "width": 900, "kind": "door"}], 200
+    )
+    assert report["opening_positions"] == []
+
+
+def test_a_trimmed_opening_reports_its_trimmed_width(be):
+    report = ops.draw_wall_with_openings(
+        be, [(0, 0), (5000, 0)], [{"start": 4000, "width": 1500, "kind": "door"}], 200
+    )
+    (pos,) = report["opening_positions"]
+    assert pos["width"] == 1000.0
+    assert pos["at"] == [4500.0, 0.0]
+
+
+def test_a_closed_ring_without_openings_reports_no_positions(be):
+    report = ops.draw_wall_with_openings(be, RING, [], 240, closed=True)
+    assert report["opening_positions"] == []

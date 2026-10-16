@@ -499,3 +499,36 @@ def test_a_capture_the_project_catalogue_lacks_survives_a_reopen(tmp_path, _tool
     assert placed["ok"] is True
     be = server._state.backend
     assert [e.dxf.name for e in be.msp if e.dxftype() == "INSERT"] == ["ACADMCP_ORPHAN_DOOR"]
+
+
+# ---------------------------------------------------------------------------
+# element_types says whether a captured entry can leave its drawing
+# ---------------------------------------------------------------------------
+
+
+def _element_row(report, key):
+    return next(row for rows in report["categories"].values() for row in rows if row["key"] == key)
+
+
+def test_element_types_reports_a_captured_entry_is_not_placeable_elsewhere():
+    be = make_backend("dxf")
+    _capture_door(be)
+    row = _element_row(server.element_types(check_library=False), KEY)
+    assert row["fragment_ready"] is False
+
+
+def test_element_types_reports_the_fragment_once_published(tmp_path):
+    be = make_backend("dxf")
+    _capture_door(be)
+    entry = catalog.current().get(KEY)
+    catalog.current().publish_to(str(tmp_path / "elements.json"), entry, _fragment(be, entry))
+    row = _element_row(server.element_types(check_library=False), KEY)
+    assert row["fragment_ready"] is True
+
+
+def test_an_entry_with_no_fragment_carries_no_fragment_flag():
+    catalog.current().register(
+        {"key": "plain_col", "category": "structure", "op": "column", "params": {}}
+    )
+    row = _element_row(server.element_types(check_library=False), "plain_col")
+    assert "fragment_ready" not in row

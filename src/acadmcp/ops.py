@@ -226,17 +226,21 @@ def draw_wall_with_openings(
             "clamped_openings": 0,
             "total_length": round(total, 3),
             "symbols": 0,
+            "opening_positions": [],
             "closed": True,
         }
 
     seam_kind: str | None = None
+    seam_start = 0.0
     if closed:
+        seam_start = float(ops[0]["start"])
         ring, ops = _rebase_ring(ring, total, ops)
         seam_kind = ops[0].get("kind", "door")
     pts = ring
 
     wall_segments: list[tuple[float, float, bool, bool]] = []
     symbols: list[Any] = []
+    positions: list[dict[str, Any]] = []
     cursor = 0.0
     clamped = 0
     placed = 0
@@ -256,6 +260,20 @@ def draw_wall_with_openings(
             clamped += 1
         end = start + width
         kind = op.get("kind", "door")
+        # The caller measured `start` along their own run (or ring, from its first
+        # vertex); a closed ring is rebased internally, so the reply adds the seam back
+        # and answers in the caller's own numbers, plus the absolute point they can
+        # check against what they meant.
+        given = (start + seam_start) % total if closed else start
+        mid = geom.point_along(pts, start + width / 2.0)
+        positions.append(
+            {
+                "start": round(given, 3),
+                "width": round(width, 3),
+                "kind": kind,
+                "at": [round(mid[0], 3), round(mid[1], 3)],
+            }
+        )
         if start > cursor + 1e-6:
             wall_segments.append((cursor, start, _needs_cap(cursor, previous), kind == "opening"))
 
@@ -333,6 +351,7 @@ def draw_wall_with_openings(
         "clamped_openings": clamped,
         "total_length": round(total, 3),
         "symbols": len(symbols),
+        "opening_positions": positions,
         "element_openings": {"placed": placed, "skipped": failures},
         "closed": closed,
     }
@@ -506,10 +525,11 @@ def draw_door(
         )
 
     if tag:
+        tag_h = layers.text_height("tag", be.text_scale())
         mid = geom.polar(h, rotation, width / 2.0)
-        out = half + layers.H_TAG * 1.2 if tag_offset is None else tag_offset
+        out = half + tag_h * 1.2 if tag_offset is None else tag_offset
         pos = geom.add(mid, geom.mul(n, out))
-        made.append(be.text(pos, tag, layers.H_TAG, layer=tag_layer, align="center"))
+        made.append(be.text(pos, tag, tag_h, layer=tag_layer, align="center"))
     return made
 
 
@@ -544,10 +564,11 @@ def draw_window(
         )
 
     if tag:
+        tag_h = layers.text_height("tag", be.text_scale())
         mid = geom.polar(s, rotation, width / 2.0)
-        out = half + layers.H_TAG * 1.2 if tag_offset is None else tag_offset
+        out = half + tag_h * 1.2 if tag_offset is None else tag_offset
         pos = geom.add(mid, geom.mul(n, out))
-        made.append(be.text(pos, tag, layers.H_TAG, layer=tag_layer, align="center"))
+        made.append(be.text(pos, tag, tag_h, layer=tag_layer, align="center"))
     return made
 
 
@@ -682,13 +703,22 @@ def _label_room(
     c = geom.centroid(inner)
     if label_offset:
         c = (c[0], c[1] + label_offset)
-    name_h = layers.H_ROOM_NAME
+    scale = be.text_scale()
+    name_h = layers.text_height("room_name", scale)
     if name:
-        name_h = layers.fit_text_height(name, room_w, layers.H_ROOM_NAME)
+        # The fit alone would land off the nominal series (320 mm fits but is 3.2 mm
+        # on paper); snap down to the next series height so the label both fits and
+        # complies. Below the series minimum the fit stands — the room is the
+        # constraint, not the series.
+        fitted = layers.fit_text_height(name, room_w, name_h)
+        name_h = layers.snap_to_series(fitted, scale)
         be.text(c, name, name_h, layer=name_layer, align="center")
     if show_area:
         area_text = f"{area_m2:.2f}{layers.AREA_UNIT}"
-        area_h = layers.fit_text_height(area_text, room_w, layers.H_ROOM_AREA)
+        area_h = layers.snap_to_series(
+            layers.fit_text_height(area_text, room_w, layers.text_height("room_area", scale)),
+            scale,
+        )
         be.text(
             (c[0], c[1] - name_h * 1.4) if name else c,
             area_text,
@@ -705,6 +735,7 @@ def add_room_label(
     thickness: float = layers.WALL_THICKNESS,
     *,
     show_area: bool = True,
+    label_offset: float = 0.0,
     name_layer: str = "A-ROOM-NAME",
     area_layer: str = "A-ROOM-AREA",
     bound_layer: str | None = None,
@@ -718,7 +749,7 @@ def add_room_label(
     area_m2 = geom.area(inner) / 1_000_000.0
     if bound_layer:
         be.polyline(inner, closed=True, layer=bound_layer)
-    _label_room(be, inner, name, area_m2, name_layer, area_layer, show_area)
+    _label_room(be, inner, name, area_m2, name_layer, area_layer, show_area, label_offset)
     return {"name": name, "area_m2": round(area_m2, 3), "centroid": c}
 
 
@@ -802,10 +833,11 @@ def draw_stair(
     else:
         up_at = (mid_other + side, b[1])
         down_at = (mid_other + side, a[1])
+    label_h = layers.text_height("text", be.text_scale())
     if up_label:
-        be.text(up_at, up_label, layers.H_TEXT, layer="A-ANNO", align="center")
+        be.text(up_at, up_label, label_h, layer="A-ANNO", align="center")
     if down_label:
-        be.text(down_at, down_label, layers.H_TEXT, layer="A-ANNO", align="center")
+        be.text(down_at, down_label, label_h, layer="A-ANNO", align="center")
     return {"steps": steps, "axis": axis, "corners": ring}
 
 
@@ -830,11 +862,12 @@ def draw_lift(
         be.line(car[1], car[3], layer=layer),
     ]
     if tag:
+        tag_h = layers.text_height("text", be.text_scale())
         made.append(
             be.text(
-                ((x1 + x2) / 2.0, y1 - layers.H_TEXT * 1.2),
+                ((x1 + x2) / 2.0, y1 - tag_h * 1.2),
                 tag,
-                layers.H_TEXT,
+                tag_h,
                 layer=tag_layer,
                 align="center",
             )
@@ -869,11 +902,15 @@ def draw_shaft(
         with contextlib.suppress(Exception):
             made.append(be.hatch(ring, "ANSI37", hatch_scale, layer=layer))
     if name:
+        cap = layers.text_height("text", be.text_scale())
         made.append(
             be.text(
                 geom.centroid(ring),
                 name,
-                layers.fit_text_height(name, geom.dist(ring[0], ring[1]), layers.H_TEXT),
+                layers.snap_to_series(
+                    layers.fit_text_height(name, geom.dist(ring[0], ring[1]), cap),
+                    be.text_scale(),
+                ),
                 layer=tag_layer,
                 align="center",
             )
@@ -895,11 +932,15 @@ def draw_equipment(
     made: list[Any] = [be.polyline(ring, closed=True, layer=layer)]
     if name:
         c = geom.centroid(ring)
+        cap = layers.text_height("text", be.text_scale())
         made.append(
             be.text(
                 c,
                 name,
-                layers.fit_text_height(name, geom.dist(ring[0], ring[1]), layers.H_TEXT),
+                layers.snap_to_series(
+                    layers.fit_text_height(name, geom.dist(ring[0], ring[1]), cap),
+                    be.text_scale(),
+                ),
                 layer=tag_layer,
                 align="center",
             )
@@ -920,14 +961,19 @@ def draw_axis_grid(
     x_labels: Sequence[str] | None = None,
     y_labels: Sequence[str] | None = None,
     extent: tuple[float, float, float, float],
-    bubble_r: float = layers.AXIS_BUBBLE_R,
+    bubble_r: float | None = None,
     layer: str = "A-AXIS",
     text_layer: str = "A-AXIS-TEXT",
 ) -> dict[str, Any]:
     """Draw the structural grid with circled axis bubbles, as on the reference sheet.
 
     `extent` is (min_x, min_y, max_x, max_y) that the grid lines should span.
+    `bubble_r` defaults to 4 mm of paper at the sheet's scale; the label inside is
+    the series height for an axis (5 mm of paper), not a fraction of the bubble.
     """
+    if bubble_r is None:
+        bubble_r = layers.AXIS_BUBBLE_R * (be.text_scale() / 100.0)
+    label_h = layers.text_height("axis", be.text_scale())
     min_x, min_y, max_x, max_y = extent
     x_labels = list(x_labels) if x_labels else [str(i + 1) for i in range(len(x_positions))]
     y_labels = list(y_labels) if y_labels else [_alpha(i) for i in range(len(y_positions))]
@@ -943,14 +989,14 @@ def draw_axis_grid(
         tip = max_y + bubble_r * 2.0
         be.line((pos, max_y), (pos, tip - bubble_r), layer=layer)
         be.circle((pos, tip), bubble_r, layer=layer)
-        be.text((pos, tip), label, bubble_r * 1.1, layer=text_layer, align="center")
+        be.text((pos, tip), label, label_h, layer=text_layer, align="center")
 
     for pos, label in zip(y_positions, y_labels, strict=False):
         be.line((min_x, pos), (max_x, pos), layer=layer, linetype="CENTER")
         tip = max_x + bubble_r * 2.0
         be.line((max_x, pos), (tip - bubble_r, pos), layer=layer)
         be.circle((tip, pos), bubble_r, layer=layer)
-        be.text((tip, pos), label, bubble_r * 1.1, layer=text_layer, align="center")
+        be.text((tip, pos), label, label_h, layer=text_layer, align="center")
 
     return {"x_axes": len(x_positions), "y_axes": len(y_positions)}
 
@@ -965,6 +1011,22 @@ def _alpha(i: int) -> str:
     return letters
 
 
+def _readable_span(p1: Point, p2: Point, offset: float) -> tuple[Point, Point, float]:
+    """The same dimension, with its span ordered so the text reads left-to-right.
+
+    An aligned dimension's text runs along p1 -> p2: a span given right-to-left (or
+    top-to-bottom) renders the value mirrored, with no error and nothing for
+    critique to catch — a sandbox agent only found it in a screenshot. Swapping the
+    endpoints flips which side is "left of travel", so the offset is negated with
+    the swap and the dimension line lands exactly where the caller put it.
+    """
+    a, b = geom.xy(p1), geom.xy(p2)
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    if dx < 0.0 or (dx == 0.0 and dy < 0.0):
+        return b, a, -float(offset)
+    return a, b, float(offset)
+
+
 def dimension_between(
     be: Backend,
     p1: Point,
@@ -977,7 +1039,10 @@ def dimension_between(
         # The dimension line's direction is the point span itself; a coincident
         # pair divides by it and the backend answers ZeroDivisionError.
         raise ValueError("a dimension needs two distinct points")
-    return be.linear_dimension(p1, p2, offset, layer=layer, text_height=layers.H_DIM)
+    p1, p2, offset = _readable_span(p1, p2, offset)
+    return be.linear_dimension(
+        p1, p2, offset, layer=layer, text_height=layers.text_height("dim", be.text_scale())
+    )
 
 
 def dimension_chain(
@@ -1006,13 +1071,15 @@ def annotate(
     pos: Point,
     text: str,
     *,
-    height: float = layers.H_TEXT,
+    height: float | None = None,
     rotation: float = 0.0,
     layer: str = "A-ANNO",
     align: str = "left",
 ) -> Any:
     if align not in ("left", "center", "right", "top-center"):
         raise ValueError(f"align must be 'left', 'center', 'right' or 'top-center', got {align!r}")
+    if height is None:
+        height = layers.text_height("text", be.text_scale())
     return be.text(pos, text, height, layer=layer, rotation=rotation, align=align)
 
 
@@ -1023,10 +1090,12 @@ def leader_note(
     *,
     direction: float = 45.0,
     length: float = 1500.0,
-    height: float = layers.H_TEXT,
+    height: float | None = None,
     layer: str = "A-ANNO",
 ) -> list[Any]:
     """A one-segment leader with the note text at its far end."""
+    if height is None:
+        height = layers.text_height("text", be.text_scale())
     tail = geom.polar(anchor, direction, length)
     made = [be.line(anchor, tail, layer=layer)]
     made.append(
@@ -1107,7 +1176,7 @@ def place_element(
     tag: str | None = None,
     tag_offset: float | None = None,
     tag_layer: str = "A-ANNO",
-    tag_height: float = layers.H_TAG,
+    tag_height: float | None = None,
     width: float | None = None,
 ) -> list[Any]:
     """Place one catalogue element, as a library block or as its parametric twin.
@@ -1176,6 +1245,8 @@ def place_element(
         )
 
     if tag:
+        if tag_height is None:
+            tag_height = layers.text_height("tag", be.text_scale())
         made.append(_element_tag(be, tag, at, tag_offset, tag_layer, tag_height))
     return made
 

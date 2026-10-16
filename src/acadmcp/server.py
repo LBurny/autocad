@@ -1439,6 +1439,11 @@ def draw_wall_with_openings(
 
     The returned `symbols` counts every entity of every symbol, tag texts
     included, so a tagged door counts more than an untagged one.
+
+    The reply's `opening_positions` lists each opening actually cut, with the
+    caller's own `start`, the width that was drawn (trimmed if it ran off the
+    end), and `at` — the absolute point of the opening's centre — so a
+    mis-measured start is caught against intent rather than discovered on paper.
     """
     pts = _pts(points)
     params = {
@@ -1464,6 +1469,7 @@ def draw_room(
     show_area: bool = True,
     bound_layer: str | None = None,
     walls: bool = True,
+    label_offset: float = 0.0,
 ) -> dict[str, Any]:
     """Wall a room in, then label it with its name and computed area in m².
 
@@ -1472,6 +1478,9 @@ def draw_room(
     walls=False only the label (and optional bound face) is drawn — for a room
     whose walls exist already. `thickness` must match the walls actually drawn:
     the default 200 against a 120 mm partition ring silently shrinks the area.
+
+    The label sits on the room's centroid; `label_offset` (mm) raises it along +Y
+    when a stair or a piece of equipment occupies the middle of the room.
     """
     pts = _pts(boundary)
     params = {
@@ -1482,6 +1491,7 @@ def draw_room(
         "show_area": show_area,
         "bound_layer": bound_layer,
         "walls": walls,
+        "label_offset": float(label_offset),
     }
     # The name is the step's label as well as a parameter, so the history reads
     # "draw_room 测试室" rather than a wall of coordinates.
@@ -1494,11 +1504,18 @@ def draw_room(
                 float(thickness),
                 hatch=hatch,
                 show_area=show_area,
+                label_offset=float(label_offset),
                 bound_layer=bound_layer,
             )
         else:
             result = ops.add_room_label(
-                be, pts, name, float(thickness), show_area=show_area, bound_layer=bound_layer
+                be,
+                pts,
+                name,
+                float(thickness),
+                show_area=show_area,
+                label_offset=float(label_offset),
+                bound_layer=bound_layer,
             )
     return {"ok": True, **result}
 
@@ -1675,12 +1692,14 @@ def draw_axis_grid(
     extent: Any,
     x_labels: Any = None,
     y_labels: Any = None,
-    bubble_r: float = layers.AXIS_BUBBLE_R,
+    bubble_r: float | None = None,
 ) -> dict[str, Any]:
     """Draw the structural grid: centre lines, bubbles and axis labels.
 
     `extent` is [min_x, min_y, max_x, max_y]. x_labels default to 1,2,3...,
-    y_labels to A,B,C...
+    y_labels to A,B,C... `bubble_r` defaults to 4 mm of paper at the sheet's
+    plot scale (400 mm at 1:100); the axis label inside is the standard's 5 mm
+    paper height, whatever the scale.
     """
     xs = [float(v) for v in x_positions]
     ys = [float(v) for v in y_positions]
@@ -1693,7 +1712,7 @@ def draw_axis_grid(
         "extent": ex,
         "x_labels": x_labels,
         "y_labels": y_labels,
-        "bubble_r": float(bubble_r),
+        "bubble_r": None if bubble_r is None else float(bubble_r),
     }
     with _auto_step("draw_axis_grid", params) as be:
         result = ops.draw_axis_grid(
@@ -1703,7 +1722,7 @@ def draw_axis_grid(
             x_labels=x_labels,
             y_labels=y_labels,
             extent=(ex[0], ex[1], ex[2], ex[3]),
-            bubble_r=float(bubble_r),
+            bubble_r=None if bubble_r is None else float(bubble_r),
         )
     return {"ok": True, **result}
 
@@ -1712,17 +1731,21 @@ def draw_axis_grid(
 def add_text(
     pos: Any,
     text: str,
-    height: float = layers.H_TEXT,
+    height: float | None = None,
     rotation: float = 0.0,
     align: str = "left",
     layer: str = "A-ANNO",
 ) -> dict[str, Any]:
-    """Place single-line text. align is left, center, right or top-center."""
+    """Place single-line text. align is left, center, right or top-center.
+
+    `height` defaults to the standard's 3.5 mm paper height at the sheet's plot
+    scale (350 mm at 1:100) — pass a value only to override it deliberately.
+    """
     pos_pt = _pt(pos)
     params = {
         "pos": pos_pt,
         "text": text,
-        "height": float(height),
+        "height": None if height is None else float(height),
         "rotation": float(rotation),
         "align": align,
         "layer": layer,
@@ -1732,7 +1755,7 @@ def add_text(
             be,
             pos_pt,
             text,
-            height=float(height),
+            height=None if height is None else float(height),
             rotation=float(rotation),
             layer=layer,
             align=align,
@@ -1746,12 +1769,13 @@ def add_leader_note(
     text: str,
     direction: float = 45.0,
     length: float = 1500.0,
-    height: float = layers.H_TEXT,
+    height: float | None = None,
 ) -> dict[str, Any]:
     """Draw a one-segment leader from `anchor` with the note at its far end.
 
     Anchor on the boundary of what is being noted: an anchor inside a SOLID
-    hatch disappears under the fill.
+    hatch disappears under the fill. `height` defaults to the standard's 3.5 mm
+    paper height at the sheet's plot scale (350 mm at 1:100).
     """
     anchor_pt = _pt(anchor)
     params = {
@@ -1759,7 +1783,7 @@ def add_leader_note(
         "text": text,
         "direction": float(direction),
         "length": float(length),
-        "height": float(height),
+        "height": None if height is None else float(height),
     }
     with _auto_step("add_leader_note", params) as be:
         ops.leader_note(
@@ -1768,7 +1792,7 @@ def add_leader_note(
             text,
             direction=float(direction),
             length=float(length),
-            height=float(height),
+            height=None if height is None else float(height),
         )
     return {"ok": True}
 
@@ -1779,8 +1803,10 @@ def add_dimension(points: Any, offset: float = layers.DIM_OFFSET) -> dict[str, A
 
     Two points give a single dimension; three or more give a chain along the
     run, plus the overall dimension. The dimension line lands on the LEFT of
-    the travel direction for a positive `offset` — so a south edge dimensioned
-    east-to-west needs a negative offset to fall outside the building.
+    the travel direction for a positive `offset` — a south edge dimensioned
+    east-to-west therefore takes a *positive* offset to fall outside the
+    building. Either point order draws that same line; a reversed span is
+    normalised before drawing so the value never reads mirrored.
     """
     pts = _pts(points)
     params = {"points": pts, "offset": float(offset)}
@@ -2170,6 +2196,10 @@ def element_types(category: str | None = None, check_library: bool = True) -> El
     institute's model numbers and wall thicknesses are its own — and this reports anything
     that could not be read, anything it had to skip, and every entry whose block the
     library has not got.
+
+    An entry placed by `insert_captured` also carries `fragment_ready`: whether its geometry
+    fragment resolves to a file on disk. False means the drawing that captured the element
+    can still place it, but a fresh drawing cannot until it is published (element_publish).
     """
     loaded = catalog.current()
     out: dict[str, Any] = {
@@ -2178,7 +2208,7 @@ def element_types(category: str | None = None, check_library: bool = True) -> El
         "skipped": loaded.skipped,
         "library": {str(path): library for path, library in loaded.libraries.items()},
         "categories": {
-            name: [element.describe() for element in items]
+            name: [_describe_element(loaded, element) for element in items]
             for name, items in loaded.by_category(category).items()
         },
     }
@@ -2195,6 +2225,15 @@ def element_types(category: str | None = None, check_library: bool = True) -> El
                 "catalogue entry, not of the active backend"
             )
     return out
+
+
+def _describe_element(loaded: catalog.Catalog, element: catalog.Element) -> dict[str, Any]:
+    """One catalogue row, with `fragment_ready` added where a fragment exists to be ready."""
+    row = element.describe()
+    ready = loaded.fragment_ready(element)
+    if ready is not None:
+        row["fragment_ready"] = ready
+    return row
 
 
 def _check_catalog(loaded: catalog.Catalog) -> list[str]:
@@ -2256,7 +2295,7 @@ def place_element(
             tag=tags[0] if tags else None,
             tag_offset=tag_offset,
         )
-        return {"placed": 1}
+        return {"placed": 1, "tag": tags[0] if tags else None}
 
     return _placement(
         be,
