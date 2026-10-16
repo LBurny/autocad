@@ -450,7 +450,87 @@ public static class SelfTest
 
         CheckBlocks(engine, db, report);
 
+        CheckErasedHandles(engine, db, report);
+
         MeasureAtScale(engine, report);
+    }
+
+    /// <summary>
+    /// A rollback across an entity a person erased by hand.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is the case the whole erase-by-handle design exists to tolerate — "it is not
+    /// disturbed by the user having typed a few commands in between" — and it did not work.
+    /// <see cref="StepEngine.Erase"/> guarded on <c>IsNull</c>/<c>IsValid</c> and then opened the
+    /// handle with <c>openErased: false</c>, which <em>raises</em> <c>eWasErased</c> instead of
+    /// answering null, so the <c>obj is null || obj.IsErased</c> test after it was unreachable
+    /// and the erased handle was never skipped. Measured live on the build before the guard
+    /// went in, with one entity of step 2 deleted through COM: <c>rollback_to(1)</c> answered
+    /// <c>{"ok": false, "message": "rollback failed: eWasErased"}</c>, <c>touched</c> was empty,
+    /// and the journal still said two steps were applied while one entity was gone. The same
+    /// call with both entities alive answered <c>ok: true, "erased 1 entity/ies"</c>.
+    /// </para>
+    /// <para>
+    /// Which also settles the question the guard rested on: <c>ObjectId.IsValid</c> is
+    /// <b>true</b> for an erased object. If it had been false, the old guard would have
+    /// skipped the handle and no <c>eWasErased</c> could have been raised.
+    /// </para>
+    /// </remarks>
+    private static void CheckErasedHandles(StepEngine engine, Database db, Report report)
+    {
+        var (wall, room, stair) = Seed(engine);
+        report.Check("a scenario is drawn for the erased-handle check",
+            wall.Ok && room.Ok && stair.Ok, room.Message);
+
+        var doomed = engine.Journal.At(2)!.ObjectsAfter.FirstOrDefault() ?? "";
+        report.Check("the step under test owns an entity to delete", doomed.Length > 0, doomed);
+
+        EraseByHand(engine.Document, doomed);
+        report.Check("the entity is gone while the journal still claims the step",
+            CountPresent(db, [doomed]) == 0 && engine.Journal.At(2)!.IsApplied,
+            $"present={CountPresent(db, [doomed])} state={engine.Journal.At(2)!.State}");
+
+        var reverted = engine.RollbackTo(1);
+        report.Check("a rollback across an entity erased by hand succeeds",
+            reverted.Ok, reverted.Message);
+        report.Check("it reverted the step rather than aborting half way",
+            engine.Journal.Applied.Count() == 1 && engine.Journal.At(2)!.State == StepState.Planned,
+            $"applied={engine.Journal.Applied.Count()} state={engine.Journal.At(2)!.State}");
+
+        // The step above the deleted entity still has to go, or the tolerant skip would have
+        // become a silent no-op: one erased handle must not stop the rest of the rollback.
+        var survivorAbove = engine.Journal.At(3)!.ObjectsAfter.ToList();
+        report.Check("and its neighbours' entities went with it",
+            CountPresent(db, survivorAbove) == 0, $"present={CountPresent(db, survivorAbove)}");
+
+        engine.RollbackTo(0, force: true);
+        engine.Reset();
+        report.Check("the erased-handle check left no steps behind", engine.Journal.IsEmpty);
+    }
+
+    /// <summary>Delete one entity the way the user would: outside any step, by hand.</summary>
+    /// <remarks>
+    /// It takes the document, not the database, because opening anything <c>ForWrite</c> in the
+    /// open drawing needs the document lock: without it AutoCAD answers <c>eLockViolation</c>.
+    /// That is the same rule the engine's own readers and writers follow, and the first version
+    /// of this helper learned it the hard way — the test suite stopped at this check.
+    /// </remarks>
+    private static void EraseByHand(Document document, string handle)
+    {
+        var db = document.Database;
+        if (!long.TryParse(handle, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var value)
+            || !db.TryGetObjectId(new Handle(value), out var id) || id.IsNull || id.IsErased)
+        {
+            return;
+        }
+        using var docLock = document.LockDocument();
+        using var tr = db.TransactionManager.StartTransaction();
+        if (tr.GetObject(id, OpenMode.ForWrite, openErased: false) is Entity entity && !entity.IsErased)
+        {
+            entity.Erase();
+        }
+        tr.Commit();
     }
 
     /// <summary>

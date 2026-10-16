@@ -906,15 +906,30 @@ so the wait is bounded by the work rather than by AutoCAD's idleness), and a que
 down while a request was in flight says "the plugin has been unloaded" instead of blaming
 AutoCAD's idleness.
 
-**An erased entity made every rollback that covered it fail forever.** `StepEngine.Erase`
-guarded on `IsNull`/`IsValid` and then opened with `openErased: false` — and opening an
-erased object that way *raises* `eWasErased` rather than answering null, so the `obj is
-null || obj.IsErased` test after it was unreachable. The comment underneath already promised
-the right behaviour ("already deleted by the user or by an earlier edit: nothing to do"),
-which is the tell that the guard was the bug. `id.IsErased` is now checked before the open,
-in `Erase` and in `JournalStore.Trash` alike; the codebase's own reader in `SelfTest.Read`
-and `CountPresent` checked `IsValid` *and* `IsErased` all along, which is what a reader does
-when the two are not the same question.
+**An erased entity made every rollback that covered it fail forever, and `IsValid` is not why.**
+`StepEngine.Erase` guarded on `IsNull`/`IsValid` and then opened with `openErased: false` — and
+opening an erased object that way *raises* `eWasErased` rather than answering null, so the
+`obj is null || obj.IsErased` test after it was unreachable. The comment underneath already
+promised the right behaviour ("already deleted by the user or by an earlier edit: nothing to
+do"), which is the tell that the guard was the bug. `id.IsErased` is now checked before the
+open, in `Erase` and in `JournalStore.Trash` alike.
+
+Measured live on 2026-10-16, both directions, on the same experiment (draw two steps, delete
+step 2's entity through COM, then `rollback_to(1)`): the build before the guard answered
+`{"ok": false, "message": "rollback failed: eWasErased", "touched": []}` and erased nothing
+while the journal still said two steps were applied; the build with it answered `{"ok": true,
+"message": "reverted 1 step(s), erased 0 entity/ies", "touched": [2]}` — "erased 0" being
+correct, since the only handle it had to remove was already gone. The control case with both
+entities alive answered ok in both builds.
+
+That also answers the question the guard rested on: **`ObjectId.IsValid` is true for an erased
+object.** Had it been false the old guard would have skipped the handle and no `eWasErased`
+could have been raised, so the added `IsErased` check is load-bearing rather than
+belt-and-braces. The same finding is now a permanent self-test check,
+`SelfTest.CheckErasedHandles` ("a rollback across an entity erased by hand succeeds", with its
+neighbour's entities asserted gone too, so a tolerant skip cannot quietly become a no-op) —
+and writing it cost a run: deleting from the open drawing needs `doc.LockDocument()`, or
+AutoCAD answers `eLockViolation` and takes the whole suite down with it.
 
 **`JournalStore.Load` bounded its walk by the meta count, which is a distinct-key total.**
 With a hole in the middle — a truncated chunk chain, a hand-edited dictionary — the count is
@@ -924,9 +939,7 @@ into a multi-gigabyte allocation that no reader can catch. The walk is bounded b
 index present, which is the one number that cannot disagree with the records. `Chunk` had the
 same shape of defect: it shortened a chunk by one character to keep a surrogate pair together
 and then advanced by the full chunk anyway, dropping that character — latent only because the
-stored JSON escapes every non-ASCII character, so no surrogate reaches it today. **This is the
-one fix in that round that could not be measured on this machine**: whether `IsValid` already
-absorbs erased ids needs a live AutoCAD to settle, and `id.IsErased` is harmless either way.
+stored JSON escapes every non-ASCII character, so no surrogate reaches it today.
 
 **`PlanReject` raised where `PlanRollback` refused.** Index 0 is the value `rollback_to`
 accepts and documents as "before every step", and reject takes the same argument — so
